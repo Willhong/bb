@@ -680,7 +680,7 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
                 className={cn(
                   "ml-auto inline-flex shrink-0 items-center gap-0.5 text-2xs text-subtle-foreground opacity-70 transition-opacity duration-[120ms] ease-out",
                   !isProcessing &&
-                    "group-hover/row:opacity-0 group-focus-within/row:opacity-0 [@media(hover:none)]:opacity-0",
+                    "max-md:opacity-0 group-hover/row:opacity-0 group-focus-within/row:opacity-0 [@media(hover:none)]:opacity-0",
                 )}
                 role="img"
                 aria-label={
@@ -709,6 +709,7 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
                   "pointer-events-none absolute right-2.5 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded-md opacity-0 transition-opacity duration-[120ms] ease-out md:flex",
                   "group-hover/row:pointer-events-auto group-hover/row:opacity-100",
                   "group-focus-within/row:pointer-events-auto group-focus-within/row:opacity-100",
+                  "[@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
                 )}
               >
                 <Tooltip>
@@ -783,11 +784,7 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
                   variant="ghost"
                   className={cn(
                     QUEUED_MESSAGE_ACTION_TAKEOVER_CLASS,
-                    "pointer-events-none absolute right-2.5 top-1/2 shrink-0 -translate-y-1/2 text-muted-foreground opacity-0 transition-opacity duration-[120ms] ease-out md:hidden",
-                    "group-hover/row:pointer-events-auto group-hover/row:opacity-100",
-                    "group-focus-within/row:pointer-events-auto group-focus-within/row:opacity-100",
-                    "data-[state=open]:pointer-events-auto data-[state=open]:opacity-100",
-                    "[@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
+                    "pointer-events-auto absolute right-2.5 top-1/2 shrink-0 -translate-y-1/2 text-muted-foreground opacity-100 transition-opacity duration-[120ms] ease-out md:hidden",
                     compact ? "size-7" : "size-8",
                   )}
                   disabled={actionDisabled}

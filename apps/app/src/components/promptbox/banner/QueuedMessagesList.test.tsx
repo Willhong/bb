@@ -292,7 +292,7 @@ describe("QueuedMessagesList", () => {
     ).toBe("collapsed");
   });
 
-  it("uses labeled hover-revealed icon actions on desktop and an overflow menu on mobile widths", async () => {
+  it("uses labeled hover-revealed icon actions on desktop and an always-visible overflow menu on mobile widths", async () => {
     const { container, findByRole, getByRole, queryByRole } =
       renderQueuedMessages([
         makeQueuedMessage("q_one", "First queued message"),
@@ -307,12 +307,25 @@ describe("QueuedMessagesList", () => {
     const deleteButton = getByRole("button", {
       name: "Delete queued message 1",
     });
+    const overflowButton = getByRole("button", {
+      name: "Queued message 1 actions",
+    });
 
-    expect(
-      getByRole("button", { name: "Queued message 1 actions" }),
-    ).toBeTruthy();
+    expect(sendButton.closest("div")?.className).toContain("opacity-0");
+    expect(sendButton.closest("div")?.className).toContain("md:flex");
+    expect(sendButton.closest("div")?.className).toContain("hidden");
+    expect(sendButton.closest("div")?.className).toContain("absolute");
+    expect(sendButton.closest("div")?.className).toContain(
+      "[@media(hover:none)]:opacity-100",
+    );
     expect(editButton).toBeTruthy();
     expect(deleteButton).toBeTruthy();
+    expect(overflowButton.className).toContain("md:hidden");
+    expect(overflowButton.className).toContain("pointer-events-auto");
+    expect(overflowButton.className).toContain("opacity-100");
+    expect(overflowButton.className).not.toContain(
+      "group-hover/row:opacity-100",
+    );
     expect(container.querySelector('[data-icon="Sent"]')).not.toBeNull();
     expect(container.querySelector('[data-icon="Edit"]')).not.toBeNull();
     expect(container.querySelector('[data-icon="Trash2"]')).not.toBeNull();
@@ -981,6 +994,43 @@ describe("QueuedMessagesList", () => {
     expect(container.textContent).toContain(
       "Attachment only ([notes](https://example.test).md)",
     );
+  });
+
+  it("shows a FileAttachment icon instead of attachment prose", () => {
+    const queuedMessage = makeQueuedMessage(
+      "q_attachment_icon",
+      "Review the attached screenshot",
+    );
+    queuedMessage.content.push({
+      type: "localFile",
+      path: "/tmp/screenshot.png",
+      name: "screenshot.png",
+    });
+
+    const { container, getByRole } = renderQueuedMessages([queuedMessage]);
+
+    expect(getByRole("img", { name: "1 attachment" }).textContent).toBe("1");
+    const attachment = getByRole("img", { name: "1 attachment" });
+    expect(attachment.className).toContain("ml-auto");
+    expect(attachment.className).toContain("group-hover/row:opacity-0");
+    expect(attachment.className).toContain("group-focus-within/row:opacity-0");
+    expect(attachment.className).toContain("max-md:opacity-0");
+    expect(attachment.className).toContain("[@media(hover:none)]:opacity-0");
+    expect(attachment.className).toContain("duration-[120ms]");
+    const actions = container.querySelector("[data-queued-message-actions]");
+    expect(actions?.className).toContain("right-2.5");
+    expect(actions?.className).toContain("before:w-4");
+    expect(actions?.className).toContain("before:from-transparent");
+    expect(actions?.className).toContain("duration-[120ms]");
+    expect(
+      container.querySelector('[data-icon="FileAttachment"]'),
+    ).not.toBeNull();
+    expect(
+      container
+        .querySelector('[title="Review the attached screenshot"]')
+        ?.classList.contains("fade-clip-right"),
+    ).toBe(false);
+    expect(container.textContent).not.toContain("1 attachment");
   });
 
   it("keeps attachment state visible while processing and counts multiple files", () => {
