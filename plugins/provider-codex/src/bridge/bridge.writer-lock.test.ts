@@ -1,10 +1,15 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { experimental_createBridgeJsonRpcTestHarness as createBridgeJsonRpcTestHarness } from "@get-bb/plugin-sdk/provider-bridge/testing";
 import { handleLine } from "./bridge.js";
+import {
+  cleanupBridgeProcessTest,
+  spawnedAppServerPids,
+  waitForAppServerProcessStep,
+} from "./bridge-process.test-support.js";
 
 const THREAD_ID = "thr_writer_lock_1";
 const PROVIDER_THREAD_ID = "codex-writer-lock-1";
@@ -27,9 +32,9 @@ const changedSessionOptions = {
 } as const;
 
 let harness: ReturnType<typeof createBridgeJsonRpcTestHarness>;
-let workspaceDir: string;
-let processLogPath: string;
-let writerLockPath: string;
+let workspaceDir = "";
+let processLogPath = "";
+let writerLockPath = "";
 
 beforeEach(() => {
   workspaceDir = mkdtempSync(join(tmpdir(), "bb-codex-writer-lock-"));
@@ -53,51 +58,16 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  const cleanupId = 995_001;
-  harness.sendRequest(cleanupId, "thread/stop", {
+  await cleanupBridgeProcessTest({
+    harness,
+    cleanupId: 995_001,
     threadId: THREAD_ID,
     providerThreadId: PROVIDER_THREAD_ID,
-    intent: "release",
-    activeTurnId: null,
+    processLogPath,
+    workspaceDir,
+    unstubEnvs: vi.unstubAllEnvs,
   });
-  await harness.waitForResponse(cleanupId).catch(() => undefined);
-  await waitForAppServerChildrenToExit();
-  harness.restore();
-  vi.unstubAllEnvs();
-  rmSync(workspaceDir, { recursive: true, force: true });
 });
-
-function spawnedAppServerPids(): number[] {
-  return readFileSync(processLogPath, "utf8")
-    .split("\n")
-    .filter((line) => line.startsWith("spawn:"))
-    .map((line) => Number(line.split(":")[1]));
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error instanceof Error && Reflect.get(error, "code") === "ESRCH") {
-      return false;
-    }
-    throw error;
-  }
-}
-
-async function waitForAppServerChildrenToExit(): Promise<void> {
-  const childPids = spawnedAppServerPids();
-  const deadline = Date.now() + 15_000;
-  while (childPids.some(processIsAlive)) {
-    if (Date.now() > deadline) {
-      throw new Error(
-        `Timed out waiting for app-server children to exit: ${JSON.stringify(childPids.filter(processIsAlive))}`,
-      );
-    }
-    await new Promise((resolveTick) => setTimeout(resolveTick, 20));
-  }
-}
 
 async function resumeThread(id: number): Promise<void> {
   harness.sendRequest(id, "thread/resume", {
@@ -136,34 +106,95 @@ it("finishes releasing the writer before acknowledging thread stop", async () =>
     activeTurnId: null,
   });
   expect((await harness.waitForResponse(2)).error).toBeUndefined();
+  expect(existsSync(writerLockPath)).toBe(false);
 
   await resumeThread(3);
 }, 30_000);
 
-it("retries a resume while another Codex process is releasing the writer", async () => {
-  writeFileSync(writerLockPath, String(process.pid));
-  const foreignWriterReleased = new Promise<void>((resolve) => {
-    setTimeout(() => {
-      rmSync(writerLockPath, { force: true });
-      resolve();
-    }, 150);
-  });
+it("does not install a replacement after a concurrent release is acknowledged", async () => {
+  await resumeThread(1);
 
-  harness.sendRequest(1, "thread/resume", {
+  harness.sendRequest(2, "turn/start", {
     threadId: THREAD_ID,
     providerThreadId: PROVIDER_THREAD_ID,
-    cwd: workspaceDir,
-    instructionMode: "append",
-    options: sessionOptions,
+    clientRequestId: "creq_abcdefghjk",
+    input: [{ type: "text", text: "hello", mentions: [] }],
+    options: changedSessionOptions,
   });
-  const resumed = await harness.waitForResponse(1);
-  await foreignWriterReleased;
+  await waitForAppServerProcessStep(processLogPath, "sigterm");
 
-  expect(resumed.error).toBeUndefined();
-  expect(resumed.result).toEqual({
+  harness.sendRequest(3, "thread/stop", {
+    threadId: THREAD_ID,
     providerThreadId: PROVIDER_THREAD_ID,
-    sessionRestorable: true,
+    intent: "release",
+    activeTurnId: null,
   });
+  expect((await harness.waitForResponse(3)).error).toBeUndefined();
+
+  const rebuiltTurn = await harness.waitForResponse(2);
+  expect(rebuiltTurn.error).toBeDefined();
+  expect(
+    harness.messages.filter((message) => message.method === "session/replaced"),
+  ).toHaveLength(0);
+  expect(spawnedAppServerPids(processLogPath)).toHaveLength(1);
+}, 30_000);
+
+it("does not install a replacement after concurrent discard maintenance settles", async () => {
+  await resumeThread(1);
+
+  harness.sendRequest(2, "turn/start", {
+    threadId: THREAD_ID,
+    providerThreadId: PROVIDER_THREAD_ID,
+    clientRequestId: "creq_abcdefghjk",
+    input: [{ type: "text", text: "hello", mentions: [] }],
+    options: changedSessionOptions,
+  });
+  await waitForAppServerProcessStep(processLogPath, "sigterm");
+
+  harness.sendRequest(3, "thread/discard", {
+    threadId: THREAD_ID,
+    providerThreadId: PROVIDER_THREAD_ID,
+  });
+  expect((await harness.waitForResponse(3)).result).toEqual({ ok: true });
+
+  const rebuiltTurn = await harness.waitForResponse(2);
+  expect(rebuiltTurn.error).toBeDefined();
+  expect(
+    harness.messages.filter((message) => message.method === "session/replaced"),
+  ).toHaveLength(0);
+  expect(spawnedAppServerPids(processLogPath)).toHaveLength(2);
+}, 30_000);
+
+it("retries a resume while another Codex process is releasing the writer", async () => {
+  writeFileSync(writerLockPath, String(process.pid));
+  const stderrWrite = vi
+    .spyOn(process.stderr, "write")
+    .mockImplementation(() => true);
+
+  try {
+    harness.sendRequest(1, "thread/resume", {
+      threadId: THREAD_ID,
+      providerThreadId: PROVIDER_THREAD_ID,
+      cwd: workspaceDir,
+      instructionMode: "append",
+      options: sessionOptions,
+    });
+    await waitForAppServerProcessStep(processLogPath, "writer-conflict");
+    rmSync(writerLockPath, { force: true });
+    const resumed = await harness.waitForResponse(1);
+
+    expect(resumed.error).toBeUndefined();
+    expect(resumed.result).toEqual({
+      providerThreadId: PROVIDER_THREAD_ID,
+      sessionRestorable: true,
+    });
+    expect(stderrWrite).toHaveBeenCalledWith(
+      "codex thread/resume found an active rollout writer; retrying in 100ms (1/3).\n",
+    );
+  } finally {
+    stderrWrite.mockRestore();
+    rmSync(writerLockPath, { force: true });
+  }
 }, 30_000);
 
 it("explains persistent writer contention and resumes after the owner closes", async () => {
@@ -179,8 +210,8 @@ it("explains persistent writer contention and resumes after the owner closes", a
   const blocked = await harness.waitForResponse(1);
   rmSync(writerLockPath, { force: true });
 
-  expect(blocked.error?.message).toContain(
-    "Close the other Codex session and retry",
+  expect(blocked.error?.message).toBe(
+    `thread ${PROVIDER_THREAD_ID} already has an active writer. Another Codex process still owns this thread. Close any other Codex session using it; if none is open, wait for a previous Codex process to finish shutting down or stop the leftover codex app-server process, then retry.`,
   );
   await resumeThread(2);
 }, 30_000);

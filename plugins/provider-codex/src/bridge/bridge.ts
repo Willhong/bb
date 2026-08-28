@@ -328,7 +328,7 @@ function archivedSessionHint(message: string): ProviderRecoveryHint | null {
 
 function withActiveWriterGuidance(message: string): string {
   return CODEX_ACTIVE_WRITER_ERROR_PATTERN.test(message)
-    ? `${message}. Close the other Codex session and retry.`
+    ? `${message}. Another Codex process still owns this thread. Close any other Codex session using it; if none is open, wait for a previous Codex process to finish shutting down or stop the leftover codex app-server process, then retry.`
     : message;
 }
 
@@ -917,7 +917,10 @@ async function requestThreadConstructionWithWriterRetry(
       resultSchema: codexThreadIdentityResultSchema,
       timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
     });
-  for (const retryDelayMs of CODEX_ACTIVE_WRITER_RETRY_DELAYS_MS) {
+  for (const [
+    retryIndex,
+    retryDelayMs,
+  ] of CODEX_ACTIVE_WRITER_RETRY_DELAYS_MS.entries()) {
     try {
       return await sendOnce();
     } catch (error) {
@@ -925,6 +928,9 @@ async function requestThreadConstructionWithWriterRetry(
       if (!CODEX_ACTIVE_WRITER_ERROR_PATTERN.test(message)) {
         throw error;
       }
+      process.stderr.write(
+        `codex ${method} found an active rollout writer; retrying in ${retryDelayMs}ms (${retryIndex + 1}/${CODEX_ACTIVE_WRITER_RETRY_DELAYS_MS.length}).\n`,
+      );
       await delay(retryDelayMs);
     }
   }

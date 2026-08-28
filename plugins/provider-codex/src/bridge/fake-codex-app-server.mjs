@@ -413,6 +413,7 @@ async function handleRequest(message) {
     }
     case "thread/resume": {
       if (!acquireWriterLock()) {
+        logProcessStep("writer-conflict");
         respondError(
           id,
           -32603,
