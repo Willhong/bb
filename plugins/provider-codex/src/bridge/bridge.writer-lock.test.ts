@@ -130,6 +130,7 @@ it("does not install a replacement after a concurrent release is acknowledged", 
     activeTurnId: null,
   });
   expect((await harness.waitForResponse(3)).error).toBeUndefined();
+  expect(existsSync(writerLockPath)).toBe(false);
 
   const rebuiltTurn = await harness.waitForResponse(2);
   expect(rebuiltTurn.error).toBeDefined();
@@ -156,6 +157,7 @@ it("does not install a replacement after concurrent discard maintenance settles"
     providerThreadId: PROVIDER_THREAD_ID,
   });
   expect((await harness.waitForResponse(3)).result).toEqual({ ok: true });
+  expect(existsSync(writerLockPath)).toBe(false);
 
   const rebuiltTurn = await harness.waitForResponse(2);
   expect(rebuiltTurn.error).toBeDefined();
