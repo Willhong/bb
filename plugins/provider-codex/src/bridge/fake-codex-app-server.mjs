@@ -170,6 +170,7 @@ const stallThreadStart = script?.stallThreadStart ?? false;
 const writerLockPath = script?.writerLockPath ?? null;
 const sigtermDelayMs = script?.sigtermDelayMs ?? 0;
 let ownsWriterLock = false;
+let servesThread = false;
 
 function logProcessStep(step) {
   if (processLogPath === null) {
@@ -230,7 +231,7 @@ function exitCleanly() {
 process.on("exit", releaseWriterLock);
 process.on("SIGTERM", () => {
   logProcessStep("sigterm");
-  if (sigtermDelayMs > 0) {
+  if (sigtermDelayMs > 0 && servesThread) {
     setTimeout(exitCleanly, sigtermDelayMs);
     return;
   }
@@ -402,6 +403,7 @@ async function handleRequest(message) {
       respond(id, {});
       return;
     case "thread/start": {
+      servesThread = true;
       if (stallThreadStart) {
         await new Promise(() => undefined);
       }
@@ -412,6 +414,7 @@ async function handleRequest(message) {
       return;
     }
     case "thread/resume": {
+      servesThread = true;
       if (!acquireWriterLock()) {
         logProcessStep("writer-conflict");
         respondError(
@@ -446,6 +449,7 @@ async function handleRequest(message) {
       return;
     }
     case "thread/fork": {
+      servesThread = true;
       // The real app-server reads the source rollout; an archived source is
       // refused with the same wording a resume gets.
       if (
