@@ -1,4 +1,3 @@
-import { experimental_execHostFile } from "@get-bb/plugin-sdk/process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -23,35 +22,18 @@ import {
   experimental_versionFrom as versionFrom,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
+import {
+  claudeCredentialsExpired,
+  readClaudeAccount,
+  readClaudeCredentials,
+  type ClaudeCredentials,
+} from "../ai/claude-auth.js";
 
-const execFileAsync = experimental_execHostFile;
 const USAGE_FETCH_TIMEOUT_MS = 15_000;
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
-const CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
 const CLAUDE_NPM_PACKAGE = "@anthropic-ai/claude-code";
 const CLAUDE_INSTALL_SCRIPT_URL = "https://claude.ai/install.sh";
 const CLAUDE_POWERSHELL_INSTALL_SCRIPT_URL = "https://claude.ai/install.ps1";
-
-const claudeCredentialsSchema = z.object({
-  claudeAiOauth: z.object({
-    accessToken: z.string().min(1),
-    expiresAt: z.number().nullish(),
-    subscriptionType: z.string().nullish(),
-    rateLimitTier: z.string().nullish(),
-  }),
-});
-type ClaudeCredentials = z.infer<
-  typeof claudeCredentialsSchema
->["claudeAiOauth"];
-
-const claudeAccountSchema = z.object({
-  oauthAccount: z
-    .object({
-      emailAddress: z.string().email().nullish(),
-      accountUuid: z.string().uuid().nullish(),
-    })
-    .nullish(),
-});
 
 async function claudeExecutable(): Promise<string> {
   const explicit = process.env.BB_CLAUDE_CODE_EXECUTABLE?.trim();
@@ -254,78 +236,8 @@ function buildClaudeProviderInstallationRun(
   };
 }
 
-async function readKeychainCredentials(): Promise<string | null> {
-  if (process.platform !== "darwin") return null;
-  const argumentSets = [
-    [
-      "find-generic-password",
-      "-s",
-      CLAUDE_KEYCHAIN_SERVICE,
-      "-a",
-      os.userInfo().username,
-      "-w",
-    ],
-    ["find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE, "-w"],
-  ];
-  for (const args of argumentSets) {
-    try {
-      const { stdout } = await execFileAsync("security", args, {
-        timeout: 10_000,
-      });
-      if (stdout.trim()) return stdout.trim();
-    } catch {}
-  }
-  return null;
-}
-
-function parseCredentials(raw: string): ClaudeCredentials | null {
-  const trimmed = raw.trim();
-  const candidates = [trimmed];
-  if (/^(?:[0-9a-f]{2})+$/iu.test(trimmed)) {
-    candidates.push(Buffer.from(trimmed, "hex").toString("utf8"));
-  }
-  for (const candidate of candidates) {
-    try {
-      const parsed = claudeCredentialsSchema.safeParse(JSON.parse(candidate));
-      if (parsed.success) return parsed.data.claudeAiOauth;
-    } catch {}
-  }
-  return null;
-}
-
-async function readCredentials(): Promise<ClaudeCredentials | null> {
-  const keychainCredentials = await readKeychainCredentials();
-  if (keychainCredentials !== null) {
-    const parsed = parseCredentials(keychainCredentials);
-    if (parsed !== null) return parsed;
-  }
-  try {
-    return parseCredentials(
-      await fs.readFile(
-        path.join(os.homedir(), ".claude", ".credentials.json"),
-        "utf8",
-      ),
-    );
-  } catch {
-    return null;
-  }
-}
-
-async function readAccount() {
-  try {
-    const parsed = claudeAccountSchema.safeParse(
-      JSON.parse(
-        await fs.readFile(path.join(os.homedir(), ".claude.json"), "utf8"),
-      ),
-    );
-    return parsed.success ? (parsed.data.oauthAccount ?? null) : null;
-  } catch {
-    return null;
-  }
-}
-
 async function readAccountEmail(): Promise<string | null> {
-  return (await readAccount())?.emailAddress ?? null;
+  return (await readClaudeAccount())?.emailAddress ?? null;
 }
 
 function claudePlan(
@@ -380,7 +292,7 @@ export async function getClaudeProviderHealth(): Promise<ProviderHealthResult> {
   const version = await readCliVersion(command);
   try {
     const [credentials, email] = await Promise.all([
-      readCredentials(),
+      readClaudeCredentials(),
       readAccountEmail(),
     ]);
     if (!credentials) {
@@ -391,7 +303,7 @@ export async function getClaudeProviderHealth(): Promise<ProviderHealthResult> {
       planLabel: planLabel(credentials),
       installedVersion: version,
     };
-    return credentials.expiresAt != null && Date.now() >= credentials.expiresAt
+    return claudeCredentialsExpired(credentials)
       ? healthResult("expired", known)
       : healthResult("ready", known);
   } catch (error) {
@@ -520,14 +432,14 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
     return { supported: true, usage: { status: "not_installed" } };
   }
   const [credentials, account] = await Promise.all([
-    readCredentials(),
-    readAccount(),
+    readClaudeCredentials(),
+    readClaudeAccount(),
   ]);
   const email = account?.emailAddress ?? null;
   if (!credentials) {
     return { supported: true, usage: { status: "unauthenticated" } };
   }
-  if (credentials.expiresAt != null && Date.now() >= credentials.expiresAt) {
+  if (claudeCredentialsExpired(credentials)) {
     return { supported: true, usage: { status: "expired" } };
   }
   const known = { planLabel: planLabel(credentials), accountEmail: email };
