@@ -944,6 +944,28 @@ describe("generated thread titles", () => {
     });
   });
 
+  it.each(["调", "𠮷"])(
+    "clamps the task after stripping commands without splitting %s",
+    async (character) => {
+      mockThreadMetadata({ title: "Investigate the reported issue" });
+      await withTestHarness(async (harness) => {
+        const input = skillInput("review", ` ${character.repeat(60)}`);
+        const original = structuredClone(input);
+        await generateThreadMetadataWithOutcome(harness.deps, {
+          input,
+          threadId: "thr_unicode_skill_metadata",
+        });
+        const prompt = piAiMocks.complete.mock.calls[0]?.[1].messages[0].content;
+        expect(prompt).toContain(
+          "The prompt invokes these commands or skills: /review.",
+        );
+        expect(prompt).toContain(`Task:\n${character.repeat(38)}...`);
+        expect(prompt).not.toContain(character.repeat(39));
+        expect(input).toEqual(original);
+      });
+    },
+  );
+
   it("titles a bare skill invocation from what the skill does", async () => {
     mockThreadMetadata({ title: "Generate the weekly report" });
     await withTestHarness(async (harness) => {
@@ -960,6 +982,9 @@ describe("generated thread titles", () => {
       ).toContain(
         "The prompt invokes these commands or skills: /weekly-report.",
       );
+      expect(
+        piAiMocks.complete.mock.calls[0]?.[1].messages[0].content,
+      ).toContain("Task:\n/weekly-report");
     });
   });
 
