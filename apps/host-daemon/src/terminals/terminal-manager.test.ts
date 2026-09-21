@@ -55,6 +55,9 @@ type TerminalMessageObserver = (message: HostDaemonDaemonWsMessage) => void;
 
 interface CreateHarnessOptions {
   closeGracePeriodMs?: number;
+  exitedRetentionMs?: number;
+  maxExitedScrollbackBytes?: number;
+  maxExitedTerminals?: number;
   onSendMessage: TerminalMessageObserver;
   resolveShell: ResolveTerminalShell;
 }
@@ -62,6 +65,16 @@ interface CreateHarnessOptions {
 interface CreateHarnessWithShellArgs {
   resolveShell: ResolveTerminalShell;
 }
+
+interface AttachTerminalArgs {
+  requestId: string;
+  terminalId: string;
+}
+
+type TerminalOutputChunk = Extract<
+  HostDaemonDaemonWsMessage,
+  { type: "terminal.output" }
+>["chunk"];
 
 type SteerTurnResult = Awaited<ReturnType<AgentRuntime["steerTurn"]>>;
 
@@ -270,12 +283,10 @@ function createFakeWorkspace(path: string): HostWorkspace {
     })),
     diffPatch: vi.fn(async () => []),
     getPullRequest: vi.fn(async () => ({ outcome: "none" as const })),
-    listFiles: vi.fn(async () => []),
     commit: vi.fn(async () => ({
       commitSha: "commit-1",
       commitSubject: "commit",
     })),
-    reset: vi.fn(async () => undefined),
     runPullRequestAction: vi.fn(async () => undefined),
   };
 }
@@ -311,6 +322,9 @@ function createHarnessWithOptions(
   });
   const manager = new TerminalManager({
     closeGracePeriodMs: args.closeGracePeriodMs,
+    exitedRetentionMs: args.exitedRetentionMs,
+    maxExitedScrollbackBytes: args.maxExitedScrollbackBytes,
+    maxExitedTerminals: args.maxExitedTerminals,
     logger: createFakeLogger(),
     ptyAdapter: adapter,
     resolveShell: args.resolveShell,
@@ -360,9 +374,11 @@ function shellQuote(value: string): string {
 
 async function openTerminal(
   harness: TerminalManagerHarness,
+  contributedEnv: import("@bb/host-daemon-contract").HostDaemonContributedEnvEntry[] = [],
 ): Promise<FakeTerminalPty> {
   await harness.manager.handleMessage({
     type: "terminal.open",
+    contributedEnv,
     requestId: "open-1",
     terminalId: "term-1",
     threadId: "thr-1",
@@ -382,6 +398,67 @@ async function openTerminal(
     throw new Error("Expected terminal PTY to spawn");
   }
   return spawned.pty;
+}
+
+async function openTerminalWithId(
+  harness: TerminalManagerHarness,
+  terminalId: string,
+): Promise<FakeTerminalPty> {
+  const spawnedBefore = harness.adapter.spawned.length;
+  await harness.manager.handleMessage({
+    type: "terminal.open",
+    contributedEnv: [],
+    requestId: `open-${terminalId}`,
+    terminalId,
+    threadId: "thr-1",
+    target: {
+      kind: "workspace",
+      environmentId: "env-1",
+      workspaceContext: {
+        workspacePath: "/tmp/terminal-workspace",
+      },
+    },
+    cols: 100,
+    rows: 30,
+    start: DEFAULT_TERMINAL_START,
+  });
+  const spawned = harness.adapter.spawned[spawnedBefore];
+  if (!spawned) {
+    throw new Error(`Expected terminal PTY to spawn for ${terminalId}`);
+  }
+  return spawned.pty;
+}
+
+async function attachTerminal(
+  harness: TerminalManagerHarness,
+  args: AttachTerminalArgs,
+): Promise<void> {
+  await harness.manager.handleMessage({
+    type: "terminal.attach",
+    requestId: args.requestId,
+    terminalId: args.terminalId,
+    sinceSeq: 0,
+    tailBytes: 4 * 1024 * 1024,
+  });
+}
+
+function terminalNotFoundError(
+  args: AttachTerminalArgs,
+): HostDaemonDaemonWsMessage {
+  return {
+    type: "terminal.error",
+    requestId: args.requestId,
+    terminalId: args.terminalId,
+    code: "terminal_not_found",
+    message: "Terminal session is not open",
+  };
+}
+
+function textChunk(text: string, seq: number): TerminalOutputChunk {
+  return {
+    seq,
+    dataBase64: Buffer.from(text, "utf8").toString("base64"),
+  };
 }
 
 describe("TerminalManager", () => {
@@ -419,9 +496,35 @@ describe("TerminalManager", () => {
         title: "zsh",
       }),
     );
-    await expect(
-      harness.runtimeManager.evictIdleEnvironments(),
-    ).resolves.toEqual([]);
+    expect(harness.runtimeManager.get("env-1")?.terminals.has("term-1")).toBe(
+      true,
+    );
+    await harness.runtimeManager.replaceBaseShellEnv({ BB_BASE_ENV: "2" });
+    expect(harness.runtimeManager.get("env-1")).toBeDefined();
+    expect(harness.runtime.shutdown).not.toHaveBeenCalled();
+  });
+
+  it("injects host credentials into a PTY and forwards terminal output as-is", async () => {
+    const harness = createHarness();
+    const pty = await openTerminal(harness, [
+      {
+        name: "GH_TOKEN",
+        value: "terminal-private-token",
+        source: { core: "machine-git" },
+        reason: "Git",
+      },
+    ]);
+    expect(harness.adapter.spawned[0]?.args.env.GH_TOKEN).toBe(
+      "terminal-private-token",
+    );
+    pty.emitData("terminal-private-token");
+    await waitForOutputContaining({
+      messages: harness.messages,
+      text: "terminal-private-token",
+    });
+    expect(collectTerminalOutput(harness.messages)).toContain(
+      "terminal-private-token",
+    );
   });
 
   it("opens a command PTY through the resolved shell", async () => {
@@ -429,6 +532,7 @@ describe("TerminalManager", () => {
 
     await harness.manager.handleMessage({
       type: "terminal.open",
+      contributedEnv: [],
       requestId: "open-command",
       terminalId: "term-command",
       threadId: "thr-1",
@@ -455,9 +559,39 @@ describe("TerminalManager", () => {
         title: "pnpm dev",
       }),
     );
-    await expect(
-      harness.runtimeManager.evictIdleEnvironments(),
-    ).resolves.toEqual([]);
+    expect(
+      harness.runtimeManager.get("env-1")?.terminals.has("term-command"),
+    ).toBe(true);
+
+    const wideCommand = "调".repeat(100);
+    await harness.manager.handleMessage({
+      type: "terminal.open",
+      contributedEnv: [],
+      requestId: "open-wide-command",
+      terminalId: "term-wide-command",
+      threadId: "thr-1",
+      target: {
+        kind: "workspace",
+        environmentId: "env-1",
+        workspaceContext: {
+          workspacePath: "/tmp/terminal-workspace",
+        },
+      },
+      cols: 100,
+      rows: 30,
+      start: { mode: "command", command: wideCommand },
+    });
+    expect(harness.messages).toContainEqual(
+      expect.objectContaining({
+        type: "terminal.opened",
+        terminalId: "term-wide-command",
+        title: `${"调".repeat(38)}...`,
+      }),
+    );
+
+    await harness.runtimeManager.replaceBaseShellEnv({ BB_BASE_ENV: "2" });
+    expect(harness.runtimeManager.get("env-1")).toBeDefined();
+    expect(harness.runtime.shutdown).not.toHaveBeenCalled();
   });
 
   it("opens a PTY in a host path without an environment", async () => {
@@ -466,6 +600,7 @@ describe("TerminalManager", () => {
 
     await harness.manager.handleMessage({
       type: "terminal.open",
+      contributedEnv: [],
       requestId: "open-host-path",
       terminalId: "term-host-path",
       target: {
@@ -490,9 +625,7 @@ describe("TerminalManager", () => {
         initialCwd: cwd,
       }),
     );
-    await expect(
-      harness.runtimeManager.evictIdleEnvironments(),
-    ).resolves.toEqual([]);
+    expect(harness.runtimeManager.get("env-1")).toBeUndefined();
   });
 
   it("opens a host-path PTY in the home directory when no cwd is provided", async () => {
@@ -501,6 +634,7 @@ describe("TerminalManager", () => {
 
     await harness.manager.handleMessage({
       type: "terminal.open",
+      contributedEnv: [],
       requestId: "open-host-home",
       terminalId: "term-host-home",
       target: {
@@ -523,9 +657,7 @@ describe("TerminalManager", () => {
         initialCwd: expectedCwd,
       }),
     );
-    await expect(
-      harness.runtimeManager.evictIdleEnvironments(),
-    ).resolves.toEqual([]);
+    expect(harness.runtimeManager.get("env-1")).toBeUndefined();
   });
 
   it("closes a terminal after an in-progress open finishes", async () => {
@@ -540,6 +672,7 @@ describe("TerminalManager", () => {
 
     const openPromise = harness.manager.handleMessage({
       type: "terminal.open",
+      contributedEnv: [],
       requestId: "open-1",
       terminalId: "term-1",
       threadId: "thr-1",
@@ -590,64 +723,6 @@ describe("TerminalManager", () => {
     );
   });
 
-  it("closes environment terminals after in-progress opens finish", async () => {
-    const shell = createDeferredPromise<string>();
-    let resolveShellCalls = 0;
-    const harness = createHarnessWithShell({
-      resolveShell: () => {
-        resolveShellCalls += 1;
-        return shell.promise;
-      },
-    });
-
-    const openPromise = harness.manager.handleMessage({
-      type: "terminal.open",
-      requestId: "open-1",
-      terminalId: "term-1",
-      threadId: "thr-1",
-      target: {
-        kind: "workspace",
-        environmentId: "env-1",
-        workspaceContext: {
-          workspacePath: "/tmp/terminal-workspace",
-        },
-      },
-      cols: 100,
-      rows: 30,
-      start: DEFAULT_TERMINAL_START,
-    });
-    await vi.waitFor(() => expect(resolveShellCalls).toBe(1));
-
-    const closePromise = harness.manager.closeEnvironmentTerminals({
-      environmentId: "env-1",
-      reason: "environment-destroyed",
-    });
-    shell.resolve("/bin/zsh");
-    await Promise.all([openPromise, closePromise]);
-
-    const pty = harness.adapter.spawned[0]?.pty;
-    if (!pty) {
-      throw new Error("Expected terminal PTY to spawn");
-    }
-    await vi.waitFor(() => expect(pty.killCalls).toEqual([null]));
-
-    pty.emitExit(0);
-    await vi.waitFor(() =>
-      expect(
-        harness.messages.filter(
-          (message) => message.type === "terminal.exited",
-        ),
-      ).toEqual([
-        {
-          type: "terminal.exited",
-          terminalId: "term-1",
-          exitCode: 0,
-          closeReason: "environment-destroyed",
-        },
-      ]),
-    );
-  });
-
   it("shuts down terminals after in-progress opens finish", async () => {
     const shell = createDeferredPromise<string>();
     let resolveShellCalls = 0;
@@ -660,6 +735,7 @@ describe("TerminalManager", () => {
 
     const openPromise = harness.manager.handleMessage({
       type: "terminal.open",
+      contributedEnv: [],
       requestId: "open-1",
       terminalId: "term-1",
       threadId: "thr-1",
@@ -709,6 +785,7 @@ describe("TerminalManager", () => {
 
     const firstOpenPromise = harness.manager.handleMessage({
       type: "terminal.open",
+      contributedEnv: [],
       requestId: "open-1",
       terminalId: "term-1",
       threadId: "thr-1",
@@ -727,6 +804,7 @@ describe("TerminalManager", () => {
 
     const secondOpenPromise = harness.manager.handleMessage({
       type: "terminal.open",
+      contributedEnv: [],
       requestId: "open-2",
       terminalId: "term-1",
       threadId: "thr-1",
@@ -781,6 +859,7 @@ describe("TerminalManager", () => {
 
     const firstOpenPromise = harness.manager.handleMessage({
       type: "terminal.open",
+      contributedEnv: [],
       requestId: "open-1",
       terminalId: "term-1",
       threadId: "thr-1",
@@ -799,6 +878,7 @@ describe("TerminalManager", () => {
 
     const secondOpenPromise = harness.manager.handleMessage({
       type: "terminal.open",
+      contributedEnv: [],
       requestId: "open-2",
       terminalId: "term-1",
       threadId: "thr-1",
@@ -859,6 +939,7 @@ describe("TerminalManager", () => {
 
     await harness.manager.handleMessage({
       type: "terminal.open",
+      contributedEnv: [],
       requestId: "open-stale",
       terminalId: "term-stale",
       threadId: "thr-1",
@@ -1074,6 +1155,217 @@ describe("TerminalManager", () => {
     });
   });
 
+  it("replays retained scrollback after the terminal exits", async () => {
+    const harness = createHarness();
+    const pty = await openTerminal(harness);
+
+    pty.emitData("build failed\n");
+    pty.emitExit(1);
+    await attachTerminal(harness, {
+      requestId: "attach-exited",
+      terminalId: "term-1",
+    });
+
+    expect(harness.messages).toContainEqual({
+      type: "terminal.exited",
+      terminalId: "term-1",
+      exitCode: 1,
+      closeReason: "process-exit",
+    });
+    expect(harness.messages).toContainEqual({
+      type: "terminal.replay",
+      requestId: "attach-exited",
+      terminalId: "term-1",
+      chunks: [textChunk("build failed\n", 0)],
+      replayStartSeq: 0,
+      nextSeq: 1,
+    });
+  });
+
+  it("keeps a retained terminal read-only after it exits", async () => {
+    const harness = createHarness();
+    const pty = await openTerminal(harness);
+
+    pty.emitData("build failed\n");
+    pty.emitExit(1);
+    await harness.manager.handleMessage({
+      type: "terminal.input",
+      terminalId: "term-1",
+      dataBase64: Buffer.from("pwd\n", "utf8").toString("base64"),
+    });
+    await harness.manager.handleMessage({
+      type: "terminal.resize",
+      terminalId: "term-1",
+      cols: 120,
+      rows: 40,
+    });
+    pty.emitStaleData("after exit\n");
+    await attachTerminal(harness, {
+      requestId: "attach-read-only",
+      terminalId: "term-1",
+    });
+
+    expect(pty.writeCalls).toEqual([]);
+    expect(pty.resizeCalls).toEqual([]);
+    expect(harness.messages).toContainEqual({
+      type: "terminal.replay",
+      requestId: "attach-read-only",
+      terminalId: "term-1",
+      chunks: [textChunk("build failed\n", 0)],
+      replayStartSeq: 0,
+      nextSeq: 1,
+    });
+  });
+
+  it("forgets retained scrollback once the retention window passes", async () => {
+    vi.useFakeTimers();
+    const harness = createHarnessWithOptions({
+      exitedRetentionMs: 60_000,
+      onSendMessage: () => undefined,
+      resolveShell: async () => "/bin/zsh",
+    });
+    const pty = await openTerminal(harness);
+
+    pty.emitData("build failed\n");
+    pty.emitExit(1);
+    await vi.advanceTimersByTimeAsync(59_000);
+    await attachTerminal(harness, {
+      requestId: "attach-before-expiry",
+      terminalId: "term-1",
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await attachTerminal(harness, {
+      requestId: "attach-after-expiry",
+      terminalId: "term-1",
+    });
+
+    expect(harness.messages).toContainEqual({
+      type: "terminal.replay",
+      requestId: "attach-before-expiry",
+      terminalId: "term-1",
+      chunks: [textChunk("build failed\n", 0)],
+      replayStartSeq: 0,
+      nextSeq: 1,
+    });
+    expect(harness.messages).toContainEqual(
+      terminalNotFoundError({
+        requestId: "attach-after-expiry",
+        terminalId: "term-1",
+      }),
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("evicts the oldest retained terminal past the retained terminal cap", async () => {
+    const harness = createHarnessWithOptions({
+      maxExitedTerminals: 1,
+      onSendMessage: () => undefined,
+      resolveShell: async () => "/bin/zsh",
+    });
+    const first = await openTerminalWithId(harness, "term-first");
+    first.emitData("first output\n");
+    first.emitExit(0);
+    const second = await openTerminalWithId(harness, "term-second");
+    second.emitData("second output\n");
+    second.emitExit(0);
+
+    await attachTerminal(harness, {
+      requestId: "attach-first",
+      terminalId: "term-first",
+    });
+    await attachTerminal(harness, {
+      requestId: "attach-second",
+      terminalId: "term-second",
+    });
+
+    expect(harness.messages).toContainEqual(
+      terminalNotFoundError({
+        requestId: "attach-first",
+        terminalId: "term-first",
+      }),
+    );
+    expect(harness.messages).toContainEqual({
+      type: "terminal.replay",
+      requestId: "attach-second",
+      terminalId: "term-second",
+      chunks: [textChunk("second output\n", 0)],
+      replayStartSeq: 0,
+      nextSeq: 1,
+    });
+  });
+
+  it("evicts the oldest retained terminal past the retained byte cap", async () => {
+    const harness = createHarnessWithOptions({
+      maxExitedScrollbackBytes: 8,
+      onSendMessage: () => undefined,
+      resolveShell: async () => "/bin/zsh",
+    });
+    const first = await openTerminalWithId(harness, "term-first");
+    first.emitData("first output\n");
+    first.emitExit(0);
+    await attachTerminal(harness, {
+      requestId: "attach-only-retained",
+      terminalId: "term-first",
+    });
+    const second = await openTerminalWithId(harness, "term-second");
+    second.emitData("second output\n");
+    second.emitExit(0);
+    await attachTerminal(harness, {
+      requestId: "attach-evicted",
+      terminalId: "term-first",
+    });
+    await attachTerminal(harness, {
+      requestId: "attach-newest",
+      terminalId: "term-second",
+    });
+
+    expect(harness.messages).toContainEqual({
+      type: "terminal.replay",
+      requestId: "attach-only-retained",
+      terminalId: "term-first",
+      chunks: [textChunk("first output\n", 0)],
+      replayStartSeq: 0,
+      nextSeq: 1,
+    });
+    expect(harness.messages).toContainEqual(
+      terminalNotFoundError({
+        requestId: "attach-evicted",
+        terminalId: "term-first",
+      }),
+    );
+    expect(harness.messages).toContainEqual({
+      type: "terminal.replay",
+      requestId: "attach-newest",
+      terminalId: "term-second",
+      chunks: [textChunk("second output\n", 0)],
+      replayStartSeq: 0,
+      nextSeq: 1,
+    });
+  });
+
+  it("clears retained scrollback and its timers on dispose", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    const pty = await openTerminal(harness);
+
+    pty.emitData("build failed\n");
+    pty.emitExit(1);
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    harness.manager.dispose();
+    await attachTerminal(harness, {
+      requestId: "attach-disposed",
+      terminalId: "term-1",
+    });
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(harness.messages).toContainEqual(
+      terminalNotFoundError({
+        requestId: "attach-disposed",
+        terminalId: "term-1",
+      }),
+    );
+  });
+
   it("answers primary device attribute queries without replaying them", async () => {
     const harness = createHarness();
     const pty = await openTerminal(harness);
@@ -1262,9 +1554,8 @@ describe("TerminalManager", () => {
         closeReason: "user",
       },
     ]);
-    await expect(
-      harness.runtimeManager.evictIdleEnvironments(),
-    ).resolves.toEqual(["env-1"]);
+    await harness.runtimeManager.replaceBaseShellEnv({ BB_BASE_ENV: "2" });
+    expect(harness.runtimeManager.get("env-1")).toBeUndefined();
     expect(harness.runtime.shutdown).toHaveBeenCalledTimes(1);
   });
 
@@ -1315,9 +1606,8 @@ describe("TerminalManager", () => {
         closeReason: "user",
       },
     ]);
-    await expect(
-      harness.runtimeManager.evictIdleEnvironments(),
-    ).resolves.toEqual(["env-1"]);
+    await harness.runtimeManager.replaceBaseShellEnv({ BB_BASE_ENV: "2" });
+    expect(harness.runtimeManager.get("env-1")).toBeUndefined();
   });
 
   it("kills all terminals on shutdown", async () => {
@@ -1406,6 +1696,7 @@ describe("TerminalManager", () => {
 
     await manager.handleMessage({
       type: "terminal.open",
+      contributedEnv: [],
       requestId: "open-1",
       terminalId: "term-1",
       threadId: "thr-1",
@@ -1464,6 +1755,7 @@ describe("TerminalManager", () => {
 
     await manager.handleMessage({
       type: "terminal.open",
+      contributedEnv: [],
       requestId: "open-real",
       terminalId: "term-real",
       threadId: "thr-real",

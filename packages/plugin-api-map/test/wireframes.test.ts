@@ -22,6 +22,8 @@ import {
   AppShellWireframe,
   CommandPaletteWireframe,
   RealComposerAnnotated,
+  SettingsWireframe,
+  ExtensionsPluginPageWireframe,
   SurfaceMapContext,
   type SurfaceMapState,
 } from "../src/wireframes";
@@ -30,7 +32,6 @@ const mapState: SurfaceMapState = {
   activeId: null,
   setActiveId: vi.fn(),
   expandedId: null,
-  spotlightId: null,
   numberOf: (id) => SURFACE_NUMBERS.get(id) ?? null,
 };
 
@@ -44,6 +45,26 @@ function renderWireframe(
 }
 
 describe("guide fixture boundaries", () => {
+  it("keeps configuration and recovery fixtures tied to current app source", () => {
+    for (const [id, component] of [
+      ["declarative-settings", SettingsWireframe],
+      ["plugin-status", ExtensionsPluginPageWireframe],
+    ] as const) {
+      const contract = anatomy.surfaceFixtures[id];
+      const markup = renderWireframe(createElement(component));
+      for (const label of contract.labels.anchor)
+        expect(markup).toContain(label);
+      for (const source of contract.sources) {
+        const text = readFileSync(
+          join(import.meta.dirname, "../../..", source.path),
+          "utf8",
+        );
+        for (const anchor of source.anchors)
+          expect(text, source.path).toContain(anchor);
+      }
+    }
+  });
+
   it("scales every spatial fixture together and reflows only the capability grid", () => {
     const markup = renderToStaticMarkup(createElement(ProductMap));
 
@@ -94,18 +115,6 @@ describe("guide fixture boundaries", () => {
     expect(markup).not.toContain("min-w-full flex-nowrap");
   });
 
-  it("does not reserve the full header gap when the compact plugin page omits its header", () => {
-    const compactMarkup = renderToStaticMarkup(createElement(ProductMap));
-    const headedMarkup = renderToStaticMarkup(
-      createElement(ProductMap, {
-        header: createElement("h1", null, "Plugin surfaces"),
-      }),
-    );
-
-    expect(compactMarkup).toContain('class="mt-2"');
-    expect(headedMarkup).toContain('class="mt-8"');
-  });
-
   it("never nests one annotation link inside another", () => {
     const markup = renderWireframe(createElement(AppShellWireframe));
     let anchorDepth = 0;
@@ -150,7 +159,12 @@ describe("guide fixture boundaries", () => {
     expect(tabStrip).not.toContain("items-end");
     expect(tabStrip).not.toContain("pb-2");
     expect(tabStrip).not.toContain("data-guide-badge=");
-    for (const id of ["thread-panel", "file-opener", "code-renderers"]) {
+    for (const id of [
+      "browser-toolbar",
+      "thread-panel",
+      "file-opener",
+      "code-renderers",
+    ]) {
       expect(appMarkup).toMatch(
         new RegExp(
           `data-guide-badge="${id}"[\\s\\S]*?data-guide-badge-placement="lane"`,
@@ -283,6 +297,13 @@ describe("guide fixture boundaries", () => {
       'data-guide-fixture="sidebar-navigation-primary-actions"',
     );
     expect(markup).not.toContain("Custom navigation");
+    const pluginRowStart = markup.indexOf('data-guide-region="nav-panel"');
+    const pluginRowEnd = markup.indexOf("</a>", pluginRowStart);
+    const pluginRow = markup.slice(pluginRowStart, pluginRowEnd);
+    expect(pluginRow).toContain("Your panel");
+    expect(pluginRow).not.toContain("Plugins");
+    expect(pluginRow).not.toContain("Skills");
+    expect(markup).not.toContain('class="sr-only">Search threads');
   });
 
   it("grows the app window within capped viewport-fit bounds while retaining loose timeline spacing", () => {
@@ -301,6 +322,7 @@ describe("guide fixture boundaries", () => {
   });
 
   it.each([
+    ["browser-toolbar", "browser-toolbar", "https://example.com"],
     ["thread-panel", "thread-panel", "Release checklist"],
     ["file-opener", "file-viewer", "Checkout retry notes"],
     ["code-renderers", "diff-renderer", "checkout.test.ts"],

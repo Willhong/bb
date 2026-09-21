@@ -1,7 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   experimental_captureBridgeJsonRpcOutput as captureBridgeJsonRpcOutput,
@@ -11,10 +10,7 @@ import {
 import type { CapturedBridgeJsonRpcOutput } from "@get-bb/plugin-sdk/provider-bridge/testing";
 
 import { handleLine } from "./bridge.js";
-
-const fakeAppServerPath = fileURLToPath(
-  new URL("./fake-codex-app-server.mjs", import.meta.url),
-);
+import { stubFakeCodexAppServer } from "./fake-codex-app-server-harness.js";
 
 let output: CapturedBridgeJsonRpcOutput;
 let workspaceDir: string;
@@ -28,11 +24,7 @@ beforeEach(() => {
       archiveStatePath: join(workspaceDir, "fake-codex-archived.json"),
     }),
   );
-  vi.stubEnv("BB_CODEX_BRIDGE_APP_SERVER_COMMAND", process.execPath);
-  vi.stubEnv(
-    "BB_CODEX_BRIDGE_APP_SERVER_ARGS",
-    JSON.stringify([fakeAppServerPath, fakeScriptPath]),
-  );
+  stubFakeCodexAppServer(fakeScriptPath);
   output = captureBridgeJsonRpcOutput();
 });
 
@@ -71,6 +63,7 @@ it("passes the canonical protocol suite against supervised fake app-server child
     "handshake/initialize": "pass",
     "skills/configure-declared": "pass",
     "session/start-identity": "pass",
+    "session/start-identity-announced": "pass",
     "turn/lifecycle": "pass",
     "events/schema-valid": "pass",
     "item/opens-before-delta": "pass",
@@ -78,6 +71,7 @@ it("passes the canonical protocol suite against supervised fake app-server child
     "session/resume-identity": "pass",
     "session/resume-id-uniqueness": "pass",
     "session/fork-identity": "pass",
+    "session/fork-identity-announced": "pass",
     "turn/settles-without-activity": "pass",
     "recovery/session-archived": "pass",
     "session/threads-independent": "pass",

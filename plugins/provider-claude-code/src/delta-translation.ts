@@ -25,7 +25,6 @@ import {
 import {
   claudeApiRetryMessageSchema,
   claudeAssistantMessageSchema,
-  claudeBackgroundTasksChangedMessageSchema,
   claudeCompactBoundarySystemMessageSchema,
   claudeConversationResetMessageSchema,
   claudeModelFallbackSystemMessageSchema,
@@ -58,7 +57,6 @@ import {
 import {
   hasCompletionBlockingClaudeTasks,
   buildInterruptedClaudeTaskDeltas,
-  hasPendingClaudeTasks,
   translateClaudeTaskMessage,
   type ClaudeTaskMap,
 } from "./task-translation.js";
@@ -391,7 +389,6 @@ interface ClaudeThreadDialectState {
   selectedModelContextWindow: number | null;
   suppressUnacceptedTurnStart: boolean;
   openCompaction: { segment: number } | undefined;
-  liveBackgroundTaskIds: Set<string> | undefined;
   startedTools: Map<string, ClaudeClassifiedTool>;
   tasksById: ClaudeTaskMap;
   taskPlan: ClaudeTaskPlanState;
@@ -408,7 +405,6 @@ function createThreadState(): ClaudeThreadDialectState {
     selectedModelContextWindow: null,
     suppressUnacceptedTurnStart: false,
     openCompaction: undefined,
-    liveBackgroundTaskIds: undefined,
     startedTools: new Map(),
     tasksById: new Map(),
     taskPlan: new Map(),
@@ -729,15 +725,6 @@ export function createClaudeDeltaTranslator(
       ];
     }
 
-    const backgroundTasksChangedMessage =
-      claudeBackgroundTasksChangedMessageSchema.safeParse(event);
-    if (backgroundTasksChangedMessage.success) {
-      state.liveBackgroundTaskIds = new Set(
-        backgroundTasksChangedMessage.data.tasks.map((task) => task.task_id),
-      );
-      return [];
-    }
-
     const taskDeltas = translateClaudeTaskMessage({
       event,
       tasks: state.tasksById,
@@ -842,9 +829,18 @@ export function createClaudeDeltaTranslator(
     if (providerCheckpointId !== undefined) {
       state.latestProviderCheckpointId = providerCheckpointId;
     }
-    const requestContextTokens = extractClaudeRequestContextTokens(message);
-    if (requestContextTokens !== null) {
-      state.latestRequestContextTokens = requestContextTokens;
+    if (parentToolCallId === undefined) {
+      const requestContextTokens = extractClaudeRequestContextTokens(message);
+      if (requestContextTokens !== null) {
+        state.latestRequestContextTokens = requestContextTokens;
+        deltas.push({
+          kind: "contextWindow",
+          used: requestContextTokens,
+          size: state.selectedModelContextWindow,
+          estimated: true,
+          attach: "open",
+        });
+      }
     }
 
     for (const thinkingBlock of extractThinkingBlocks(message)) {
@@ -1292,17 +1288,6 @@ export function createClaudeDeltaTranslator(
     return statesByThreadId.get(threadId)?.mirror.turnOpen === true;
   }
 
-  function hasOpenSessionWork(threadId: string): boolean {
-    const state = statesByThreadId.get(threadId);
-    if (state === undefined) return false;
-    return (
-      state.mirror.turnOpen ||
-      (state.liveBackgroundTaskIds === undefined
-        ? hasPendingClaudeTasks(state.tasksById)
-        : state.liveBackgroundTaskIds.size > 0)
-    );
-  }
-
   function setClaudeModelContextWindowHint(
     threadId: string,
     model: string,
@@ -1315,7 +1300,6 @@ export function createClaudeDeltaTranslator(
     acceptInput,
     buildSessionSettlementDeltas,
     configureInjectedTools,
-    hasOpenSessionWork,
     hasOpenTurn,
     setClaudeModelContextWindowHint,
     translate,

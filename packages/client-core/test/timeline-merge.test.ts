@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { applyTimelineDelta } from "@bb/server-contract";
 import type {
   ThreadTimelineResponse,
   TimelineCommandWorkRow,
@@ -112,6 +113,7 @@ function makeTimelineResponse(
   return {
     rows,
     contextBoundarySeq: null,
+    completedTurnDisplay: "collapse",
     activePromptMode: null,
     activeThinking: null,
     activeWorkflows: [],
@@ -650,6 +652,236 @@ describe("snapshot content pagination", () => {
     expect(result.historySnapshot).toBe("snapshot-2");
   });
 
+  it("keeps loaded older pages when a streaming refresh advances the snapshot", () => {
+    const walkCursor = timelineCursor({ id: "walk-cursor", sequence: 1 });
+    const olderUser = userRow({ id: "older-user", sequence: 1 });
+    const olderSummary = turnSummaryRow({
+      id: "older-summary",
+      sequence: 2,
+      endSequence: 9,
+    });
+    const latestUser = userRow({ id: "latest-user", sequence: 10 });
+    const streaming = commandRow({ id: "streaming", sequence: 11 });
+    const current = {
+      ...makeLoadedTimelineState(
+        [olderUser, olderSummary, latestUser, streaming],
+        walkCursor,
+        11,
+      ),
+      historySnapshot: "snapshot-1",
+    };
+    const updatedStreaming = {
+      ...streaming,
+      sourceSeqEnd: 12,
+      output: "more output",
+    };
+    const latestTimeline = makeTimelineResponse(
+      [latestUser, updatedStreaming],
+      timelineCursor({ id: "latest-cursor", sequence: 10 }),
+      12,
+    );
+    latestTimeline.timelinePage.historySnapshot = "snapshot-2";
+    latestTimeline.timelinePage.olderRowsSourceSeqEnd = null;
+
+    const next = mergeLoadedTimelineWithLatest({
+      current,
+      latestTimeline,
+      surfaceKey: current.surfaceKey,
+    });
+
+    expect(next.rows).toEqual([
+      olderUser,
+      olderSummary,
+      latestUser,
+      updatedStreaming,
+    ]);
+    expect(next.olderCursor).toEqual(walkCursor);
+    expect(next.historySnapshot).toBe("snapshot-2");
+    expect(next.latestWindowEndSequence).toBe(12);
+  });
+
+  it("keeps the in-flight walk cursor when a refresh returns the same window start", () => {
+    const firstCursor = timelineCursor({
+      id: "snapshot-1-cursor",
+      sequence: 10,
+    });
+    const latestUser = userRow({ id: "latest-user", sequence: 10 });
+    const current = {
+      ...makeLoadedTimelineState([latestUser], firstCursor, 10),
+      historySnapshot: "snapshot-1",
+    };
+    const latestTimeline = makeTimelineResponse(
+      [latestUser, commandRow({ id: "streaming", sequence: 11 })],
+      timelineCursor({ id: "snapshot-2-cursor", sequence: 10 }),
+      11,
+    );
+    latestTimeline.timelinePage.historySnapshot = "snapshot-2";
+    latestTimeline.timelinePage.olderRowsSourceSeqEnd = null;
+
+    const next = mergeLoadedTimelineWithLatest({
+      current,
+      latestTimeline,
+      surfaceKey: current.surfaceKey,
+    });
+
+    expect(next.olderCursor).toEqual(firstCursor);
+    expect(next.rows.map((row) => row.id)).toEqual([
+      "latest-user",
+      "streaming",
+    ]);
+  });
+
+  it("keeps the head of a running turn while its content-cut latest page slides forward", () => {
+    const cursor = timelineCursor({ id: "turn-cursor-1", sequence: 10 });
+    const prompt = userRow({ id: "prompt", sequence: 10 });
+    const commands = [11, 12, 13, 14].map((sequence) =>
+      commandRow({ id: `command-${sequence}`, sequence }),
+    );
+    const current = {
+      ...makeLoadedTimelineState([prompt, ...commands.slice(0, 3)], cursor, 13),
+      historySnapshot: "snapshot-1",
+    };
+    const latestTimeline = makeTimelineResponse(
+      commands.slice(1),
+      timelineCursor({ id: "turn-cursor-2", sequence: 10 }),
+      14,
+    );
+    latestTimeline.timelinePage.historySnapshot = "snapshot-2";
+    latestTimeline.timelinePage.olderRowsSourceSeqEnd = null;
+    latestTimeline.timelinePage.contentPage = {
+      anchorSeq: 10,
+      start: 2,
+      end: 5,
+      total: 5,
+    };
+
+    const next = mergeLoadedTimelineWithLatest({
+      current,
+      latestTimeline,
+      surfaceKey: current.surfaceKey,
+    });
+
+    expect(next.rows.map((row) => row.id)).toEqual([
+      "prompt",
+      "command-11",
+      "command-12",
+      "command-13",
+      "command-14",
+    ]);
+    expect(next.olderCursor).toEqual(cursor);
+  });
+
+  it("appends a new conversation group that starts right after the loaded tip", () => {
+    const olderUser = userRow({ id: "older-user", sequence: 1 });
+    const previousUser = userRow({ id: "previous-user", sequence: 10 });
+    const walkCursor = timelineCursor({ id: "walk-cursor", sequence: 1 });
+    const current = {
+      ...makeLoadedTimelineState([olderUser, previousUser], walkCursor, 20),
+      historySnapshot: "snapshot-1",
+    };
+    const followUp = userRow({ id: "follow-up", sequence: 21 });
+    const latestTimeline = makeTimelineResponse(
+      [followUp],
+      timelineCursor({ id: "follow-up", sequence: 21 }),
+      24,
+    );
+    latestTimeline.timelinePage.historySnapshot = "snapshot-2";
+    latestTimeline.timelinePage.olderRowsSourceSeqEnd = null;
+
+    const next = mergeLoadedTimelineWithLatest({
+      current,
+      latestTimeline,
+      surfaceKey: current.surfaceKey,
+    });
+
+    expect(next.rows.map((row) => row.id)).toEqual([
+      "older-user",
+      "previous-user",
+      "follow-up",
+    ]);
+    expect(next.olderCursor).toEqual(walkCursor);
+  });
+
+  it("rebuilds when an advanced snapshot shares no rows with a window it overlaps", () => {
+    const current = {
+      ...makeLoadedTimelineState(
+        [
+          userRow({ id: "older-user", sequence: 1 }),
+          userRow({ id: "regrouped", sequence: 10 }),
+        ],
+        timelineCursor({ id: "walk-cursor", sequence: 1 }),
+        20,
+      ),
+      historySnapshot: "snapshot-1",
+    };
+    const latestCursor = timelineCursor({ id: "latest-cursor", sequence: 10 });
+    const latestTimeline = makeTimelineResponse(
+      [userRow({ id: "replacement", sequence: 10 })],
+      latestCursor,
+      24,
+    );
+    latestTimeline.timelinePage.historySnapshot = "snapshot-2";
+    latestTimeline.timelinePage.olderRowsSourceSeqEnd = null;
+
+    const next = mergeLoadedTimelineWithLatest({
+      current,
+      latestTimeline,
+      surfaceKey: current.surfaceKey,
+    });
+
+    expect(next.rows.map((row) => row.id)).toEqual(["replacement"]);
+    expect(next.olderCursor).toEqual(latestCursor);
+  });
+
+  it("rebuilds when an event after the loaded tip changes an older conversation group", () => {
+    const latestUser = userRow({ id: "latest-user", sequence: 10 });
+    const current = {
+      ...makeLoadedTimelineState(
+        [userRow({ id: "older-user", sequence: 1 }), latestUser],
+        timelineCursor({ id: "walk-cursor", sequence: 1 }),
+        11,
+      ),
+      historySnapshot: "snapshot-1",
+    };
+    const latestCursor = timelineCursor({ id: "latest-cursor", sequence: 10 });
+    const latestTimeline = makeTimelineResponse([latestUser], latestCursor, 12);
+    latestTimeline.timelinePage.historySnapshot = "snapshot-2";
+    latestTimeline.timelinePage.olderRowsSourceSeqEnd = 12;
+
+    const next = mergeLoadedTimelineWithLatest({
+      current,
+      latestTimeline,
+      surfaceKey: current.surfaceKey,
+    });
+
+    expect(next.rows.map((row) => row.id)).toEqual(["latest-user"]);
+    expect(next.olderCursor).toEqual(latestCursor);
+    expect(next.historySnapshot).toBe("snapshot-2");
+  });
+
+  it("keeps loaded order when an older page repeats the loaded conversation group", () => {
+    const providerEnvironment = commandRow({
+      id: "provider-env",
+      sequence: 15,
+    });
+    const user = userRow({ id: "user", sequence: 13 });
+    const assistant = commandRow({ id: "assistant", sequence: 16 });
+    const olderAssistant = commandRow({ id: "older-assistant", sequence: 5 });
+
+    const rows = prependOlderTimelineRows({
+      olderRows: [olderAssistant, user, assistant],
+      loadedRows: [providerEnvironment, user, assistant],
+    });
+
+    expect(rows.map((row) => row.id)).toEqual([
+      "older-assistant",
+      "provider-env",
+      "user",
+      "assistant",
+    ]);
+    expect(rows[2]).toBe(user);
+  });
+
   it("replaces changed content even when row identity and sequence are unchanged", () => {
     const old = commandRow({ id: "command", sequence: 2 });
     const updated = { ...old, output: "updated output" };
@@ -660,5 +892,98 @@ describe("snapshot content pagination", () => {
         latestWindowStartSequence: 1,
       }).rows,
     ).toEqual([updated]);
+  });
+
+  it.each(["snapshot-1", "snapshot-2"])(
+    "reuses delta row references without reading nested payloads under %s",
+    (historySnapshot) => {
+      let outputReads = 0;
+      const child = commandRow({ id: "unchanged-command", sequence: 2 });
+      Object.defineProperty(child, "output", {
+        enumerable: true,
+        get() {
+          outputReads++;
+          return "large unchanged tool output";
+        },
+      });
+      const summary = turnSummaryRow({
+        id: "summary",
+        sequence: 2,
+        children: [child],
+      });
+      const tail = commandRow({ id: "live-command", sequence: 3 });
+      const updatedTail = { ...tail, output: "changed at the same sequence" };
+      const current = {
+        ...makeLoadedTimelineState([summary, tail], null),
+        historySnapshot: "snapshot-1",
+      };
+      const rows = applyTimelineDelta(current.rows, {
+        upsertRows: [updatedTail],
+      });
+      expect(rows).not.toBeNull();
+      const latestTimeline = makeTimelineResponse(rows!, null);
+      latestTimeline.timelinePage.historySnapshot = historySnapshot;
+      latestTimeline.timelinePage.olderRowsSourceSeqEnd = null;
+
+      const next = mergeLoadedTimelineWithLatest({
+        current,
+        latestTimeline,
+        surfaceKey: current.surfaceKey,
+      });
+
+      expect(next.rows[0]).toBe(summary);
+      expect(next.rows[1]).toBe(updatedTail);
+      expect(outputReads).toBe(0);
+    },
+  );
+
+  it("retains older children when a delta updates a partially loaded summary", () => {
+    const olderChild = commandRow({ id: "older-command", sequence: 2 });
+    const child = commandRow({ id: "live-command", sequence: 3 });
+    const partial = turnSummaryRow({
+      id: "summary",
+      sequence: 2,
+      endSequence: 3,
+      children: [child],
+    });
+    const current = {
+      ...makeLoadedTimelineState(
+        [{ ...partial, children: [olderChild, child] }],
+        null,
+      ),
+      historySnapshot: "snapshot-1",
+    };
+    const updatedChild = { ...child, output: "new output" };
+    const updated = { ...partial, children: [updatedChild] };
+    const rows = applyTimelineDelta([partial], { upsertRows: [updated] });
+    expect(rows).not.toBeNull();
+    const latestTimeline = makeTimelineResponse(rows!, null);
+    latestTimeline.timelinePage.historySnapshot = current.historySnapshot;
+
+    const next = mergeLoadedTimelineWithLatest({
+      current,
+      latestTimeline,
+      surfaceKey: current.surfaceKey,
+    });
+
+    expect(next.rows).toEqual([
+      { ...updated, children: [olderChild, updatedChild] },
+    ]);
+  });
+
+  it("still deduplicates children when both pages contain the same summary object", () => {
+    const child = commandRow({ id: "repeated-command", sequence: 2 });
+    const summary = turnSummaryRow({
+      id: "summary",
+      sequence: 2,
+      children: [child, child],
+    });
+
+    expect(
+      prependOlderTimelineRows({
+        olderRows: [summary],
+        loadedRows: [summary],
+      }),
+    ).toEqual([{ ...summary, children: [child] }]);
   });
 });

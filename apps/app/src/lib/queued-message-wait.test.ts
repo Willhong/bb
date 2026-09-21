@@ -47,6 +47,9 @@ describe("describeQueuedMessageWait", () => {
   });
 
   it("names each core wait a reader cannot otherwise explain", () => {
+    expect(describeWait({ kind: "stopping" })).toBe(
+      "Sending when the thread stops",
+    );
     expect(describeWait({ kind: "turn-starting" })).toBe(
       "Waiting for turn to start",
     );
@@ -60,7 +63,7 @@ describe("describeQueuedMessageWait", () => {
 
   it("names the absent machine a host-offline row is waiting on", () => {
     expect(describeWait({ kind: "host-offline", hostName: "M4" })).toBe(
-      "Waiting for M4 to reconnect",
+      "Waiting for M4 to be ready",
     );
   });
 
@@ -158,9 +161,7 @@ describe("queuedMessageWaitIcon", () => {
     expect(icon({ kind: "provisioning" })).toBe("Folder");
     expect(icon({ kind: "host-offline", hostName: "M4" })).toBe("CloudOff");
     expect(icon({ kind: "interaction" })).toBe("CircleQuestion");
-    expect(icon({ kind: "plugin", pluginId: "p", reason: "r" })).toBe(
-      "Limitation",
-    );
+    expect(icon({ kind: "plugin", pluginId: "p", reason: "r" })).toBeNull();
     expect(icon({ kind: "thread-busy" })).toBeNull();
     expect(icon(null)).toBeNull();
     expect(icon({ kind: "time" }, "Host is not connected")).toBe("AlertCircle");
@@ -200,26 +201,33 @@ describe("queuedMessageFallbackTitle", () => {
 });
 
 describe("isQueuedMessageSendNowAllowed", () => {
-  it("hides send-now only for the waits a re-attempt cannot clear", () => {
-    expect(isQueuedMessageSendNowAllowed({ kind: "time" })).toBe(true);
-    expect(
-      isQueuedMessageSendNowAllowed({
-        kind: "plugin",
-        pluginId: "limiter",
-        reason: "busy",
-      }),
-    ).toBe(true);
-    expect(isQueuedMessageSendNowAllowed({ kind: "thread-busy" })).toBe(true);
-    expect(isQueuedMessageSendNowAllowed({ kind: "turn-starting" })).toBe(
-      false,
-    );
-    expect(isQueuedMessageSendNowAllowed(null)).toBe(true);
-    expect(isQueuedMessageSendNowAllowed({ kind: "provisioning" })).toBe(false);
-    expect(isQueuedMessageSendNowAllowed({ kind: "interaction" })).toBe(false);
-    expect(
-      isQueuedMessageSendNowAllowed({ kind: "host-offline", hostName: "M4" }),
-    ).toBe(false);
-  });
+  it.each([
+    { waitingOn: null, allowed: true },
+    { waitingOn: { kind: "time" }, allowed: true },
+    {
+      waitingOn: { kind: "plugin", pluginId: "limiter", reason: "busy" },
+      allowed: true,
+    },
+    { waitingOn: { kind: "thread-busy" }, allowed: true },
+    { waitingOn: { kind: "stopping" }, allowed: false },
+    { waitingOn: { kind: "turn-starting" }, allowed: false },
+    { waitingOn: { kind: "provisioning" }, allowed: false },
+    { waitingOn: { kind: "interaction" }, allowed: false },
+    { waitingOn: { kind: "host-offline", hostName: "M4" }, allowed: false },
+  ] as const)(
+    "allows manual recovery for $waitingOn",
+    ({ waitingOn, allowed }) => {
+      expect(
+        isQueuedMessageSendNowAllowed({ waitingOn, failureReason: null }),
+      ).toBe(allowed);
+      expect(
+        isQueuedMessageSendNowAllowed({
+          waitingOn,
+          failureReason: "Provider unavailable",
+        }),
+      ).toBe(true);
+    },
+  );
 });
 
 describe("formatQueuedMessageCountdown", () => {

@@ -3,12 +3,13 @@ import { ExpandableTimelineRow } from "./ExpandableTimelineRow.js";
 import { TimelineReasoningDetail } from "./TimelineReasoningDetail.js";
 import { TimelineStatusIndicator } from "./TimelineStatusIndicator.js";
 
+const INDICATOR_HEADER_CLASS_NAME = "min-h-7 items-center";
+
 interface TimelineWorkingIndicatorProps {
   label?: string;
   isThinking?: boolean;
   details?: string;
   reasoningId?: string;
-  className?: string;
 }
 
 export function TimelineWorkingIndicator({
@@ -16,17 +17,17 @@ export function TimelineWorkingIndicator({
   isThinking = false,
   details,
   reasoningId,
-  className,
 }: TimelineWorkingIndicatorProps) {
   const resolvedLabel = label ?? (isThinking ? "Thinking…" : "Working...");
   const hasDetails = (details?.trim().length ?? 0) > 0;
 
   if (isThinking || hasDetails) {
     return (
-      <div className={cn("mt-4", className)}>
+      <div className="mt-4">
         <ExpandableTimelineRow
           reasoningExpansionKey={reasoningId}
           expandable={hasDetails}
+          headerClassName={INDICATOR_HEADER_CLASS_NAME}
           title={{
             segments: [
               { text: resolvedLabel, em: false, shimmer: true, truncate: true },
@@ -45,7 +46,7 @@ export function TimelineWorkingIndicator({
   return (
     <TimelineStatusIndicator
       label={<span className="animate-shine">{resolvedLabel}</span>}
-      className={cn("mt-4 flex min-h-7 items-center", className)}
+      className={cn("mt-4 flex", INDICATOR_HEADER_CLASS_NAME)}
     />
   );
 }

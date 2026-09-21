@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { ClaudeContextUsageCollector } from "./context-usage.js";
 
 import {
   type PendingInteractionGrantedPermissionProfile,
@@ -89,13 +90,12 @@ import {
   createClaudeSkillPluginsRoot,
   ensureClaudeSkillPlugin,
 } from "./skill-plugins.js";
-import { buildReadonlyBashUpdatedInput } from "./readonly-bash-policy.js";
 import {
   buildBridgeMcpServer,
   getAllowedToolNames,
-  BRIDGE_MCP_SERVER_NAME,
   type ToolCallForwarder,
 } from "./tool-proxy-mcp.js";
+import { BB_BRIDGE_MCP_SERVER_NAME } from "../tool-classification.js";
 import {
   type ClaudeInteractiveResponse,
   type ClaudePermissionMode,
@@ -116,6 +116,22 @@ const promptInputItemSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("text"),
     text: z.string(),
+    mentions: z
+      .array(
+        z.object({
+          start: z.number().int().nonnegative(),
+          end: z.number().int().nonnegative(),
+          resource: z
+            .object({
+              kind: z.string(),
+              trigger: z.string().optional(),
+              name: z.string().optional(),
+              source: z.string().optional(),
+            })
+            .passthrough(),
+        }),
+      )
+      .default([]),
   }),
   z.object({
     type: z.literal("image"),
@@ -136,12 +152,6 @@ const promptInputItemSchema = z.discriminatedUnion("type", [
 
 const CLAUDE_PROVIDER_SUBAGENT_TOOL_NAMES = new Set(["Agent", "Task"]);
 const CLAUDE_WORKFLOW_TOOL_NAME = "Workflow";
-
-interface SdkMessageNotification {
-  jsonrpc: "2.0";
-  method: "sdk/message";
-  params: { threadId: string; message: SDKMessage };
-}
 
 interface BridgeEventNotification {
   jsonrpc: "2.0";
@@ -201,26 +211,19 @@ interface ClaudeSessionPermissionGrantCoverageArgs {
   toolName: string;
 }
 
-type ClaudeSdkSessionState = Extract<
-  SDKMessage,
-  { type: "system"; subtype: "session_state_changed" }
->["state"];
-
 interface ClaudeSessionRestart {
   reason: string;
   showRuntimeNote: boolean;
 }
 
 interface ThreadSession {
+  contextUsageCollector: ClaudeContextUsageCollector;
   session: SdkSession;
   attachment: ThreadAttachment;
   sessionSerial: number;
   closing: boolean;
-  pendingForwardedToolCalls: number;
-  pendingSessionCronIds: Set<string>;
   restartBeforeNextTurn: ClaudeSessionRestart | null;
   recoveryHintRaisedThisTurn: "authRequired" | "rateLimited" | null;
-  sdkSessionState: ClaudeSdkSessionState | undefined;
   streamEnded: boolean;
   translator: ClaudeDeltaTranslator;
   pendingInteractiveRequests: Map<string | number, PendingInteractiveRequest>;
@@ -256,7 +259,6 @@ interface CreateThreadAttachmentArgs {
   providerThreadId?: string;
   sessionConstructionConfig: SessionConstructionConfig;
   sessionOptions: SdkSessionOptions;
-  sessionPermissionGrants?: ClaudeSessionPermissionGrant[];
   threadIdRef: ThreadIdRef;
 }
 
@@ -273,11 +275,7 @@ interface SessionConstructionConfig {
   dynamicTools: ThreadResumeParams["dynamicTools"];
   sessionOptions: Omit<
     BuildSessionOptionsArgs,
-    | "getPermissionEscalation"
-    | "memoryEnabled"
-    | "model"
-    | "reasoningLevel"
-    | "workflowsEnabled"
+    "memoryEnabled" | "model" | "reasoningLevel" | "workflowsEnabled"
   >;
 }
 
@@ -395,7 +393,7 @@ const THREAD_STOP_CLOSE_TIMEOUT_MS = 4_000;
 const CLAUDE_CHROME_SETTING_RESTART_REASON = "Claude in Chrome setting changed";
 
 const { send, sendResult, sendError } = createBridgeIo<
-  SdkMessageNotification | BridgeEventNotification | BridgeToolCallRequest
+  BridgeEventNotification | BridgeToolCallRequest
 >();
 
 const threadAttachments = new Map<string, ThreadAttachment>();
@@ -668,7 +666,15 @@ function sendThreadDeltas(
 }
 
 function sendSessionReset(threadId: string): void {
-  sendThreadDeltas(threadId, [{ kind: "session.reset" }]);
+  sendThreadDeltas(threadId, [
+    { kind: "session.reset" },
+    {
+      kind: "contextWindow",
+      used: null,
+      estimated: true,
+      attach: "currentOrLast",
+    },
+  ]);
 }
 
 function emitForSession(
@@ -779,7 +785,6 @@ function emitSessionError(
 }
 
 function emitSessionReplacement(args: {
-  contextLost: boolean;
   providerThreadId: string | null;
   reason: string;
   showRuntimeNote?: boolean;
@@ -797,7 +802,7 @@ function emitSessionReplacement(args: {
       threadId: args.threadId,
       providerThreadId: args.providerThreadId,
       reason: args.reason,
-      contextLost: args.contextLost,
+      contextLost: false,
       showRuntimeNote: args.showRuntimeNote ?? false,
     },
   });
@@ -808,6 +813,7 @@ function emitCanonicalTurnInputAccepted(
   acceptance: CanonicalTurnAcceptance,
   threadId: string,
 ): void {
+  threadSession.contextUsageCollector.invalidate();
   sendThreadDeltas(
     threadId,
     threadSession.translator.acceptInput(threadId, acceptance.clientRequestId),
@@ -881,24 +887,6 @@ function withTurnLiveSessionSettings(
   };
 }
 
-function withTrackedPermissionEscalation(
-  params: SessionConstructionParams,
-  threadIdRef: ThreadIdRef,
-): BuildSessionOptionsArgs {
-  return {
-    ...toSessionConstructionConfig(params).sessionOptions,
-    ...toInitialLiveSessionSettings(params),
-    getPermissionEscalation: (context) => {
-      const threadSession = threadAttachments.get(
-        threadIdRef.current,
-      )?.residentSession;
-      return threadSession
-        ? resolvePermissionEscalationForWork(threadSession, context)
-        : null;
-    },
-  };
-}
-
 function seedModelContextWindowHint(
   threadSession: ThreadSession,
   threadId: string,
@@ -928,7 +916,7 @@ function createThreadAttachment(
     ...(args.providerThreadId
       ? { providerThreadId: args.providerThreadId }
       : {}),
-    sessionPermissionGrants: [...(args.sessionPermissionGrants ?? [])],
+    sessionPermissionGrants: [],
     threadIdRef: args.threadIdRef,
   };
   attachment.residentSession = createThreadSession(attachment);
@@ -962,15 +950,13 @@ function createThreadSession(attachment: ThreadAttachment): ThreadSession {
     })),
   );
   const threadSession: ThreadSession = {
+    contextUsageCollector: new ClaudeContextUsageCollector(),
     session,
     attachment,
     sessionSerial,
     closing: false,
-    pendingForwardedToolCalls: 0,
-    pendingSessionCronIds: new Set(),
     restartBeforeNextTurn: null,
     recoveryHintRaisedThisTurn: null,
-    sdkSessionState: undefined,
     streamEnded: false,
     translator,
     pendingInteractiveRequests: new Map(),
@@ -1003,13 +989,6 @@ function startResidentThreadSession(
     throw error;
   }
   return threadSession;
-}
-
-function startAttachedResidentThreadSession(
-  attachment: ThreadAttachment,
-  resumeProviderThreadId?: string,
-): ThreadSession {
-  return startResidentThreadSession(attachment, resumeProviderThreadId);
 }
 
 function getTrackedPermissionEscalation(
@@ -1216,70 +1195,14 @@ function buildSessionTrackingHooks(
     return { continue: true };
   };
 
-  const trackSessionCrons: HookCallback = async (input) => {
-    if (input.hook_event_name !== "Stop" || input.session_crons === undefined) {
-      return { continue: true };
-    }
-    const threadSession = threadAttachments.get(
-      threadIdRef.current,
-    )?.residentSession;
-    if (threadSession) {
-      threadSession.pendingSessionCronIds = new Set(
-        input.session_crons.map((cron) => cron.id),
-      );
-    }
-    return { continue: true };
-  };
-
   return {
     PermissionDenied: [{ hooks: [clearToolUse] }],
     PermissionRequest: [{ hooks: [trackPermissionRequest] }],
     PostToolUse: [{ hooks: [clearToolUse] }],
     PostToolUseFailure: [{ hooks: [clearToolUse] }],
     PreToolUse: [{ hooks: [trackPreToolUse] }],
-    Stop: [{ hooks: [trackSessionCrons] }],
     SubagentStart: [{ hooks: [trackSubagentStart] }],
     SubagentStop: [{ hooks: [clearSubagent] }],
-  };
-}
-
-function addSessionTrackingHooks(
-  sessionOptions: SdkSessionOptions,
-  threadIdRef: ThreadIdRef,
-): void {
-  const existingHooks = sessionOptions.hooks;
-  const trackingHooks = buildSessionTrackingHooks(threadIdRef);
-  sessionOptions.hooks = {
-    ...existingHooks,
-    PermissionDenied: [
-      ...(trackingHooks.PermissionDenied ?? []),
-      ...(existingHooks?.PermissionDenied ?? []),
-    ],
-    PermissionRequest: [
-      ...(trackingHooks.PermissionRequest ?? []),
-      ...(existingHooks?.PermissionRequest ?? []),
-    ],
-    PostToolUse: [
-      ...(trackingHooks.PostToolUse ?? []),
-      ...(existingHooks?.PostToolUse ?? []),
-    ],
-    PostToolUseFailure: [
-      ...(trackingHooks.PostToolUseFailure ?? []),
-      ...(existingHooks?.PostToolUseFailure ?? []),
-    ],
-    PreToolUse: [
-      ...(trackingHooks.PreToolUse ?? []),
-      ...(existingHooks?.PreToolUse ?? []),
-    ],
-    Stop: [...(trackingHooks.Stop ?? []), ...(existingHooks?.Stop ?? [])],
-    SubagentStart: [
-      ...(trackingHooks.SubagentStart ?? []),
-      ...(existingHooks?.SubagentStart ?? []),
-    ],
-    SubagentStop: [
-      ...(trackingHooks.SubagentStop ?? []),
-      ...(existingHooks?.SubagentStop ?? []),
-    ],
   };
 }
 
@@ -1289,10 +1212,13 @@ function buildTrackedSessionOptions(
   threadIdRef: ThreadIdRef,
 ): SdkSessionOptions {
   const sessionOptions = buildSessionOptions(
-    withTrackedPermissionEscalation(params, threadIdRef),
+    {
+      ...toSessionConstructionConfig(params).sessionOptions,
+      ...toInitialLiveSessionSettings(params),
+    },
     env,
   );
-  addSessionTrackingHooks(sessionOptions, threadIdRef);
+  sessionOptions.hooks = buildSessionTrackingHooks(threadIdRef);
   sessionOptions.recordThreadId = () => threadIdRef.current;
   return sessionOptions;
 }
@@ -1301,7 +1227,6 @@ function replaceThreadSession(args: ReplaceThreadSessionArgs): ThreadSession {
   args.threadSession.closing = true;
   resolvePendingSessionWork(args.threadSession, args.restart.reason);
   emitSessionReplacement({
-    contextLost: false,
     providerThreadId: args.providerThreadId,
     reason: args.restart.reason,
     showRuntimeNote: args.restart.showRuntimeNote,
@@ -1408,6 +1333,13 @@ function createOnSdkMessage(
       threadId: args.threadIdRef.current,
     });
     if (!threadSession) return;
+    if (
+      message.type === "assistant" ||
+      message.type === "user" ||
+      message.type === "stream_event"
+    ) {
+      threadSession.contextUsageCollector.invalidate();
+    }
     const providerThreadId = message.session_id?.trim() ?? "";
     if (
       providerThreadId.length > 0 &&
@@ -1425,16 +1357,47 @@ function createOnSdkMessage(
       };
     }
     trackSdkAssistantPermissionEscalation(threadSession, message);
-    if (
-      message.type === "system" &&
-      message.subtype === "session_state_changed"
-    ) {
-      threadSession.sdkSessionState = message.state;
-    }
     emitForSession(threadSession, args.threadIdRef.current, "sdk/message", {
       threadId: args.threadIdRef.current,
       message,
     });
+    if (
+      message.type === "result" ||
+      (message.type === "system" && message.subtype === "compact_boundary")
+    ) {
+      if (message.type === "system") {
+        sendThreadDeltas(args.threadIdRef.current, [
+          {
+            kind: "contextWindow",
+            used: null,
+            estimated: true,
+            attach: "currentOrLast",
+          },
+        ]);
+      }
+      if (providerThreadId) {
+        void threadSession.contextUsageCollector.capture({
+          read: () => threadSession.session.getContextUsage(),
+          providerSessionId: providerThreadId,
+          isCurrent: () =>
+            getCurrentThreadSession({
+              sessionSerial: args.sessionSerial,
+              threadId: args.threadIdRef.current,
+            }) === threadSession && !threadSession.streamEnded,
+          publish: (snapshot) =>
+            sendThreadDeltas(args.threadIdRef.current, [
+              {
+                kind: "contextWindow",
+                used: snapshot.usedTokens,
+                size: snapshot.contextWindowTokens,
+                estimated: snapshot.estimated,
+                snapshot,
+                attach: "currentOrLast",
+              },
+            ]),
+        });
+      }
+    }
     const recoveryKind = getAssistantMessageRecoveryKind(message);
     if (recoveryKind !== null) {
       emitTerminalAccountErrorHint(
@@ -1958,21 +1921,6 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
       };
     }
 
-    if (
-      toolName === "Bash" &&
-      (threadSession.attachment.permissionMode === "default" ||
-        threadSession.attachment.permissionMode === "dontAsk")
-    ) {
-      const updatedInput = buildReadonlyBashUpdatedInput(input);
-      if (updatedInput) {
-        return {
-          behavior: "allow",
-          updatedInput,
-          toolUseID: options.toolUseID,
-        };
-      }
-    }
-
     const shouldRequestApproval =
       shouldRequestClaudePermissionApproval(requestContext) ||
       (options.suggestions?.length ?? 0) > 0;
@@ -1993,10 +1941,7 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
       };
     }
 
-    if (
-      shouldAutoDenyInteractiveRequest(interactiveRequestPolicy) ||
-      threadSession.attachment.permissionMode === "dontAsk"
-    ) {
+    if (shouldAutoDenyInteractiveRequest(interactiveRequestPolicy)) {
       const policyMessage =
         threadSession.attachment.permissionMode === "acceptEdits" ||
         threadSession.attachment.permissionMode === "auto"
@@ -2113,32 +2058,25 @@ async function handleRequest(request: ClaudeCodeJsonRpcRequest): Promise<void> {
   }
 }
 
-async function handleThreadStart(
+function attachThreadSession(
   id: string | number,
-  params: ThreadStartParams,
-): Promise<void> {
+  params: SessionConstructionParams,
+  providerThreadId: string,
+  resume: boolean,
+): void {
   const threadIdRef = { current: params.threadId };
-
-  const existing = threadAttachments.get(threadIdRef.current);
-  if (existing) {
-    await closeThreadSession({
-      graceful: false,
-      message: "Thread session replaced while awaiting permission approval",
-      threadId: threadIdRef.current,
-    });
-  }
-
   const env = buildSessionEnv(readConfigEnvOverrides(params.config));
   const sessionOptions = buildTrackedSessionOptions(params, env, threadIdRef);
-  const providerThreadId = randomUUID();
-  sessionOptions.sessionId = providerThreadId;
+  if (!resume) {
+    sessionOptions.sessionId = providerThreadId;
+  }
   sessionOptions.canUseTool = createCanUseTool(threadIdRef);
   if (params.dynamicTools && params.dynamicTools.length > 0) {
     const mcpServer = buildBridgeMcpServer(
       params.dynamicTools,
       createForwardToolCall(() => threadIdRef.current),
     );
-    sessionOptions.mcpServers = { [BRIDGE_MCP_SERVER_NAME]: mcpServer };
+    sessionOptions.mcpServers = { [BB_BRIDGE_MCP_SERVER_NAME]: mcpServer };
     sessionOptions.allowedTools = getAllowedToolNames(params.dynamicTools);
   }
 
@@ -2150,15 +2088,30 @@ async function handleThreadStart(
     providerThreadId,
     sessionConstructionConfig: toSessionConstructionConfig(params),
     sessionOptions,
-    sessionPermissionGrants: [],
     threadIdRef,
   });
-  threadAttachments.set(threadIdRef.current, attachment);
-  startAttachedResidentThreadSession(attachment);
+  threadAttachments.set(params.threadId, attachment);
+  startResidentThreadSession(attachment, resume ? providerThreadId : undefined);
 
-  sendThreadIdentity(threadIdRef.current, providerThreadId);
-  sendSessionReset(threadIdRef.current);
+  sendThreadIdentity(params.threadId, providerThreadId);
+  sendSessionReset(params.threadId);
   sendResult(id, { providerThreadId, sessionRestorable: true });
+}
+
+async function handleThreadStart(
+  id: string | number,
+  params: ThreadStartParams,
+): Promise<void> {
+  const existing = threadAttachments.get(params.threadId);
+  if (existing) {
+    await closeThreadSession({
+      graceful: false,
+      message: "Thread session replaced while awaiting permission approval",
+      threadId: params.threadId,
+    });
+  }
+
+  attachThreadSession(id, params, randomUUID(), false);
 }
 
 async function handleThreadResume(
@@ -2209,7 +2162,6 @@ async function handleThreadResume(
   if (existing) {
     if (!existing.closing && existingSession) {
       emitSessionReplacement({
-        contextLost: false,
         providerThreadId: requestedProviderThreadId ?? null,
         reason:
           "Claude session restarted: construction-scoped settings changed",
@@ -2224,40 +2176,7 @@ async function handleThreadResume(
     });
   }
 
-  const env = buildSessionEnv(readConfigEnvOverrides(params.config));
-  const threadIdRef = { current: threadId };
-  const sessionOptions = buildTrackedSessionOptions(params, env, threadIdRef);
-  sessionOptions.canUseTool = createCanUseTool(threadIdRef);
-  if (params.dynamicTools && params.dynamicTools.length > 0) {
-    const mcpServer = buildBridgeMcpServer(
-      params.dynamicTools,
-      createForwardToolCall(() => threadIdRef.current),
-    );
-    sessionOptions.mcpServers = { [BRIDGE_MCP_SERVER_NAME]: mcpServer };
-    sessionOptions.allowedTools = getAllowedToolNames(params.dynamicTools);
-  }
-  const attachment = createThreadAttachment({
-    liveSettings: toInitialLiveSessionSettings(params),
-    permissionEscalation: params.permissionEscalation,
-    permissionMode: params.permissionMode,
-    approvedPlanPermissionMode: params.approvedPlanPermissionMode,
-    ...(requestedProviderThreadId
-      ? { providerThreadId: requestedProviderThreadId }
-      : {}),
-    sessionConstructionConfig,
-    sessionOptions,
-    sessionPermissionGrants: [],
-    threadIdRef,
-  });
-  threadAttachments.set(threadId, attachment);
-  startAttachedResidentThreadSession(attachment, requestedProviderThreadId);
-
-  sendThreadIdentity(threadId, requestedProviderThreadId);
-  sendSessionReset(threadId);
-  sendResult(id, {
-    providerThreadId: requestedProviderThreadId,
-    sessionRestorable: true,
-  });
+  attachThreadSession(id, params, requestedProviderThreadId, true);
 }
 
 async function handleThreadFork(
@@ -2289,38 +2208,7 @@ async function handleThreadFork(
     return;
   }
 
-  const env = buildSessionEnv(readConfigEnvOverrides(params.config));
-  const threadIdRef = { current: threadId };
-  const sessionOptions = buildTrackedSessionOptions(params, env, threadIdRef);
-  sessionOptions.canUseTool = createCanUseTool(threadIdRef);
-  if (params.dynamicTools && params.dynamicTools.length > 0) {
-    const mcpServer = buildBridgeMcpServer(
-      params.dynamicTools,
-      createForwardToolCall(() => threadIdRef.current),
-    );
-    sessionOptions.mcpServers = { [BRIDGE_MCP_SERVER_NAME]: mcpServer };
-    sessionOptions.allowedTools = getAllowedToolNames(params.dynamicTools);
-  }
-  const attachment = createThreadAttachment({
-    liveSettings: toInitialLiveSessionSettings(params),
-    permissionEscalation: params.permissionEscalation,
-    permissionMode: params.permissionMode,
-    approvedPlanPermissionMode: params.approvedPlanPermissionMode,
-    providerThreadId: forkedProviderThreadId,
-    sessionConstructionConfig: toSessionConstructionConfig(params),
-    sessionOptions,
-    sessionPermissionGrants: [],
-    threadIdRef,
-  });
-  threadAttachments.set(threadId, attachment);
-  startAttachedResidentThreadSession(attachment, forkedProviderThreadId);
-
-  sendThreadIdentity(threadId, forkedProviderThreadId);
-  sendSessionReset(threadId);
-  sendResult(id, {
-    providerThreadId: forkedProviderThreadId,
-    sessionRestorable: true,
-  });
+  attachThreadSession(id, params, forkedProviderThreadId, true);
 }
 
 function toClaudeSessionParams(
@@ -2337,10 +2225,11 @@ function toClaudeSessionParams(
   });
 }
 
-async function runTurnStart(
+async function runTurnInput(
   id: string | number,
-  params: TurnStartParams,
+  params: TurnStartParams | TurnSteerParams,
   acceptance: CanonicalTurnAcceptance,
+  intent: "new-turn" | "steer",
 ): Promise<void> {
   const promptText = buildPromptText(params.input);
   if (promptText === undefined) {
@@ -2350,14 +2239,13 @@ async function runTurnStart(
 
   const attachment = threadAttachments.get(params.threadId);
   if (attachment) {
-    applyTurnEnvironment(attachment, params.config);
+    if ("config" in params) {
+      applyTurnEnvironment(attachment, params.config);
+    }
     applyChromeSetting(attachment, params.chromeEnabled);
   }
 
-  const threadSession = await getWritableThreadSession(
-    params.threadId,
-    "new-turn",
-  );
+  const threadSession = await getWritableThreadSession(params.threadId, intent);
   if (!threadSession) {
     sendError(id, -32000, "No active session");
     return;
@@ -2402,7 +2290,7 @@ async function handleTurnStart(
   id: string | number,
   params: CanonicalTurnStartParams,
 ): Promise<void> {
-  await runTurnStart(
+  await runTurnInput(
     id,
     claudeTurnStartParamsSchema.parse(
       buildClaudeTurnParams({
@@ -2416,74 +2304,15 @@ async function handleTurnStart(
       clientRequestId: params.clientRequestId,
       providerThreadId: params.providerThreadId,
     },
+    "new-turn",
   );
-}
-
-async function runTurnSteer(
-  id: string | number,
-  params: TurnSteerParams,
-  acceptance: CanonicalTurnAcceptance,
-): Promise<void> {
-  const promptText = buildPromptText(params.input);
-  if (promptText === undefined) {
-    sendError(id, BRIDGE_JSON_RPC_ERRORS.INVALID_PARAMS, "Missing input text");
-    return;
-  }
-
-  const attachment = threadAttachments.get(params.threadId);
-  if (attachment) {
-    applyChromeSetting(attachment, params.chromeEnabled);
-  }
-
-  const threadSession = await getWritableThreadSession(
-    params.threadId,
-    "steer",
-  );
-  if (!threadSession) {
-    sendError(id, -32000, "No active session");
-    return;
-  }
-
-  if (!threadSession.session.canPushInput()) {
-    sendError(id, -32000, "Claude SDK input stream is closed");
-    return;
-  }
-  try {
-    await applyLiveSessionSettings(
-      threadSession,
-      params.threadId,
-      withTurnLiveSessionSettings(
-        threadSession.attachment.liveSettings,
-        params,
-      ),
-    );
-    await enterPlanModeIfRequested(threadSession, params);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    sendError(id, -32000, message);
-    return;
-  }
-
-  try {
-    await pushPromptInput(
-      threadSession,
-      promptText,
-      params.permissionEscalation,
-    );
-    emitCanonicalTurnInputAccepted(threadSession, acceptance, params.threadId);
-    threadSession.attachment.permissionEscalation = params.permissionEscalation;
-    sendResult(id, { threadId: params.threadId });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    sendError(id, -32000, message);
-  }
 }
 
 async function handleTurnSteer(
   id: string | number,
   params: CanonicalTurnSteerParams,
 ): Promise<void> {
-  await runTurnSteer(
+  await runTurnInput(
     id,
     claudeTurnSteerParamsSchema.parse(
       buildClaudeTurnParams({
@@ -2498,6 +2327,7 @@ async function handleTurnSteer(
       clientRequestId: params.clientRequestId,
       providerThreadId: params.providerThreadId,
     },
+    "steer",
   );
 }
 
@@ -2545,6 +2375,31 @@ function localAttachmentMarker(args: {
   return `[Attached ${args.kind}${namePart}${suffix}. It is on disk at ${args.path} — use the Read tool to view it.]`;
 }
 
+function normalizeClaudeSkillMentions(
+  entry: Extract<z.infer<typeof promptInputItemSchema>, { type: "text" }>,
+): string {
+  const replacements = new Set<number>();
+  for (const mention of entry.mentions) {
+    const resource = mention.resource;
+    if (
+      resource.kind === "command" &&
+      resource.source === "skill" &&
+      resource.trigger === "$" &&
+      typeof resource.name === "string" &&
+      mention.end <= entry.text.length &&
+      entry.text.slice(mention.start, mention.end) === `$${resource.name}`
+    ) {
+      replacements.add(mention.start);
+    }
+  }
+
+  let normalized = entry.text;
+  for (const start of replacements) {
+    normalized = `${normalized.slice(0, start)}/${normalized.slice(start + 1)}`;
+  }
+  return normalized;
+}
+
 function buildPromptText(input: unknown): string | undefined {
   if (typeof input === "string") {
     return input.length > 0 ? input : undefined;
@@ -2558,7 +2413,8 @@ function buildPromptText(input: unknown): string | undefined {
     const entry = parsed.data;
     switch (entry.type) {
       case "text":
-        if (entry.text.length > 0) chunks.push(entry.text);
+        if (entry.text.length > 0)
+          chunks.push(normalizeClaudeSkillMentions(entry));
         break;
       case "image":
         chunks.push(`[Attached image: ${entry.url}]`);
@@ -2589,8 +2445,10 @@ function handleParsedMessage(parsed: unknown): void {
     return;
   }
 
-  if (response && findSessionByPendingInteractiveRequest(response.id)) {
-    const threadSession = findSessionByPendingInteractiveRequest(response.id)!;
+  const threadSession = response
+    ? findSessionByPendingInteractiveRequest(response.id)
+    : undefined;
+  if (response && threadSession) {
     const pending = threadSession.pendingInteractiveRequests.get(response.id)!;
     threadSession.pendingInteractiveRequests.delete(response.id);
     if ("error" in response) {

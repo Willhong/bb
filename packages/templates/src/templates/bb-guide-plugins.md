@@ -222,8 +222,20 @@ connect status and push with `&&`.
 Local file and empty-directory deletions are warnings unless `--delete` is
 explicit; a pulled folder root is retained, so pull its parent or the whole
 vault to remove that folder. Use `--workspace-host <id>` when a standalone
-CLI's working directory is on a non-primary host. Direct `write`, `mkdir`,
+CLI's working directory is not on the server machine. Direct `write`, `mkdir`,
 `move`, and `remove` remain only as deprecated compatibility commands.
+
+Docs can also propose revisions without overwriting the saved document:
+
+  bb docs proposal <path> [--vault <id>] [--json]
+  bb docs propose <path> --file <candidate.md> --expected-sha256 <hash> --version <none|N> [--vault <id>] [--json]
+  bb docs proposal-update <path> --content <markdown> --version <N> [--vault <id>] [--json]
+  bb docs accept|reject|undo|redo <path> --version <N> [--vault <id>] [--json]
+
+Read the current file and proposal before proposing. Use `none` only when no
+proposal exists; otherwise pass its current version. Markdown Docs cards are
+editable in the timeline and can open in a tab. Pending proposals show a live
+diff for the user to accept, reject, edit, or request further changes.
 
 The Tasks plugin is an opt-in official plugin bundled with the app:
 `bb plugin install tasks`. It adds a task tracker, agent delegation,
@@ -276,7 +288,7 @@ added/updated/unchanged counts.
                                  URL, local path, builtin:<name>,
                                  git:<url>[@<ref|semver-range>], or
                                  npm:<package>[@<version|tag|range>]
-                                 (npm: needs npm on PATH; installs prompt —
+                                 (installs prompt —
                                  pass --yes to skip). Managed git:/npm:
                                  installs refuse engines.bb / engines.bbPluginSdk
                                  mismatches, manifest/artifact identity
@@ -341,18 +353,17 @@ added/updated/unchanged counts.
                                  devDependency to this bb's SDK version and
                                  the type-only devDependencies of the packages
                                  bb shims at runtime (sonner, vaul, the portal
-                                 radix families, ...) to this bb's versions, or
-                                 rewrite the vendored types/ of a plugin that
-                                 still carries them; --check writes nothing
-                                 and exits non-zero on a mismatch
+                                 radix families, ...) to this bb's versions;
+                                 legacy vendored-layout plugins must migrate;
+                                 --check writes nothing and exits non-zero on
+                                 a mismatch
   bb plugin migrate [path]       Switch a plugin that still vendors types/ to
                                  the @get-bb/plugin-sdk npm package (default:
                                  cwd): pin the devDependency, drop the tsconfig
                                  path map, delete the vendored declarations.
                                  Prints the plan and asks first; --yes skips
                                  the prompt (required when stdin is not a
-                                 terminal). The old layout keeps working, so
-                                 nothing migrates unless you ask
+                                 terminal)
   bb plugin build [path]         Compile the plugin into dist/ — the backend
                                  bundle (server.js, server.meta.json); when
                                  bb.app is declared, the minified frontend
@@ -581,8 +592,12 @@ from dependencies you have already installed. A build failure fails the
 install. npm packages must ship a metadata-validated prebuilt app or the
 install is refused. The server rebuilds source-built apps after a bb upgrade.
 
-Installing or updating a git plugin requires `npm` on PATH. Checking for
-updates does not: a check reads the candidate's manifest and stops, so
+BB ships a pinned npm for plugin installation and updates; npm and Node do
+not need to be on PATH. Git sources still require `git`. Git installs use
+`--omit=dev --omit=optional --ignore-scripts`. Plugins may keep normal
+development dependencies in their manifests; npm resolves these but does not
+install them.
+Checking for updates does not install dependencies: a check reads the candidate's manifest and stops, so
 polling never resolves a dependency tree or builds. A candidate that fails to
 build is reported as available and fails when you apply it.
 
@@ -823,17 +838,17 @@ node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk.d.ts (plus
 -app.d.ts and -host.d.ts): ordinary readable declarations, not a minified
 bundle — read them
 for an exact signature. Plugins scaffolded before this switch instead vendor
-the root/app declarations in types/, mapped through tsconfig; that layout still
-works for existing entries. Run `bb plugin migrate` before adding `bb.host` so
-the `/host` and `/testing/host` declaration subpaths are available; migration
-shows every change and asks first.
+the root/app declarations in types/, mapped through tsconfig. `bb plugin build`
+and `bb plugin dev` still work with those checked-in declarations, but warn
+without updating them. Run `bb plugin migrate` to receive current SDK types and
+before adding `bb.host` so the `/host` and `/testing/host` declaration subpaths
+are available; migration shows every change and asks first.
 The SDK surface grows every release, so `bb plugin types` syncs a plugin to
-the running bb — repinning the SDK devDependency and the shimmed packages'
-type-only devDependencies, or rewriting types/ for a plugin that still
-vendors them. Run it in a cloned or older plugin, and `bb
-plugin types --check` in CI. `bb plugin build` and `bb plugin dev` keep a
-vendored plugin in step for you. Need a symbol the types
-don't explain? Clone the repo: https://github.com/get-bb/bb. The API in
+the running bb by repinning the SDK devDependency and the shimmed packages'
+type-only devDependencies. It exits with migration instructions for a plugin
+that still vendors types/. Run it in a cloned or older package-layout plugin,
+and `bb plugin types --check` in CI. Need a symbol the types don't explain?
+Clone the repo: https://github.com/get-bb/bb. The API in
 one line each — bb.log (plugin-scoped logger behind `bb plugin logs`);
 bb.settings.define (declarative settings incl. secrets, editable via
 `bb plugin config`); bb.storage.kv (JSON rows ≤256KB) and
@@ -904,3 +919,22 @@ bot), agent-enrichment (agent surfaces), and composer-customization (all
 composer regions). Thread Hover
 Cards installs from the BB Community marketplace (source: the bb-plugins
 repo).
+
+Modal setup uses `bb modal account inspect --json` to check credentials, then
+`bb machine create --provider modal-sandbox --json` to create a
+machine. Settings edits its shared Dockerfile; `bb modal image set --file PATH [--json]` saves it and `bb modal image reset [--json]` restores the bundled default for future machines; `bb modal image show [--json]`
+reads the same file without cloud access. The image builds automatically and is reused across projects;
+core installs the daemon on demand. Project dependencies and services belong in
+`.bb-env-setup.sh`. Read the plugin's skill for connection and lifecycle details.
+
+Contributed commands may accept `--stdin`: the calling CLI transfers up to
+256 KiB of multiline text as `--input-text`, without reading server-local files.
+The existing `--<flag>-stdin` form still accepts one line.
+
+Modal image debugging: `bb modal image build [--json]` prepares the saved image; `bb modal sandbox run [--json]` starts a 30-minute standalone sandbox; `bb modal sandbox exec ID [--json] -- COMMAND...` runs a command (60-second timeout); `bb modal sandbox stop ID [--json]` cleans up. These debug sandboxes skip BB enrollment, clone and setup. Logs are returned after the build finishes.
+
+## Inspect plugin RPC
+
+`bb plugin rpc list [plugin-id] [--method <exact-name>] [--json]` lists discoverable methods from running plugins, optionally restricted to one plugin. `bb plugin rpc inspect <plugin-id> [method] [--json]` dumps registration and method descriptions plus input/output JSON Schemas. Copy the relevant schema into your consumer and call the existing plugin RPC endpoint. Discovery is opt-in advertising, not access control; method names may carry versions such as `provider-usage.v1.listResources`.
+
+`bb plugin rpc call <plugin-id> <method> [--input-file <json-path>] [--json]` invokes a method using server-side schema validation. Omitting the input file sends JSON null. Input files avoid putting sensitive values in command arguments.

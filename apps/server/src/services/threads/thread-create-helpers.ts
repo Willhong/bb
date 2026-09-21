@@ -1,5 +1,6 @@
 import {
   createThread,
+  InvalidLifecycleOwnerError,
   getThreadSectionById,
   getProjectSourceByHost,
   getProject,
@@ -78,6 +79,7 @@ export function buildEnvironmentProvisionCommand(
 ): EnvironmentProvisionCommand {
   return {
     type: "environment.attach" as const,
+    contributedEnv: [],
     environmentId: args.environmentId,
     initiator: args.initiator,
     path: args.path,
@@ -107,8 +109,10 @@ export function createThreadRecord(
       sectionId,
       parentThreadId: args.request.parentThreadId ?? null,
       sourceThreadId: args.request.sourceThreadId ?? null,
+      lifecycleOwnerThreadId: args.request.lifecycleOwnerThreadId,
       originKind: args.request.originKind,
       originPluginId: args.request.originPluginId ?? null,
+      pluginMetadata: args.request.pluginMetadata,
       visibility: args.request.visibility,
       // Every thread starts `pending`, with no exception to parameterise.
       // Creation is unhooked and provisions nothing; admission happens at the
@@ -120,6 +124,9 @@ export function createThreadRecord(
     emitPluginThreadCreated(thread);
     return thread;
   } catch (error) {
+    if (error instanceof InvalidLifecycleOwnerError) {
+      throw new ApiError(400, "invalid_request", error.message);
+    }
     if (
       sectionId !== null &&
       error instanceof Error &&

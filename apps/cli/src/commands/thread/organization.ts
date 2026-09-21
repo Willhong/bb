@@ -6,17 +6,23 @@ import {
   type QueuedMessageWaitHolder,
 } from "@bb/domain";
 import type { ThreadQueuedMessagesResult } from "@bb/sdk";
-import { renderBorderlessTable } from "../../table.js";
+import {
+  columnWidths,
+  printBorderlessTable,
+  truncateCell,
+} from "../../table.js";
 import { describeQueueWait } from "./actions.js";
 import { formatQueueSendCountdown } from "./send-time.js";
 import { action } from "../../action.js";
 import { createCliBbSdk } from "../../client.js";
+import { requireTextInput, TEXT_FILE_HELP_SUFFIX } from "../../text-input.js";
 import {
+  collectOption,
   confirmDestructiveAction,
   outputJson,
   requireThreadIdOrSelf,
 } from "../helpers.js";
-import { buildPromptInputs, collectOption } from "./helpers.js";
+import { buildPromptInputs, uploadClientAttachmentInputs } from "./helpers.js";
 
 interface JsonOptions {
   json?: boolean;
@@ -43,12 +49,14 @@ interface QueueListOptions extends JsonOptions {
 }
 
 interface QueueCreateOptions extends JsonOptions {
+  messageFile?: string;
   model?: string;
 }
 
 interface QueueUpdateOptions extends JsonOptions {
   file?: string[];
   image?: string[];
+  messageFile?: string;
 }
 
 interface QueueSendOptions extends JsonOptions {
@@ -111,28 +119,27 @@ function printQueueTable(rows: ThreadQueuedMessagesResult): void {
       : row.initiator === "system"
         ? "System"
         : (row.senderThreadId ?? "Agent"),
-    truncateQueueCell(queuedMessagePreview(row.content)),
-    truncateQueueCell(describeQueueWait(row)),
+    truncateCell(queuedMessagePreview(row.content), MAX_QUEUE_TEXT_WIDTH),
+    truncateCell(
+      row.failureReason === null
+        ? describeQueueWait(row)
+        : `Failed: ${row.failureReason}`,
+      MAX_QUEUE_TEXT_WIDTH,
+    ),
     formatQueueSendCountdown(row.sendAt, now),
   ]);
-  console.log("");
-  console.log(
-    renderBorderlessTable(
-      {
-        head: ["ID", "Thread", "Sender", "Message", "Waiting on", "Send at"],
-        colWidths: [
-          queueColumnWidth(table, 0, 2),
-          queueColumnWidth(table, 1, 6),
-          queueColumnWidth(table, 2, 6),
-          queueColumnWidth(table, 3, 7),
-          queueColumnWidth(table, 4, 10),
-          queueColumnWidth(table, 5, 7),
-        ],
-      },
-      table,
-    ),
+  printBorderlessTable(
+    {
+      head: ["ID", "Thread", "Sender", "Message", "Waiting on", "Send at"],
+      colWidths: columnWidths(table, [2, 6, 6, 7, 10, 7]),
+    },
+    table,
   );
-  console.log("");
+  for (const row of rows) {
+    if (row.failureReason === null) continue;
+    console.log(`Failed ${row.id}: ${row.failureReason}`);
+    console.log(`Retry: bb thread queue send ${row.threadId} ${row.id}`);
+  }
 }
 
 function queuedMessagePreview(content: PromptInput[]): string {
@@ -141,20 +148,6 @@ function queuedMessagePreview(content: PromptInput[]): string {
     .map((block) => block.text)
     .join(" ");
   return text.trim() === "" ? "(no text)" : text;
-}
-
-function queueColumnWidth(
-  rows: string[][],
-  index: number,
-  headWidth: number,
-): number {
-  return Math.max(headWidth, ...rows.map((row) => row[index]!.length));
-}
-
-function truncateQueueCell(value: string): string {
-  const singleLine = value.replace(/\s+/gu, " ");
-  if (singleLine.length <= MAX_QUEUE_TEXT_WIDTH) return singleLine;
-  return `${singleLine.slice(0, MAX_QUEUE_TEXT_WIDTH - 1)}…`;
 }
 
 /**
@@ -328,46 +321,56 @@ export function registerOrganizationCommands(
     .description("Manage queued thread messages");
   queue
     .command("list [threadId]")
-    .description(
-      "List queued messages; omit the thread to list every one",
-    )
+    .description("List queued messages; omit the thread to list every one")
     .option(
       "--wait-holder <holder>",
       "Filter to rows one plugin is holding: plugin:<plugin-id>",
     )
     .option("--json", "Print machine-readable JSON output")
     .action(
-      action(
-        async (threadId: string | undefined, opts: QueueListOptions) => {
-          const sdk = createCliBbSdk(getUrl());
-          // A thread argument keeps the thread-scoped route, which is the one
-          // that returns queue ORDER; the cross-thread route answers "what is
-          // queued anywhere" and is ordered by age instead.
-          const result =
-            threadId === undefined
-              ? await sdk.threads.queue.list({
-                  ...(opts.waitHolder
-                    ? { waitHolder: parseWaitHolder(opts.waitHolder) }
-                    : {}),
-                })
-              : await sdk.threads.queuedMessages.list({ threadId });
-          if (outputJson(opts, result)) return;
-          if (result.length === 0) {
-            console.log("No queued messages found");
-            return;
-          }
-          printQueueTable(result);
-        },
-      ),
+      action(async (threadId: string | undefined, opts: QueueListOptions) => {
+        const sdk = createCliBbSdk(getUrl());
+        // A thread argument keeps the thread-scoped route, which is the one
+        // that returns queue ORDER; the cross-thread route answers "what is
+        // queued anywhere" and is ordered by age instead.
+        const result =
+          threadId === undefined
+            ? await sdk.threads.queue.list({
+                ...(opts.waitHolder
+                  ? { waitHolder: parseWaitHolder(opts.waitHolder) }
+                  : {}),
+              })
+            : await sdk.threads.queuedMessages.list({ threadId });
+        if (outputJson(opts, result)) return;
+        if (result.length === 0) {
+          console.log("No queued messages found");
+          return;
+        }
+        printQueueTable(result);
+      }),
     );
   queue
-    .command("create <threadId> <message>")
+    .command("create <threadId> [message]")
     .description("Create a queued text message")
     .option("--model <model>", "Model override for the queued message")
+    .option(
+      "--message-file <path>",
+      `Read the message from a file instead of [message]; ${TEXT_FILE_HELP_SUFFIX}`,
+    )
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(
-        async (threadId: string, message: string, opts: QueueCreateOptions) => {
+        async (
+          threadId: string,
+          inlineMessage: string | undefined,
+          opts: QueueCreateOptions,
+        ) => {
+          const message = await requireTextInput({
+            file: opts.messageFile,
+            fileLabel: "--message-file",
+            inline: inlineMessage,
+            inlineLabel: "<message>",
+          });
           const result = await createCliBbSdk(
             getUrl(),
           ).threads.queuedMessages.create({
@@ -383,17 +386,21 @@ export function registerOrganizationCommands(
       ),
     );
   queue
-    .command("update <threadId> <messageId> <message>")
+    .command("update <threadId> <messageId> [message]")
     .description("Update a queued message in place")
     .option(
+      "--message-file <path>",
+      `Read the message from a file instead of [message]; ${TEXT_FILE_HELP_SUFFIX}`,
+    )
+    .option(
       "--file <path>",
-      "Pass a host-readable absolute or uploaded attachment file path (repeatable)",
+      "Upload an absolute path or file: URL from this CLI machine or pass an uploaded attachment path (repeatable)",
       collectOption,
       [],
     )
     .option(
       "--image <path>",
-      "Pass a host-readable absolute or uploaded attachment image path (repeatable)",
+      "Upload an absolute path or file: URL from this CLI machine or pass an uploaded attachment path (repeatable)",
       collectOption,
       [],
     )
@@ -403,11 +410,17 @@ export function registerOrganizationCommands(
         async (
           threadId: string,
           messageId: string,
-          message: string,
+          inlineMessage: string | undefined,
           opts: QueueUpdateOptions,
         ) => {
-          const queuedMessages =
-            createCliBbSdk(getUrl()).threads.queuedMessages;
+          const message = await requireTextInput({
+            file: opts.messageFile,
+            fileLabel: "--message-file",
+            inline: inlineMessage,
+            inlineLabel: "<message>",
+          });
+          const sdk = createCliBbSdk(getUrl());
+          const queuedMessages = sdk.threads.queuedMessages;
           const existing = (await queuedMessages.list({ threadId })).find(
             (queuedMessage) => queuedMessage.id === messageId,
           );
@@ -416,15 +429,21 @@ export function registerOrganizationCommands(
               `Queued message ${messageId} not found on thread ${threadId}.`,
             );
           }
-          const result = await queuedMessages.update({
-            threadId,
-            queuedMessageId: messageId,
-            expectedUpdatedAt: existing.updatedAt,
+          const input = await uploadClientAttachmentInputs({
             input: buildPromptInputs({
               message,
               files: opts.file,
               images: opts.image,
             }),
+            resolveProjectId: async () =>
+              (await sdk.threads.get({ threadId })).projectId,
+            sdk,
+          });
+          const result = await queuedMessages.update({
+            threadId,
+            queuedMessageId: messageId,
+            expectedUpdatedAt: existing.updatedAt,
+            input,
           });
           if (outputJson(opts, result)) return;
           console.log(`Queued message ${messageId} updated`);

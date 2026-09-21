@@ -1,30 +1,34 @@
+import { setAppIcons } from "@bb/shared-ui/icon-registry";
 import { useSyncExternalStore } from "react";
 import type {
   ComposerCustomization,
   ExperimentalAppOverlayRegistration,
   PluginDiffRendererRegistration,
   PluginEnvironmentProviderInputsRegistration,
+  PluginMachineProviderInputsRegistration,
   PluginPendingInteractionRegistration,
   PluginFileOpenerRegistration,
   PluginHomepageSectionRegistration,
-  PluginCommandPaletteActionRegistration,
   PluginMessageActionRegistration,
   PluginMessageDirectiveRegistration,
   PluginNavPanelRegistration,
   PluginNewThreadPanelActionRegistration,
-  PluginProviderIconRegistration,
+  ExperimentalIconRegistration,
   PluginSettingsSectionRegistration,
   PluginSidebarFooterActionRegistration,
   ExperimentalSidebarNavigationRegistration,
   PluginSourceCodeRendererRegistration,
   PluginThreadHeaderActionRegistration,
+  ExperimentalPluginBrowserToolbarActionRegistration,
   PluginThreadListRegistration,
   PluginThreadPanelActionRegistration,
   PluginTimelineRendererRegistration,
 } from "@get-bb/plugin-sdk";
 import {
+  type CollectedPluginCommandRegistration,
   adaptSidebarFooterAction,
   getCollectedSidebarFooterItems,
+  type CollectedPluginProviderIconRegistration,
   type CollectedExperimentalSidebarFooterItem,
   type CollectedManagedSidebarFooterItem,
   type CollectedSidebarFooterItem,
@@ -44,15 +48,18 @@ export interface PluginRegistrationSet {
   experimentalSidebarNavigations?: readonly ExperimentalSidebarNavigationRegistration[];
   threadLists?: readonly PluginThreadListRegistration[];
   threadHeaderActions?: readonly PluginThreadHeaderActionRegistration[];
+  browserToolbarActions?: readonly ExperimentalPluginBrowserToolbarActionRegistration[];
   fileOpeners: readonly PluginFileOpenerRegistration[];
   sourceCodeRenderers?: readonly PluginSourceCodeRendererRegistration[];
   diffRenderers?: readonly PluginDiffRendererRegistration[];
   messageDirectives: readonly PluginMessageDirectiveRegistration[];
   messageActions?: readonly PluginMessageActionRegistration[];
-  commandPaletteActions?: readonly PluginCommandPaletteActionRegistration[];
-  providerIcons?: readonly PluginProviderIconRegistration[];
+  commandPaletteActions?: readonly CollectedPluginCommandRegistration[];
+  providerIcons?: readonly CollectedPluginProviderIconRegistration[];
+  icons?: readonly ExperimentalIconRegistration[];
   timelineRenderers?: readonly PluginTimelineRendererRegistration[];
   environmentProviderInputs?: readonly PluginEnvironmentProviderInputsRegistration[];
+  machineProviderInputs?: readonly PluginMachineProviderInputsRegistration[];
 }
 
 interface PluginSlotBase {
@@ -84,6 +91,8 @@ export interface PluginThreadListSlot
   extends PluginThreadListRegistration, PluginSlotBase {}
 interface PluginThreadHeaderActionSlot
   extends PluginThreadHeaderActionRegistration, PluginSlotBase {}
+export interface PluginBrowserToolbarActionSlot
+  extends ExperimentalPluginBrowserToolbarActionRegistration, PluginSlotBase {}
 export interface PluginFileOpenerSlot
   extends PluginFileOpenerRegistration, PluginSlotBase {}
 export interface PluginSourceCodeRendererSlot
@@ -95,13 +104,16 @@ export interface PluginMessageDirectiveSlot
 export interface PluginMessageActionSlot
   extends PluginMessageActionRegistration, PluginSlotBase {}
 export interface PluginCommandPaletteActionSlot
-  extends PluginCommandPaletteActionRegistration, PluginSlotBase {}
+  extends CollectedPluginCommandRegistration, PluginSlotBase {}
+interface PluginIconSlot extends ExperimentalIconRegistration, PluginSlotBase {}
 interface PluginProviderIconSlot
-  extends PluginProviderIconRegistration, PluginSlotBase {}
+  extends CollectedPluginProviderIconRegistration, PluginSlotBase {}
 export interface PluginTimelineRendererSlot
   extends PluginTimelineRendererRegistration, PluginSlotBase {}
 export interface PluginEnvironmentProviderInputsSlot
   extends PluginEnvironmentProviderInputsRegistration, PluginSlotBase {}
+export interface PluginMachineProviderInputsSlot
+  extends PluginMachineProviderInputsRegistration, PluginSlotBase {}
 
 export interface PluginSlotSnapshot {
   homepageSections: readonly PluginHomepageSectionSlot[];
@@ -116,6 +128,7 @@ export interface PluginSlotSnapshot {
   experimentalSidebarNavigations: readonly ExperimentalSidebarNavigationSlot[];
   threadLists: readonly PluginThreadListSlot[];
   threadHeaderActions: readonly PluginThreadHeaderActionSlot[];
+  browserToolbarActions: readonly PluginBrowserToolbarActionSlot[];
   fileOpeners: readonly PluginFileOpenerSlot[];
   sourceCodeRenderers: readonly PluginSourceCodeRendererSlot[];
   diffRenderers: readonly PluginDiffRendererSlot[];
@@ -123,8 +136,10 @@ export interface PluginSlotSnapshot {
   messageActions: readonly PluginMessageActionSlot[];
   commandPaletteActions: readonly PluginCommandPaletteActionSlot[];
   providerIcons: readonly PluginProviderIconSlot[];
+  icons: readonly PluginIconSlot[];
   timelineRenderers: readonly PluginTimelineRendererSlot[];
   environmentProviderInputs: readonly PluginEnvironmentProviderInputsSlot[];
+  machineProviderInputs: readonly PluginMachineProviderInputsSlot[];
 }
 
 export const EMPTY_PLUGIN_SLOT_SNAPSHOT: PluginSlotSnapshot = {
@@ -140,6 +155,7 @@ export const EMPTY_PLUGIN_SLOT_SNAPSHOT: PluginSlotSnapshot = {
   experimentalSidebarNavigations: [],
   threadLists: [],
   threadHeaderActions: [],
+  browserToolbarActions: [],
   fileOpeners: [],
   sourceCodeRenderers: [],
   diffRenderers: [],
@@ -147,8 +163,10 @@ export const EMPTY_PLUGIN_SLOT_SNAPSHOT: PluginSlotSnapshot = {
   messageActions: [],
   commandPaletteActions: [],
   providerIcons: [],
+  icons: [],
   timelineRenderers: [],
   environmentProviderInputs: [],
+  machineProviderInputs: [],
 };
 
 const registrationsByPluginId = new Map<string, PluginRegistrationSet>();
@@ -171,6 +189,7 @@ const SLOT_KINDS: readonly SlotKind[] = [
   "experimentalSidebarNavigations",
   "threadLists",
   "threadHeaderActions",
+  "browserToolbarActions",
   "fileOpeners",
   "sourceCodeRenderers",
   "diffRenderers",
@@ -178,8 +197,10 @@ const SLOT_KINDS: readonly SlotKind[] = [
   "messageActions",
   "commandPaletteActions",
   "providerIcons",
+  "icons",
   "timelineRenderers",
   "environmentProviderInputs",
+  "machineProviderInputs",
 ];
 
 type FlattenedPluginSlots = {
@@ -226,6 +247,7 @@ function flattenRegistrations(
     experimentalSidebarNavigations: stamp(set.experimentalSidebarNavigations),
     threadLists: stamp(set.threadLists),
     threadHeaderActions: stamp(set.threadHeaderActions),
+    browserToolbarActions: stamp(set.browserToolbarActions),
     fileOpeners: stamp(set.fileOpeners),
     sourceCodeRenderers: stamp(set.sourceCodeRenderers),
     diffRenderers: stamp(set.diffRenderers),
@@ -233,8 +255,10 @@ function flattenRegistrations(
     messageActions: stamp(set.messageActions),
     commandPaletteActions: stamp(set.commandPaletteActions),
     providerIcons: stamp(set.providerIcons),
+    icons: stamp(set.icons),
     timelineRenderers: stamp(set.timelineRenderers),
     environmentProviderInputs: stamp(set.environmentProviderInputs),
+    machineProviderInputs: stamp(set.machineProviderInputs),
   };
 }
 
@@ -271,7 +295,9 @@ function collectProviderIcons(
     if (flattened === undefined) continue;
     for (const slot of flattened.providerIcons) {
       const claimed = collected.find(
-        (existing) => existing.providerId === slot.providerId,
+        (existing) =>
+          existing.providerKind === slot.providerKind &&
+          existing.providerId === slot.providerId,
       );
       if (claimed !== undefined) {
         console.warn(
@@ -325,6 +351,7 @@ function buildSnapshot(previous: PluginSlotSnapshot): PluginSlotSnapshot {
   return changed ? next : previous;
 }
 
+let appliedIcons: PluginSlotSnapshot["icons"] = [];
 let openBatchDepth = 0;
 let batchMaxHoldMs = 0;
 let snapshotStale = false;
@@ -345,6 +372,31 @@ function flushChange(): void {
     batchFlushTimer = null;
   }
   rebuildIfStale();
+  if (snapshot.icons !== appliedIcons) {
+    appliedIcons = snapshot.icons;
+    const icons = new Map<string, PluginIconSlot>();
+    for (const icon of snapshot.icons) {
+      const previousIcon = icons.get(icon.name);
+      if (previousIcon !== undefined) {
+        console.warn(
+          `plugin ${icon.pluginId}: icon "${icon.name}" ignored; already registered by plugin ${previousIcon.pluginId}`,
+        );
+      } else {
+        icons.set(icon.name, icon);
+      }
+    }
+    setAppIcons(
+      new Map(
+        [...icons].map(([name, icon]) => [
+          name,
+          {
+            component: icon.component,
+            key: `${icon.pluginId}:${icon.generation}:${name}`,
+          },
+        ]),
+      ),
+    );
+  }
   if (!notifyPending) return;
   notifyPending = false;
   for (const listener of listeners) listener();

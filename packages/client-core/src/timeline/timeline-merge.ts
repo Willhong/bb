@@ -39,11 +39,6 @@ interface MergeLatestTimelineRowsResult {
   rows: TimelineRow[];
 }
 
-interface TimelineRowIdentityEntry {
-  row: TimelineRow;
-  signature: string;
-}
-
 interface PreserveTimelineRowIdentityArgs {
   nextRows: readonly TimelineRow[];
   previousRows: readonly TimelineRow[];
@@ -65,10 +60,34 @@ interface MergeLoadedTimelineWithLatestArgs {
   surfaceKey: string;
 }
 
+interface MergeAdvancedSnapshotTimelineRowsArgs {
+  current: LoadedTimelineState;
+  latestRows: readonly TimelineRow[];
+  latestTimeline: ThreadTimelineResponse;
+}
+
 interface RecoverLoadedTimelineAfterStaleCursorArgs {
   current: LoadedTimelineState;
   latestTimeline: ThreadTimelineResponse;
   surfaceKey: string;
+}
+
+export function resolveLoadedTimelineSurfaceKey(
+  baseSurfaceKey: string,
+  latestTimeline:
+    | Pick<
+        ThreadTimelineResponse,
+        "completedTurnDisplay" | "contextBoundarySeq"
+      >
+    | undefined,
+): string {
+  if (latestTimeline === undefined) {
+    return baseSurfaceKey;
+  }
+  const displaySurfaceKey = `${baseSurfaceKey}:completed-turns:${latestTimeline.completedTurnDisplay}`;
+  return latestTimeline.contextBoundarySeq === null
+    ? displaySurfaceKey
+    : `${displaySurfaceKey}:context-boundary:${latestTimeline.contextBoundarySeq}`;
 }
 
 export function buildLoadedTimelineState({
@@ -129,32 +148,21 @@ function timelineRowIdentitySignature(row: TimelineRow): string {
   ].join("\u001f");
 }
 
-function buildTimelineRowIdentityMap(
-  rows: readonly TimelineRow[],
-): ReadonlyMap<string, TimelineRowIdentityEntry> {
-  const rowsById = new Map<string, TimelineRowIdentityEntry>();
-  for (const row of rows) {
-    rowsById.set(row.id, {
-      row,
-      signature: timelineRowIdentitySignature(row),
-    });
-  }
-  return rowsById;
-}
-
 function preserveTimelineRowIdentity({
   nextRows,
   previousRows,
 }: PreserveTimelineRowIdentityArgs): TimelineRow[] {
-  const previousRowsById = buildTimelineRowIdentityMap(previousRows);
+  const previousRowsById = new Map(previousRows.map((row) => [row.id, row]));
   return nextRows.map((row) => {
     const previous = previousRowsById.get(row.id);
+    if (previous === row) return row;
     if (
       previous &&
-      previous.signature === timelineRowIdentitySignature(row) &&
-      JSON.stringify(previous.row) === JSON.stringify(row)
+      timelineRowIdentitySignature(previous) ===
+        timelineRowIdentitySignature(row) &&
+      JSON.stringify(previous) === JSON.stringify(row)
     ) {
-      return previous.row;
+      return previous;
     }
     return row;
   });
@@ -168,46 +176,82 @@ function areTimelineRowReferencesEqual({
   return left.every((row, index) => row === right[index]);
 }
 
+function joinOlderTimelineRowChildren(
+  older: TimelineRow,
+  loaded: TimelineRow,
+): TimelineRow {
+  if (
+    older.kind === "turn" &&
+    loaded.kind === "turn" &&
+    older.children !== null &&
+    loaded.children !== null
+  ) {
+    const children = prependOlderTimelineRows({
+      olderRows: older.children,
+      loadedRows: loaded.children,
+    });
+    if (
+      areTimelineRowReferencesEqual({ left: children, right: loaded.children })
+    ) {
+      return loaded;
+    }
+    return {
+      ...loaded,
+      children,
+    };
+  }
+  if (
+    older.kind === "work" &&
+    older.workKind === "delegation" &&
+    loaded.kind === "work" &&
+    loaded.workKind === "delegation"
+  ) {
+    const childRows = prependOlderTimelineRows({
+      olderRows: older.childRows,
+      loadedRows: loaded.childRows,
+    });
+    if (
+      areTimelineRowReferencesEqual({
+        left: childRows,
+        right: loaded.childRows,
+      })
+    ) {
+      return loaded;
+    }
+    return {
+      ...loaded,
+      childRows,
+    };
+  }
+  return loaded;
+}
+
 export function prependOlderTimelineRows({
   loadedRows,
   olderRows,
 }: PrependOlderTimelineRowsArgs): TimelineRow[] {
-  const loadedById = new Map(loadedRows.map((row) => [row.id, row]));
-  const uniqueOlderRows: TimelineRow[] = [];
-  appendTimelineRowsPreservingOrder(uniqueOlderRows, olderRows);
-  const rows: TimelineRow[] = uniqueOlderRows.map((row) => {
-    const loaded = loadedById.get(row.id);
-    if (
-      row.kind === "turn" &&
-      loaded?.kind === "turn" &&
-      row.children !== null &&
-      loaded.children !== null
-    ) {
-      return {
-        ...loaded,
-        children: prependOlderTimelineRows({
-          olderRows: row.children,
-          loadedRows: loaded.children,
-        }),
-      };
+  const uniqueLoadedRows: TimelineRow[] = [];
+  appendTimelineRowsPreservingOrder(uniqueLoadedRows, loadedRows);
+  const loadedIds = new Set(uniqueLoadedRows.map((row) => row.id));
+  const olderById = new Map<string, TimelineRow>();
+  const rows: TimelineRow[] = [];
+  for (const row of olderRows) {
+    if (olderById.has(row.id)) {
+      continue;
     }
-    if (
-      row.kind === "work" &&
-      row.workKind === "delegation" &&
-      loaded?.kind === "work" &&
-      loaded.workKind === "delegation"
-    ) {
-      return {
-        ...loaded,
-        childRows: prependOlderTimelineRows({
-          olderRows: row.childRows,
-          loadedRows: loaded.childRows,
-        }),
-      };
+    olderById.set(row.id, row);
+    if (!loadedIds.has(row.id)) {
+      rows.push(row);
     }
-    return loaded ?? row;
-  });
-  appendTimelineRowsPreservingOrder(rows, loadedRows);
+  }
+  for (const loaded of uniqueLoadedRows) {
+    const older = olderById.get(loaded.id);
+    rows.push(
+      older === undefined
+        ? loaded
+        : joinOlderTimelineRowChildren(older, loaded),
+    );
+  }
   return rows;
 }
 
@@ -314,7 +358,74 @@ function mergeLoadedTimelineOlderCursor(
   if (current === null || latest === null) {
     return null;
   }
-  return latest.anchorSeq <= current.anchorSeq ? latest : current;
+  return latest.anchorSeq < current.anchorSeq ? latest : current;
+}
+
+function mergeAdvancedSnapshotTimelineRows({
+  current,
+  latestRows,
+  latestTimeline,
+}: MergeAdvancedSnapshotTimelineRowsArgs): MergeLatestTimelineRowsResult {
+  const latestWindowStartSequence = timelineWindowStartSequence(latestTimeline);
+  const { olderRowsSourceSeqEnd } = latestTimeline.timelinePage;
+  if (
+    olderRowsSourceSeqEnd === undefined ||
+    (olderRowsSourceSeqEnd !== null &&
+      olderRowsSourceSeqEnd > (current.latestWindowEndSequence ?? 0))
+  ) {
+    return { canMerge: false, rows: [...latestRows] };
+  }
+  if (latestTimeline.timelinePage.olderCursor === null) {
+    return mergeLatestTimelineRows({
+      latestRows,
+      latestWindowStartSequence,
+      loadedRows: current.rows,
+    });
+  }
+  const loadedRows = current.rows.filter(
+    (row) => !isOptimisticTimelineRowId(row.id),
+  );
+  const latestRowIds = new Set(latestRows.map((row) => row.id));
+  const firstCoveredIndex = loadedRows.findIndex((row) =>
+    latestRowIds.has(row.id),
+  );
+  if (firstCoveredIndex === -1) {
+    return latestWindowStartSequence > (current.latestWindowEndSequence ?? 0)
+      ? { canMerge: true, rows: [...loadedRows, ...latestRows] }
+      : { canMerge: false, rows: [...latestRows] };
+  }
+  const coveredMerge = mergeLatestTimelineRows({
+    latestRows,
+    latestWindowStartSequence: 0,
+    loadedRows: loadedRows.slice(firstCoveredIndex),
+  });
+  if (!coveredMerge.canMerge) {
+    return coveredMerge;
+  }
+  const rows = [
+    ...loadedRows.slice(0, firstCoveredIndex),
+    ...coveredMerge.rows,
+  ];
+  return {
+    canMerge: true,
+    rows: areTimelineRowReferencesEqual({ left: current.rows, right: rows })
+      ? current.rows
+      : rows,
+  };
+}
+
+function loadedTimelineStateFromLatest(
+  latestTimeline: ThreadTimelineResponse,
+  surfaceKey: string,
+  rows: TimelineRow[] = latestTimeline.rows,
+): LoadedTimelineState {
+  return {
+    historySnapshot: latestTimeline.timelinePage.historySnapshot,
+    latestWindowEndSequence: latestTimeline.maxSeq,
+    olderCursor: latestTimeline.timelinePage.olderCursor,
+    rows,
+    surfaceKey,
+  };
 }
 
 export function mergeLoadedTimelineWithLatest({
@@ -322,49 +433,49 @@ export function mergeLoadedTimelineWithLatest({
   latestTimeline,
   surfaceKey,
 }: MergeLoadedTimelineWithLatestArgs): LoadedTimelineState {
+  const latestHistorySnapshot = latestTimeline.timelinePage.historySnapshot;
   if (
     current.surfaceKey !== surfaceKey ||
-    current.historySnapshot !== latestTimeline.timelinePage.historySnapshot ||
+    (current.historySnapshot === undefined) !==
+      (latestHistorySnapshot === undefined) ||
     !timelineWindowsAreContiguous(current, latestTimeline)
   ) {
-    return buildLoadedTimelineState({
-      historySnapshot: latestTimeline.timelinePage.historySnapshot,
-      latestWindowEndSequence: latestTimeline.maxSeq,
-      latestRows: latestTimeline.rows,
-      olderCursor: latestTimeline.timelinePage.olderCursor,
-      surfaceKey,
-    });
+    return loadedTimelineStateFromLatest(latestTimeline, surfaceKey);
   }
 
   const currentRowsById = new Map(current.rows.map((row) => [row.id, row]));
-  const latestMerge = mergeLatestTimelineRows({
-    latestRows:
-      current.historySnapshot === undefined
-        ? latestTimeline.rows
-        : latestTimeline.rows.map((row) => {
-            const loaded = currentRowsById.get(row.id);
-            return loaded === undefined
-              ? row
-              : prependOlderTimelineRows({
-                  olderRows: [loaded],
-                  loadedRows: [row],
-                })[0]!;
-          }),
-    latestWindowStartSequence: timelineWindowStartSequence(latestTimeline),
-    loadedRows: current.rows,
-  });
+  const latestRows =
+    current.historySnapshot === undefined
+      ? latestTimeline.rows
+      : latestTimeline.rows.map((row) => {
+          const loaded = currentRowsById.get(row.id);
+          return loaded === undefined
+            ? row
+            : prependOlderTimelineRows({
+                olderRows: [loaded],
+                loadedRows: [row],
+              })[0]!;
+        });
+  const latestMerge =
+    current.historySnapshot === latestHistorySnapshot
+      ? mergeLatestTimelineRows({
+          latestRows,
+          latestWindowStartSequence:
+            timelineWindowStartSequence(latestTimeline),
+          loadedRows: current.rows,
+        })
+      : mergeAdvancedSnapshotTimelineRows({
+          current,
+          latestRows,
+          latestTimeline,
+        });
   if (!latestMerge.canMerge) {
-    return buildLoadedTimelineState({
-      historySnapshot: latestTimeline.timelinePage.historySnapshot,
-      latestWindowEndSequence: latestTimeline.maxSeq,
-      latestRows: latestTimeline.rows,
-      olderCursor: latestTimeline.timelinePage.olderCursor,
-      surfaceKey,
-    });
+    return loadedTimelineStateFromLatest(latestTimeline, surfaceKey);
   }
 
   return {
     ...current,
+    historySnapshot: latestHistorySnapshot,
     latestWindowEndSequence: latestTimeline.maxSeq,
     olderCursor: mergeLoadedTimelineOlderCursor(
       current.olderCursor,
@@ -383,13 +494,7 @@ export function recoverLoadedTimelineAfterStaleCursor({
     current.surfaceKey !== surfaceKey ||
     current.historySnapshot !== latestTimeline.timelinePage.historySnapshot
   ) {
-    return buildLoadedTimelineState({
-      historySnapshot: latestTimeline.timelinePage.historySnapshot,
-      latestWindowEndSequence: latestTimeline.maxSeq,
-      latestRows: latestTimeline.rows,
-      olderCursor: latestTimeline.timelinePage.olderCursor,
-      surfaceKey,
-    });
+    return loadedTimelineStateFromLatest(latestTimeline, surfaceKey);
   }
 
   const latestMerge = mergeLatestTimelineRows({
@@ -398,20 +503,12 @@ export function recoverLoadedTimelineAfterStaleCursor({
     loadedRows: current.rows,
   });
   if (!latestMerge.canMerge) {
-    return buildLoadedTimelineState({
-      historySnapshot: latestTimeline.timelinePage.historySnapshot,
-      latestWindowEndSequence: latestTimeline.maxSeq,
-      latestRows: latestTimeline.rows,
-      olderCursor: latestTimeline.timelinePage.olderCursor,
-      surfaceKey,
-    });
+    return loadedTimelineStateFromLatest(latestTimeline, surfaceKey);
   }
 
-  return {
-    historySnapshot: latestTimeline.timelinePage.historySnapshot,
-    latestWindowEndSequence: latestTimeline.maxSeq,
-    olderCursor: latestTimeline.timelinePage.olderCursor,
-    rows: latestMerge.rows,
+  return loadedTimelineStateFromLatest(
+    latestTimeline,
     surfaceKey,
-  };
+    latestMerge.rows,
+  );
 }

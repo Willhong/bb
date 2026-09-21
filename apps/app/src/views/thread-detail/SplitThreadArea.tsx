@@ -1,5 +1,8 @@
 import { cn } from "@bb/shared-ui/lib/utils";
-import { PANE_FOCUS_APP_COMMAND_IDS } from "@bb/domain";
+import {
+  PANE_DIRECTION_APP_COMMAND_IDS,
+  PANE_FOCUS_APP_COMMAND_IDS,
+} from "@bb/domain";
 import { useAtom, useAtomValue, useStore } from "jotai";
 import {
   Fragment,
@@ -43,7 +46,10 @@ import {
   setFocus,
   swapPanes,
 } from "@/lib/split-layout";
-import { createSplitResizeSnapSession } from "@/lib/split-resize-snap";
+import {
+  createSplitResizeFlexPair,
+  createSplitResizeSnapSession,
+} from "@/lib/split-resize-snap";
 import type {
   LayoutNode,
   PaneContent,
@@ -89,7 +95,7 @@ import {
   PluginPanelHeaderActions,
   PluginPanelHeaderCenter,
 } from "@/components/plugin/PluginPanelHeader";
-import { getAdjacentPaneId } from "./splitPaneCommands";
+import { getAdjacentPaneId, getDirectionalPaneId } from "./splitPaneCommands";
 import {
   applyThreadPaneActionToLayout,
   createSinglePaneLayout,
@@ -112,15 +118,13 @@ import {
 } from "@/components/ui/context-selection";
 import { PaneMaximizeButton } from "./PaneMaximizeButton";
 import { wsManager } from "@/lib/ws";
+import { PluginDetailOpenerBoundary } from "@/components/plugin/plugin-detail-opener";
 
 const LazyPluginPanelRightPanelHost = lazy(() =>
   import("@/components/plugin/PluginPanelRightPanelHost").then(
     ({ PluginPanelRightPanelHost }) => ({ default: PluginPanelRightPanelHost }),
   ),
 );
-
-const PLUGIN_GUIDE_PLUGIN_ID = "plugin-api-docs";
-const PLUGIN_GUIDE_PANEL_PATH = "plugin-api";
 
 const LazyPluginDetailPaneView = lazy(() =>
   import("@/views/ToolsView").then(({ PluginDetailPaneView }) => ({
@@ -147,19 +151,18 @@ function PluginPagePanelHost({
   pluginId: string;
   subPath: string;
 }) {
+  const pane = useOptionalPaneContext();
   return (
-    <Suspense fallback={null}>
-      <LazyPluginPanelRightPanelHost
-        key={`${props.pluginId}/${props.panelPath}`}
-        {...props}
-        pluginDetailTabsEnabled={
-          props.pluginId === PLUGIN_GUIDE_PLUGIN_ID &&
-          props.panelPath === PLUGIN_GUIDE_PANEL_PATH
-        }
-      >
-        {children}
-      </LazyPluginPanelRightPanelHost>
-    </Suspense>
+    <PluginDetailOpenerBoundary
+      key={`${props.pluginId}/${props.panelPath}`}
+      isFocused={pane?.isFocused ?? true}
+    >
+      <Suspense fallback={null}>
+        <LazyPluginPanelRightPanelHost {...props}>
+          {children}
+        </LazyPluginPanelRightPanelHost>
+      </Suspense>
+    </PluginDetailOpenerBoundary>
   );
 }
 
@@ -628,7 +631,6 @@ function SplitThreadAreaContent({ routeContent }: SplitThreadAreaProps) {
   return (
     <>
       {commandHandlers}
-      {}
       <div
         ref={preservedScrollWorkspaceRef}
         className="relative -m-4 flex min-h-0 min-w-0 flex-1 overflow-hidden md:-m-5"
@@ -683,6 +685,29 @@ function SplitPaneCommandHandlers({
   toggleMaximizePane,
 }: SplitPaneCommandHandlersProps) {
   useAppCommandContext("splitActive", isSplitActive);
+  const directionalTargets = useMemo(
+    () =>
+      (["left", "right", "top", "bottom"] as const).map((direction) =>
+        isSplitActive
+          ? getDirectionalPaneId(layout.root, layout.focusedPaneId, direction)
+          : null,
+      ),
+    [isSplitActive, layout.root, layout.focusedPaneId],
+  );
+  useEffect(() => {
+    getBbDesktopInfo()?.setSplitNavigationEnabled?.(
+      isSplitActive,
+      PANE_DIRECTION_APP_COMMAND_IDS.filter(
+        (_, index) => directionalTargets[index] !== null,
+      ),
+    );
+  }, [isSplitActive, directionalTargets]);
+  useIndexedAppCommandHandlers(PANE_DIRECTION_APP_COMMAND_IDS, (index) => {
+    const paneId = directionalTargets[index];
+    if (!paneId) return false;
+    focusPane(paneId);
+    return true;
+  });
   useAppCommandHandler("pane.focus.previous", () => {
     if (!isSplitActive) return false;
     const paneId = getAdjacentPaneId(panes, layout.focusedPaneId, -1);
@@ -760,9 +785,9 @@ function SplitTree(props: SplitTreeProps) {
         data-focused={isFocused ? "true" : "false"}
         data-maximized={isMaximized ? "true" : undefined}
       >
-        {}
         {node.content.kind === "thread" ? (
           <PaneStaleWatcher
+            key={node.content.threadId}
             threadId={node.content.threadId}
             onStale={() => props.onPruneStalePane(node.paneId)}
           />
@@ -788,7 +813,6 @@ function SplitTree(props: SplitTreeProps) {
           onNavigateInPane={props.onNavigateInPane}
           onBeginPaneDrag={props.onBeginPaneDrag}
         />
-        {}
         <div
           aria-hidden
           data-pane-focus-scrim=""
@@ -1134,7 +1158,7 @@ function NonThreadPaneContent({
               }
               className={cn(
                 "relative flex min-w-0 flex-1 items-center",
-                isBoundedPane && "-mx-2 -my-1 rounded-md px-2 py-1",
+                isBoundedPane && "-my-1 -ml-2 rounded-md px-2 py-1",
                 isBoundedPane && isFocused && CONTEXT_SELECTION_SURFACE_CLASS,
                 beginPaneDrag &&
                   cn(
@@ -1339,20 +1363,7 @@ function SplitDivider({
       const pointerDownPosition = horizontal ? event.clientX : event.clientY;
       snapSession.resolve({ end, pointer: pointerDownPosition, start });
 
-      const previousGrow = Number.parseFloat(
-        window.getComputedStyle(previous).flexGrow,
-      );
-      const nextGrow = Number.parseFloat(
-        window.getComputedStyle(next).flexGrow,
-      );
-      const pairTotal =
-        Number.isFinite(previousGrow) &&
-        Number.isFinite(nextGrow) &&
-        previousGrow + nextGrow > 0
-          ? previousGrow + nextGrow
-          : 1;
-      const previousFlex = previous.style.flex;
-      const nextFlex = next.style.flex;
+      const pair = createSplitResizeFlexPair(previous, next);
       const restoreTimelineRows = freezeOffscreenTimelineRows(previous, next);
       let pendingFraction: number | null = null;
       let finished = false;
@@ -1367,8 +1378,7 @@ function SplitDivider({
         });
         pendingFraction = fraction;
 
-        previous.style.flex = `${pairTotal * fraction} 1 0px`;
-        next.style.flex = `${pairTotal * (1 - fraction)} 1 0px`;
+        pair.apply(fraction);
       };
       const finish = (commit: boolean) => {
         if (finished) return;
@@ -1388,8 +1398,7 @@ function SplitDivider({
           onResize(pendingFraction);
           return;
         }
-        previous.style.flex = previousFlex;
-        next.style.flex = nextFlex;
+        pair.restore();
       };
       const onUp = (upEvent: PointerEvent) => {
         if (upEvent.pointerId !== pointerId) return;
@@ -1448,6 +1457,10 @@ interface PaneStaleWatcherProps {
 
 function PaneStaleWatcher({ threadId, onStale }: PaneStaleWatcherProps) {
   const { data: thread, isSuccess, isError, error } = useThread(threadId);
+  const hasObservedUnarchived = useRef(false);
+  const unarchivesInFlight = useIsMutating({
+    mutationKey: ["unarchive-thread"],
+  });
   const archivesInFlight = useIsMutating({
     predicate: (mutation) =>
       mutation.options.meta?.lifecycleOperation === "archive_thread",
@@ -1461,17 +1474,25 @@ function PaneStaleWatcher({ threadId, onStale }: PaneStaleWatcherProps) {
     thread !== undefined &&
     thread.archivedAt !== null &&
     archivesInFlight === 0;
-  const isStale = isGone || isDeleted || isConfirmedArchived;
+  const isUnarchived =
+    isSuccess && thread !== undefined && thread.archivedAt === null;
 
   const onStaleRef = useRef(onStale);
   useEffect(() => {
     onStaleRef.current = onStale;
   }, [onStale]);
   useEffect(() => {
-    if (isStale) {
+    if (isUnarchived && unarchivesInFlight === 0) {
+      hasObservedUnarchived.current = true;
+    }
+    if (
+      isGone ||
+      isDeleted ||
+      (isConfirmedArchived && hasObservedUnarchived.current)
+    ) {
       onStaleRef.current();
     }
-  }, [isStale]);
+  }, [isConfirmedArchived, isDeleted, isGone, isUnarchived, unarchivesInFlight]);
 
   return null;
 }

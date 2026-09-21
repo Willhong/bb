@@ -1,3 +1,4 @@
+import { resolveHostEnvironment } from "../hosts/host-environment.js";
 import { randomUUID } from "node:crypto";
 import { listPublicHosts } from "@bb/db";
 import type {
@@ -12,7 +13,7 @@ import { callHostOnlineRpc } from "../hosts/online-rpc.js";
 import type { PluginHostArtifactSnapshot } from "./plugin-service-internal.js";
 
 const HOST_RPC_TRANSPORT_GRACE_MS = 6_000;
-const HOST_RPC_PAYLOAD_MAX_BYTES = 8 * 1024 * 1024;
+const HOST_RPC_PAYLOAD_MAX_BYTES = 32 * 1024 * 1024;
 
 async function validateValue(
   schema: StandardSchemaV1,
@@ -86,6 +87,10 @@ export async function callPluginHostRpc(
     timeoutMs: timeoutMs + HOST_RPC_TRANSPORT_GRACE_MS,
     command: {
       type: "plugin.host.call",
+      contributedEnv: await resolveHostEnvironment(deps, {
+        hostId: args.hostId,
+        projectId: null,
+      }),
       pluginId: args.pluginId,
       generation: args.artifact.generation,
       artifact: {

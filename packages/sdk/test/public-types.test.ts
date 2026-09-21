@@ -222,6 +222,7 @@ interface NodeSurface {
 
 type ExpectedBbSdkKey =
   | "experimental_desktopBrowsers"
+  | "experimental_server"
   | "environments"
   | "files"
   | "guide"
@@ -274,19 +275,28 @@ type ExpectedGuideKey = "render";
 
 type ExpectedHostsKey =
   | "cloneDefaultPath"
+  | "experimental_create"
+  | "experimental_getEnrollmentCommand"
   | "createJoinCode"
   | "delete"
+  | "experimental_deleteOldServerCopy"
   | "directory"
   | "get"
   | "installProviderCli"
   | "list"
+  | "experimental_listProviders"
   | "pathsExist"
   | "pickFolder"
   | "providerCliStatus"
+  | "experimental_resume"
+  | "experimental_retryCleanup"
   | "retryUpdate"
+  | "experimental_suspend"
+  | "experimental_reconcile"
   | "update";
 
 type ExpectedPluginsKey =
+  | "experimental_discoverRpc"
   | "applyUpdate"
   | "callRpc"
   | "catalog"
@@ -309,6 +319,10 @@ type ExpectedPluginCatalogKey = "install" | "installPlan" | "search" | "status";
 type ExpectedPluginMarketplacesKey = "add" | "list" | "refresh" | "remove";
 
 type ExpectedProjectsKey =
+  | "machineEnvironment"
+  | "replaceMachineEnvironment"
+  | "setMachineEnvironmentVariable"
+  | "deleteMachineEnvironmentVariable"
   | "attachments"
   | "branches"
   | "commands"
@@ -334,6 +348,10 @@ type ExpectedProvidersKey = "list" | "models";
 type ExpectedStatusKey = "get";
 
 type ExpectedSystemKey =
+  | "setMachineEnvironmentVariable"
+  | "deleteMachineEnvironmentVariable"
+  | "machineEnvironment"
+  | "replaceMachineEnvironment"
   | "attention"
   | "cliSkillsStatus"
   | "config"
@@ -356,6 +374,9 @@ type ExpectedThemeKey = "catalog" | "get" | "resolve" | "set";
 type ExpectedThreadSectionsKey = "create" | "delete" | "list" | "update";
 
 type ExpectedThreadsKey =
+  | "getPluginMetadata"
+  | "updatePluginMetadata"
+  | "context"
   | "archive"
   | "archiveAll"
   | "cancelPlan"

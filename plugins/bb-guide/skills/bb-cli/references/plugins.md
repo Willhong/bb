@@ -71,7 +71,7 @@
   - `bb plugin install <src>` — `<entry-id>@<marketplace>`, an HTTP(S) Git
     repository URL, a local path,
     `git:<url>[@<ref|semver-range>]`, or `npm:<package>[@<version|tag|range>]`
-    (npm on PATH required for `npm:`). Repository URLs and prefixes `path:` /
+    (using BB's shipped npm). Repository URLs and prefixes `path:` /
     `npm:` / `git:` skip catalog resolution. To pin or
     range an npm package, install with `npm:<package>@…`.
     Omit the npm spec to track compatible stable releases; ranges and dist-tags
@@ -95,7 +95,11 @@
     and git sources without a prebuilt app when their imported dependencies
     are already available;
     git/npm packages can also ship a metadata-validated prebuilt `dist/`, and
-    npm packages must. Managed git/npm installs refuse `engines.bb` /
+    npm packages must. Git installs use `--omit=dev`, `--omit=optional`, and
+    `--ignore-scripts`; plugins may keep normal development dependencies in
+    their manifests.
+    npm and Node do not need to be on PATH; Git sources still require `git`.
+    Managed git/npm installs refuse `engines.bb` /
     `engines.bbPluginSdk` mismatches, manifest vs. artifact identity mismatches,
     and reserved ID mismatches.
     A `git:`/`path:` repository can hold several plugins. Install one with
@@ -159,19 +163,19 @@
     by that digest, and run it as a host RPC worker, a provider bridge, or
     both). None of it needs the server.
   - `bb plugin types [path]` — sync the plugin's `@get-bb/plugin-sdk` surface
-    to the running bb (default: cwd). For a plugin that depends on the npm
-    package it rewrites the exact `devDependencies` pin to this bb's SDK
+    to the running bb (default: cwd). It rewrites the exact `devDependencies`
+    pin to this bb's SDK
     version and brings the type-only devDependencies of the packages bb shims
     at runtime (sonner, vaul, the portal radix families, @pierre/diffs, clsx,
     tailwind-merge, class-variance-authority) to this bb's versions — adding
     any an app plugin is missing and moving one out of `dependencies`
-    (reporting old → new, and reminding you to `npm install`); for a
-    plugin that still vendors declarations it rewrites `types/*.d.ts`, creating
-    `types/` when absent. Run it in a cloned or older plugin: the SDK surface
-    grows every release. `--check` writes nothing and exits non-zero on a
-    mismatch (for CI). `bb plugin build` and `bb plugin dev` refresh vendored
-    declarations automatically and leave npm-package plugins alone. Needs no
-    server.
+    (reporting old → new, and reminding you to `npm install`). A plugin that
+    still vendors declarations must run `bb plugin migrate`; `types` and
+    `types --check` exit non-zero with that instruction. Run `types` in a
+    cloned or older package-layout plugin: the SDK surface grows every release.
+    `--check` writes nothing and exits non-zero on a mismatch (for CI).
+    `bb plugin build` and `bb plugin dev` warn for a vendored layout, skip the
+    type update, and continue with its checked-in declarations. Needs no server.
   - `bb plugin migrate [path] [--yes]` — convert a plugin that still vendors
     `types/` to the `@get-bb/plugin-sdk` npm package (default: cwd): add the
     exact `devDependencies` pin, raise `engines.bbPluginSdk` when this bb's SDK
@@ -190,7 +194,8 @@
     prints the exact plan and asks before touching anything; `--yes` is
     required when stdin is not a terminal, where it otherwise prints the plan
     and exits non-zero having changed nothing. Run `npm install` afterwards.
-    The vendored layout keeps working, so nothing migrates unless you ask.
+    The vendored layout still builds and runs in development with its existing
+    declarations, but SDK type updates require migration.
     Re-running on a migrated plugin is a no-op. Needs no server.
   - `bb plugin dev [path]` — watch loop for an installed plugin (default:
     cwd): on every change it rebuilds the frontend bundle (when `bb.app` is
@@ -212,3 +217,9 @@
   tools and context, host-rendered UI, lifecycle) and the frontend
   `@get-bb/plugin-sdk/app` contract (slots, hooks, UI kit), with working patterns
   and gotchas. `bb guide plugins` has the short walkthrough.
+
+## Inspect plugin RPC
+
+`bb plugin rpc list [plugin-id] [--method <exact-name>] [--json]` lists discoverable methods from running plugins, optionally restricted to one plugin. `bb plugin rpc inspect <plugin-id> [method] [--json]` dumps registration and method descriptions plus input/output JSON Schemas. Copy the relevant schema into your consumer and call the existing plugin RPC endpoint. Discovery is opt-in advertising, not access control; method names may carry versions such as `provider-usage.v1.listResources`.
+
+`bb plugin rpc call <plugin-id> <method> [--input-file <json-path>] [--json]` invokes a method using server-side schema validation. Omitting the input file sends JSON null. Input files avoid putting sensitive values in command arguments.

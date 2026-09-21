@@ -1,6 +1,4 @@
 import {
-  lazy,
-  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -23,16 +21,12 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@bb/shared-ui/tooltip";
 import { useAppCommandHandler } from "@/components/commands/AppCommandProvider";
 import { PluginIcon } from "@/components/plugin/PluginIcon";
 import { PluginSlotMount } from "@/components/plugin/PluginSlotMount";
-import {
-  getCompactPanelPresentation,
-  RIGHT_PANEL_TOGGLE_ICON_NAME,
-} from "@/components/secondary-panel/panelToggleControlState";
+import { RIGHT_PANEL_TOGGLE_ICON_NAME } from "@/components/secondary-panel/panelToggleControlState";
 import { SecondaryPanelLayout } from "@/components/secondary-panel/SecondaryPanelLayout";
 import {
   LazyBrowserTabDeck,
   LazyHostScopedFilePreviewTabContent,
   LazyNewTabPage,
-  SecondaryPanelContentSkeleton,
   LazyThreadSecondaryPanel,
   LazyThreadStorageFilePreviewTabContent,
   LazyThreadTerminalPanel,
@@ -98,6 +92,7 @@ import { PluginPanelTabContent } from "./PluginPanelActions";
 import { PluginDetailRouteNavigationProvider } from "@/components/ui/app-route-anchor";
 import { usePluginCatalogSearch } from "@/hooks/queries/plugin-catalog-queries";
 import { usePluginList } from "@/hooks/queries/plugin-settings-queries";
+import { PluginDetailTabContent } from "./plugin-detail-navigation";
 
 const TERMINAL_COLS = 100;
 const TERMINAL_ROWS = 30;
@@ -121,25 +116,11 @@ const fixedTabTargetAtomFamily = atomFamily((_targetId: string) =>
   atom<FixedTabSessionTarget | null>(null),
 );
 
-const LazyPluginDetailPaneView = lazy(() =>
-  import("@/views/ToolsView").then(({ PluginDetailPaneView }) => ({
-    default: PluginDetailPaneView,
-  })),
-);
-
 function marketplacePluginDetailTab(pluginId: string) {
   return {
     id: `${MARKETPLACE_PLUGIN_DETAIL_TAB_PREFIX}${pluginId}`,
     kind: "marketplace-plugin-detail" as const,
   };
-}
-
-function PluginDetailPanelContent({ pluginId }: { pluginId: string }) {
-  return (
-    <Suspense fallback={<SecondaryPanelContentSkeleton />}>
-      <LazyPluginDetailPaneView pluginId={pluginId} />
-    </Suspense>
-  );
 }
 
 function PluginFixedTabContent({
@@ -235,7 +216,6 @@ export function PluginPanelRightPanelHost({
   subPath,
   flushPageInsets = false,
   paneId,
-  pluginDetailTabsEnabled = false,
 }: {
   children: ReactNode;
   panelPath: string;
@@ -243,7 +223,6 @@ export function PluginPanelRightPanelHost({
   subPath: string;
   flushPageInsets?: boolean;
   paneId?: string;
-  pluginDetailTabsEnabled?: boolean;
 }) {
   const { navPanels } = usePluginSlots();
   const panel =
@@ -296,7 +275,7 @@ export function PluginPanelRightPanelHost({
   const activePluginCatalogQuery = usePluginCatalogSearch(
     activePluginDetailId ?? "",
     {
-      enabled: pluginDetailTabsEnabled && activePluginDetailId !== null,
+      enabled: activePluginDetailId !== null,
     },
   );
   useEffect(() => {
@@ -443,7 +422,6 @@ export function PluginPanelRightPanelHost({
   }, []);
   const openPluginDetail = useCallback(
     (nextPluginId: string) => {
-      if (!pluginDetailTabsEnabled || panel === null) return false;
       setOpenedPluginIds((current) =>
         current.includes(nextPluginId) ? current : [...current, nextPluginId],
       );
@@ -452,7 +430,7 @@ export function PluginPanelRightPanelHost({
       revealPanel();
       return true;
     },
-    [panel, pluginDetailTabsEnabled, revealPanel],
+    [revealPanel],
   );
   const targetStore = useStore();
   const fixedTabOwnerId = getPluginFixedTabOwnerId(
@@ -733,11 +711,15 @@ export function PluginPanelRightPanelHost({
       const nextPluginIds = openedPluginIds.filter(
         (candidate) => candidate !== closingPluginId,
       );
-      setOpenedPluginIds(nextPluginIds);
+      setOpenedPluginIds((current) =>
+        current.filter((candidate) => candidate !== closingPluginId),
+      );
       if (activePluginDetailId !== closingPluginId) return;
       const nextActivePluginId =
         nextPluginIds[Math.min(closingIndex, nextPluginIds.length - 1)] ?? null;
-      setActivePluginDetailId(nextActivePluginId);
+      setActivePluginDetailId((current) =>
+        current === closingPluginId ? nextActivePluginId : current,
+      );
       setIsPluginDetailFullPage(false);
       if (
         nextActivePluginId === null &&
@@ -785,7 +767,7 @@ export function PluginPanelRightPanelHost({
             revealPanel();
           },
           renderContent: () => (
-            <PluginDetailPanelContent pluginId={tabPluginId} />
+            <PluginDetailTabContent pluginId={tabPluginId} />
           ),
           statusLabel: null,
           tab: marketplacePluginDetailTab(tabPluginId),
@@ -1194,11 +1176,7 @@ export function PluginPanelRightPanelHost({
         }
         main={children}
         composerHost={null}
-        compactPresentation={getCompactPanelPresentation(
-          activeTab?.kind,
-          fixedTabs[0]?.tab.kind ??
-            panelTabs.find((tab) => tab.isHidden !== true)?.tab.kind,
-        )}
+        compactPresentation="full"
         renderPanel={renderPanel}
       />
     </div>
@@ -1239,15 +1217,11 @@ export function PluginPanelRightPanelHost({
       openInAppBrowser={isDesktopBrowserAvailable() ? openBrowser : null}
     >
       <AppNavigationHostProvider capabilities={navigationCapabilities}>
-        {pluginDetailTabsEnabled ? (
-          <PluginDetailRouteNavigationProvider
-            onOpenPluginDetail={openPluginDetail}
-          >
-            {routedPage}
-          </PluginDetailRouteNavigationProvider>
-        ) : (
-          routedPage
-        )}
+        <PluginDetailRouteNavigationProvider
+          onOpenPluginDetail={openPluginDetail}
+        >
+          {routedPage}
+        </PluginDetailRouteNavigationProvider>
       </AppNavigationHostProvider>
     </UrlOpenRoutingProvider>
   );

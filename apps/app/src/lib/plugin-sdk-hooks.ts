@@ -1,4 +1,8 @@
 import {
+  removePluginMention,
+  subscribeComposerSubmitted,
+} from "./composer-submissions";
+import {
   useCallback,
   useContext,
   useEffect,
@@ -8,7 +12,9 @@ import {
 } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { matchPath, useLocation, useNavigate } from "react-router-dom";
+import { z } from "zod";
 import type { PromptTextMention } from "@bb/domain";
+import { createThreadEnvironmentArgsSchema } from "@bb/server-contract";
 import type {
   BbContext,
   BbNavigate,
@@ -21,12 +27,18 @@ import type {
   PluginProvidersState,
   PluginSettingsState,
   ExperimentalAppPanel,
+  ExperimentalComposerSelection,
   ExperimentalComposerSubmitOptions,
   ExperimentalFixedTabTargetState,
   ExperimentalPluginFixedTabReference,
   JsonValue,
 } from "@get-bb/plugin-sdk";
-import { jsonValueSchema } from "@bb/domain";
+import {
+  jsonValueSchema,
+  permissionModeSchema,
+  reasoningLevelSchema,
+  serviceTierSchema,
+} from "@bb/domain";
 import {
   PluginSlotOwnershipContext,
   usePluginId,
@@ -41,6 +53,7 @@ import { sdk } from "@/lib/sdk";
 import { useSystemProviders } from "@/hooks/queries/system-queries";
 import { requestComposerFocus } from "@/lib/composer-focus-requests";
 import { setComposerTextEffect } from "@/lib/composer-text-effects";
+import { createKeyedListeners } from "@/lib/keyed-listeners";
 import {
   usePromptDraftStorage,
   type PromptDraftScope,
@@ -491,6 +504,52 @@ function reconcileComposerMentions(
   });
 }
 
+const composerSelectionSchema = z.object({
+  projectId: z.string().min(1).optional(),
+  environment: createThreadEnvironmentArgsSchema.optional(),
+  providerId: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  reasoningLevel: reasoningLevelSchema.optional(),
+  serviceTier: serviceTierSchema.optional(),
+  permissionMode: permissionModeSchema.optional(),
+});
+
+const COMPOSER_SELECTION_FIELD_LABELS: Record<
+  keyof ExperimentalComposerSelection,
+  string
+> = {
+  projectId: "project",
+  environment: "environment",
+  providerId: "provider",
+  model: "model",
+  reasoningLevel: "reasoning level",
+  serviceTier: "service tier",
+  permissionMode: "permission mode",
+};
+
+function parseComposerSelection(
+  selection: unknown,
+): ExperimentalComposerSelection {
+  const parsed = composerSelectionSchema.safeParse(selection);
+  if (parsed.success) {
+    return Object.fromEntries(
+      Object.entries(parsed.data).filter(([, value]) => value !== undefined),
+    ) as ExperimentalComposerSelection;
+  }
+  const field = parsed.error.issues[0]?.path[0];
+  const label =
+    typeof field === "string" && field in COMPOSER_SELECTION_FIELD_LABELS
+      ? COMPOSER_SELECTION_FIELD_LABELS[
+          field as keyof ExperimentalComposerSelection
+        ]
+      : null;
+  throw new Error(
+    label === null
+      ? "The selection is not valid."
+      : `The selection's ${label} is not valid.`,
+  );
+}
+
 function createComposerScopeOwnership(scopeKey: string) {
   let active = true;
   return {
@@ -516,16 +575,7 @@ const inputLocksByStorageKey = new Map<
   string,
   Map<ComposerInputLockOwner, string>
 >();
-const inputLockListenersByStorageKey = new Map<
-  string,
-  Set<ComposerInputLockListener>
->();
-
-function notifyComposerInputLock(storageKey: string): void {
-  const listeners = inputLockListenersByStorageKey.get(storageKey);
-  if (!listeners) return;
-  for (const listener of [...listeners]) listener();
-}
+const inputLockListeners = createKeyedListeners<string>();
 
 export function getComposerInputLock(storageKey: string | null): boolean {
   if (storageKey === null) return false;
@@ -552,7 +602,7 @@ function setComposerInputLock(
     if (owners?.size === 0) inputLocksByStorageKey.delete(storageKey);
   }
   if (getComposerInputLock(storageKey) !== wasLocked) {
-    notifyComposerInputLock(storageKey);
+    inputLockListeners.notify(storageKey);
   }
 }
 
@@ -561,16 +611,7 @@ function subscribeComposerInputLock(
   listener: ComposerInputLockListener,
 ): () => void {
   if (storageKey === null) return () => {};
-  let listeners = inputLockListenersByStorageKey.get(storageKey);
-  if (!listeners) {
-    listeners = new Set();
-    inputLockListenersByStorageKey.set(storageKey, listeners);
-  }
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-    if (listeners.size === 0) inputLockListenersByStorageKey.delete(storageKey);
-  };
+  return inputLockListeners.subscribe(storageKey, listener);
 }
 
 export function useComposerInputLock(storageKey: string | null): boolean {
@@ -816,6 +857,44 @@ export function useComposer(): PluginComposerApi {
     [focusActiveComposer, getCurrent, pluginId, setDraft],
   );
 
+  const experimental_removeMention = useCallback(
+    (mention: { provider: string; id: string }) => {
+      const current = getCurrent();
+      const next = removePluginMention(
+        current,
+        pluginId,
+        mention.provider,
+        mention.id,
+      );
+      if (next !== current) setDraft(next);
+    },
+    [getCurrent, pluginId, setDraft],
+  );
+  const submissionSubscriptions = useRef(new Set<() => void>());
+  useEffect(
+    () => () => {
+      for (const unsubscribe of submissionSubscriptions.current) unsubscribe();
+      submissionSubscriptions.current.clear();
+    },
+    [composerScope, threadId, projectId],
+  );
+  const experimental_onSubmitted = useCallback(
+    (listener: () => void) => {
+      const scope =
+        composerScope ??
+        (threadId !== undefined
+          ? { kind: "thread" as const, threadId }
+          : { kind: "new-thread" as const, projectId: projectId ?? null });
+      const unsubscribe = subscribeComposerSubmitted(scope, listener);
+      submissionSubscriptions.current.add(unsubscribe);
+      return () => {
+        unsubscribe();
+        submissionSubscriptions.current.delete(unsubscribe);
+      };
+    },
+    [composerScope, threadId, projectId],
+  );
+
   const focus = focusActiveComposer;
   const composerText = composerHostDraft?.text ?? routeDraft.text;
 
@@ -826,14 +905,36 @@ export function useComposer(): PluginComposerApi {
         throw new Error("This composer is no longer active.");
       }
       if (hostSubmit === undefined) {
-        throw new Error("This composer cannot schedule a submission.");
+        throw new Error("This composer cannot submit programmatically.");
       }
-      if (!Number.isFinite(options.sendAt) || options.sendAt <= Date.now()) {
+      if (
+        options.sendAt !== undefined &&
+        (!Number.isFinite(options.sendAt) || options.sendAt <= Date.now())
+      ) {
         throw new Error("Pick a time in the future.");
       }
-      await hostSubmit({ sendAt: options.sendAt });
+      await hostSubmit(
+        options,
+        options.experimental_data === undefined
+          ? undefined
+          : { pluginId, data: options.experimental_data },
+      );
     },
-    [hostSubmit, scopeOwnership],
+    [hostSubmit, pluginId, scopeOwnership],
+  );
+
+  const hostSetSelection = composerHost?.setSelection;
+  const experimental_setSelection = useCallback(
+    async (selection: ExperimentalComposerSelection) => {
+      if (!scopeOwnership.isActive()) {
+        throw new Error("This composer is no longer active.");
+      }
+      if (hostSetSelection === undefined) {
+        throw new Error("This composer has no pickers to set.");
+      }
+      return hostSetSelection(parseComposerSelection(selection));
+    },
+    [hostSetSelection, scopeOwnership],
   );
 
   return useMemo(
@@ -852,17 +953,23 @@ export function useComposer(): PluginComposerApi {
       setThreadRowStatus: legacySetThreadRowStatus,
       addQuote,
       insertMention,
+      experimental_removeMention,
+      experimental_onSubmitted,
       focus,
       experimental_submit,
+      experimental_setSelection,
     }),
     [
       addQuote,
       clear,
       composerScope,
       composerText,
+      experimental_setSelection,
       experimental_submit,
       focus,
       insertMention,
+      experimental_removeMention,
+      experimental_onSubmitted,
       projectId,
       setText,
       setTextEffect,

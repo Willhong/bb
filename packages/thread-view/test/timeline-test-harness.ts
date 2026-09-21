@@ -1,4 +1,5 @@
 import {
+  buildThreadEvent,
   encodeClientTurnRequestIdNumber,
   threadScope,
   turnScope,
@@ -6,6 +7,7 @@ import {
 import type {
   ApprovalPendingInteractionResolution,
   ClientTurnRequestId,
+  CompletedTurnDisplay,
   PromptInput,
   ProviderRawEvent,
   ProvisioningTranscriptEntry,
@@ -20,6 +22,8 @@ import type {
   ThreadTimelinePendingTodos,
   ThreadTurnInitiator,
   TurnRequestTarget,
+  SystemMessageKind,
+  SystemMessageSubject,
 } from "@bb/domain";
 import type { TimelineRow } from "@bb/server-contract";
 import type {
@@ -31,13 +35,13 @@ import {
   buildThreadTimelineFromEvents,
   formatThreadTimelineText,
 } from "../src/index.js";
-import { decodeThreadEventRow } from "../src/event-decode.js";
 import { EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT } from "../src/accepted-client-request-context.js";
-import { flattenEventProjectionMessagesDeep } from "../src/event-projection-flatten.js";
+import { getProjectionEntryMessages } from "../src/event-projection-flatten.js";
 import { buildEventProjection } from "../src/build-event-projection.js";
 import type { ThreadEventWithMeta } from "../src/build-event-projection.js";
 
 export interface RenderTimelineFixtureArgs {
+  completedTurnDisplay?: CompletedTurnDisplay;
   events: ThreadEventRow[];
   includeNestedRows?: boolean;
   projectionOptions: Omit<BuildEventProjectionOptions, "threadName"> & {
@@ -80,7 +84,6 @@ interface DefaultTurnEventOptions extends EventFactoryRowOptions {
 }
 
 type ClientTurnRequestedArgs = EventFactoryRowOptions & {
-  /** Dispatch-gate provenance; omitted means no gate amended the turn. */
   execution?: ResolvedThreadExecutionOptions;
   initiator?: ThreadTurnInitiator;
   input?: PromptInput[];
@@ -89,6 +92,8 @@ type ClientTurnRequestedArgs = EventFactoryRowOptions & {
   requestMethod?: "thread/start" | "turn/start";
   senderThreadId?: string | null;
   source?: "spawn" | "tell";
+  systemMessageKind?: SystemMessageKind;
+  systemMessageSubject?: SystemMessageSubject | null;
   target?: TurnRequestTarget;
   text: string;
 };
@@ -465,6 +470,52 @@ export interface TimelineEventFactory {
   warning(args?: WarningArgs): ThreadEventRowOfType<"provider/warning">;
 }
 
+export function decodeThreadEventRow(row: ThreadEventRow): ThreadEventWithMeta {
+  return {
+    event: buildThreadEvent(row),
+    meta: {
+      id: row.id,
+      seq: row.seq,
+      createdAt: row.createdAt,
+    },
+  };
+}
+
+function flattenEventProjectionMessages(
+  projection: EventProjection,
+): EventProjectionMessage[] {
+  const messages: EventProjectionMessage[] = [];
+  for (const entry of projection.entries) {
+    messages.push(...getProjectionEntryMessages(entry));
+  }
+  return messages;
+}
+
+function flattenEventProjectionMessageListDeep(
+  rootMessages: readonly EventProjectionMessage[],
+): EventProjectionMessage[] {
+  const messages: EventProjectionMessage[] = [];
+  for (const message of rootMessages) {
+    messages.push(message);
+    if (message.kind === "delegation") {
+      messages.push(
+        ...flattenEventProjectionMessageListDeep(
+          flattenEventProjectionMessages(message.childProjection),
+        ),
+      );
+    }
+  }
+  return messages;
+}
+
+function flattenEventProjectionMessagesDeep(
+  projection: EventProjection,
+): EventProjectionMessage[] {
+  return flattenEventProjectionMessageListDeep(
+    flattenEventProjectionMessages(projection),
+  );
+}
+
 export function fromRows(rows: ThreadEventRow[]): ThreadEventWithMeta[] {
   return rows.map((row) =>
     decodeThreadEventRow(withExplicitApprovalStatus(row)),
@@ -645,6 +696,12 @@ export function createTimelineEventFactory(
           source: args.source ?? "tell",
           initiator,
           senderThreadId,
+          ...(args.systemMessageKind !== undefined
+            ? { systemMessageKind: args.systemMessageKind }
+            : {}),
+          ...(args.systemMessageSubject !== undefined
+            ? { systemMessageSubject: args.systemMessageSubject }
+            : {}),
           input: args.input ?? [
             { type: "text", text: args.text, mentions: [] },
           ],
@@ -1431,6 +1488,7 @@ export function renderTimelineFixture(
       : args.projectionOptions.turnMessageDetail,
   });
   const commonProjectionOptions = {
+    completedTurnDisplay: args.completedTurnDisplay ?? "collapse",
     includeDiagnosticOperations:
       args.projectionOptions.includeDiagnosticOperations ?? false,
     isLatestPage: true,
@@ -1445,9 +1503,6 @@ export function renderTimelineFixture(
     options: {
       ...commonProjectionOptions,
       includeNestedRows,
-      turnMessageDetail: includeNestedRows
-        ? "full"
-        : args.projectionOptions.turnMessageDetail,
     },
   });
   const rows = timeline.rows;

@@ -3,6 +3,8 @@
 ### bb.events.on — lifecycle events
 
 ```ts
+bb.events.on("experimental_thread.events", ({ thread, sequence }) => { ... });
+bb.events.on("experimental_terminal.input", ({ terminal }) => { ... });
 bb.events.on("thread.created", ({ thread }) => { ... });
 bb.events.on("thread.active", ({ thread }) => { ... });
 bb.events.on("thread.idle", ({ thread, lastAssistantText }) => { ... });   // lastAssistantText: string | null
@@ -22,7 +24,7 @@ handler is told, and whatever it returns is IGNORED. The surface that ASKS is
 `bb.experimental_hooks`, below, where core acts on your answer — the same split
 git draws between post-commit and pre-commit hooks.
 
-Twelve events. The seven `thread.*` ones are thread lifecycle. `interaction.pending`
+Fourteen events. The seven `thread.*` ones are thread lifecycle. `interaction.pending`
 fires after core commits a pending interaction row. The three `message.*`
 ones fire when a dispatch is queued behind a wait, when a queued row's waits
 all clear and it dispatches, or when the queued row is cancelled. Every listener sees every queued row, so a plugin
@@ -98,6 +100,17 @@ always in the timeline yet. To react to a thread's content, listen on
 in a handler — including `bb.sdk.threads.update({ threadId, title })` —
 cannot delay or interrupt the thread's turn.
 
+`experimental_thread.events` notifies that the thread event sequence advanced. Core
+coalesces appends per thread into one notification per second, with the latest sequence
+and current thread DTO. Continuous output produces periodic updates and a final pending
+update. Reading history does not notify. The payload contains no event contents; use the
+existing thread-events SDK if your policy needs them. Modal v1 simply checks whether
+the delivered thread is active before extending its idle deadline.
+
+`experimental_terminal.input` fires after nonempty real user input is forwarded to a
+terminal. Its public terminal DTO includes hostId; keystrokes are not included. Output,
+keepalives and opening a terminal do not count.
+
 ### bb.experimental_hooks — the dispatch checkpoint
 
 **Hooks are questions core asks.** Core stops, hands your handler a context, and
@@ -115,13 +128,43 @@ bb.experimental_hooks.on("message.dispatch", (ctx) => {
   // ctx.project / ctx.environment / ctx.host / ctx.environmentIntent,
   // ctx.input.blocks + ctx.input.text,
   // ctx.requestedExecution, ctx.executionSources, ctx.origin /
-  // ctx.originPluginId / ctx.startedOnBehalfOf / ctx.parentThreadId,
-  // ctx.queuedMessage (the queued row on a re-attempt, else null).
+  // ctx.originPluginId / ctx.parentThreadId,
+  // ctx.initiator ("user" | "agent" | "system" | "mixed") + ctx.senderThreadId,
+  // ctx.queuedMessages (all queued rows in dispatch order, else []),
+  // ctx.experimental_submission (plugin-owned composer data, else null).
   if (isBlocked(ctx.input.text)) return { action: "reject", message: "…" };
   if (atCapacity()) return { action: "wait", reason: "4 of 4 running" };
   return { action: "proceed" };
 });
 ```
+
+`ctx.queuedMessages` contains every queued row in the dispatch, in order, or
+an empty array for an inline attempt. Each row carries its own content,
+`initiator` and `senderThreadId`. `ctx.input` is the combined input; the hook
+returns one decision for the entire group, preserving send-together behavior.
+
+`ctx.initiator` summarizes the authors: `user`, `agent`, or `system` when all
+messages share that category, and `mixed` when categories differ. Two different
+agents still yield `agent`. `ctx.senderThreadId` is the sender ID shared by all
+messages, null when none of them has a sender, and `"mixed"` when they
+disagree — so null still means a human typed it rather than bb being unsure.
+Individual rows never report `mixed`, and recorded turns keep their existing
+initiator types.
+A queued thread-start preserves its requester's author; a retry is `system`
+with no sender.
+
+`ctx.origin` and `ctx.originPluginId` are stored with the queued row and remain
+stable across re-attempts. For grouped dispatches they describe the first row.
+
+`ctx.queuedMessage` has been replaced in the context type by `queuedMessages`.
+Core still emits the first row (or null) under the old name for handlers built
+against an older SDK; new handlers inspect the full array.
+
+`ctx.startedOnBehalfOf` is no longer part of the context type. It answered a
+different question — why the THREAD was started — so it could not identify the
+sender of the message at hand. Core still sets it on the object for handlers
+built against an older SDK; new handlers read `ctx.initiator` and
+`ctx.senderThreadId`.
 
 The context is `MessageDispatchHookContext` (`ctx.attempt` is
 `PluginDispatchAttemptKind`, `ctx.input` is `PluginDispatchInput`,
@@ -129,6 +172,13 @@ The context is `MessageDispatchHookContext` (`ctx.attempt` is
 is `PluginDispatchExecutionSources`); the return value is
 `MessageDispatchHookDecision`. `PluginHooks`, `PluginHookSignatures` and
 `PluginHookHandler` type the registry itself.
+
+The hook pass runs before scheduling, thread, workspace, host, and interaction
+waits. Plugin policy therefore sees each submission before operational state
+can defer it. `experimental_submission` is present only on the initial
+composer submission; a plugin that waits can recognize later attempts through
+`ctx.queuedMessages.some(message => message.waitingOn?.kind === "plugin" &&
+message.waitingOn.pluginId === bb.pluginId)`.
 
 Decisions are `proceed`, `wait` (`reason`, optional `sendAt` epoch ms, which
 becomes the row's `sendAt` so core's due sweep re-attempts then) and `reject`
@@ -170,12 +220,13 @@ Register resource operations with `bb.experimental_environments.register`.
 `icon` accepts host glyphs, plugin-relative assets, and this plugin's declared
 namespaced icons, just like agent providers. The provider listing includes a
 hashed `logoUrl` for assets. `app.slots.experimental_providerIcon` can override
-an environment provider's icon by its provider ID.
+an environment provider's icon with `providerKind: "environment"` and its `providerId`.
 
 ```ts
 bb.experimental_environments.register({
   id: "personal-workspace",
   displayName: "Personal workspace",
+  description: "Create a personal directory without a project.",
   icon: "Folder",
   requires: { projectless: true },
   async create({ host, pathKey, report, signal }) {

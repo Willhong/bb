@@ -80,8 +80,10 @@ vi.mock("@/hooks/queries/system-queries", () => ({
 }));
 
 vi.mock("@/components/promptbox/PromptBoxInternal", () => ({
+  DEFAULT_COMPOSER_SCOPE: { kind: "new-thread", projectId: null },
   PromptBoxInternal: ({
     footerStart,
+    modeHeader,
     compact,
     onSubmit,
     onEscape,
@@ -95,6 +97,7 @@ vi.mock("@/components/promptbox/PromptBoxInternal", () => ({
     voice,
   }: {
     footerStart?: ReactNode;
+    modeHeader?: ReactNode;
     compact?: {
       isCompact: boolean;
       placeholder?: string;
@@ -108,7 +111,12 @@ vi.mock("@/components/promptbox/PromptBoxInternal", () => ({
         focusEnd: () => void;
       } | null;
     };
-    submission?: { onModifierSubmit?: () => void; title?: string };
+    submission?: {
+      onModifierSubmit?: () => void;
+      swapSubmitActions?: boolean;
+      showModifierSubmitAction?: boolean;
+      title?: string;
+    };
     suppressPluginComposerCustomizations?: boolean;
     onCollapse?: () => void;
     heightAnimationKey?: string | number;
@@ -125,6 +133,7 @@ vi.mock("@/components/promptbox/PromptBoxInternal", () => ({
         suppressPluginComposerCustomizations ? "true" : "false"
       }
     >
+      {modeHeader}
       {footerStart}
       <input
         aria-label="Follow-up prompt"
@@ -145,7 +154,11 @@ vi.mock("@/components/promptbox/PromptBoxInternal", () => ({
       <button
         type="button"
         onClick={(event) => {
-          onSubmit();
+          if (submission?.swapSubmitActions) {
+            submission.onModifierSubmit?.();
+          } else {
+            onSubmit();
+          }
           if (
             blurOnPointerSubmit &&
             event.detail > 0 &&
@@ -160,7 +173,10 @@ vi.mock("@/components/promptbox/PromptBoxInternal", () => ({
       <button
         type="button"
         title={submission?.title}
-        onClick={submission?.onModifierSubmit}
+        data-show-modifier-action={submission?.showModifierSubmitAction}
+        onClick={
+          submission?.swapSubmitActions ? onSubmit : submission?.onModifierSubmit
+        }
       >
         Modifier submit
       </button>
@@ -281,7 +297,7 @@ function createFollowUpPromptBoxProps(
         onQueryChange: vi.fn(),
       },
       command: {
-        trigger: null,
+        triggers: [],
         suggestions: [],
         isLoading: false,
         isError: false,
@@ -698,6 +714,45 @@ describe("FollowUpPromptBox", () => {
     expect(mocks.scrollToBottom).toHaveBeenCalledOnce();
   });
 
+  it.each([false, true])(
+    "keeps exit handoff available without replacing the editor (compact viewport: %s)",
+    (isCompactViewport) => {
+      mocks.isCompactViewport = isCompactViewport;
+      const props = createFollowUpPromptBoxProps({ kind: "ready" });
+      const handoff = {
+        sourceProviderId: "codex",
+        active: false,
+        onStart: vi.fn(),
+        onExit: vi.fn(),
+        onSelect: vi.fn(),
+      };
+      props.execution.handoff = handoff;
+      const { rerender } = render(<FollowUpPromptBox {...props} />);
+      const editor = screen.getByLabelText("Follow-up prompt");
+      expect(screen.queryByRole("button", { name: "Exit handoff" })).toBeNull();
+
+      rerender(
+        <FollowUpPromptBox
+          {...props}
+          execution={{
+            ...props.execution,
+            handoff: { ...handoff, active: true },
+          }}
+        />,
+      );
+      expect(screen.getByLabelText("Follow-up prompt")).toBe(editor);
+      expect(screen.getByText("Handoff to new thread")).not.toBeNull();
+      const exit = screen.getByRole("button", { name: "Exit handoff" });
+      expect(exit.textContent).toBe("");
+      fireEvent.click(exit);
+      expect(handoff.onExit).toHaveBeenCalledOnce();
+
+      rerender(<FollowUpPromptBox {...props} />);
+      expect(screen.queryByRole("button", { name: "Exit handoff" })).toBeNull();
+      expect(screen.getByLabelText("Follow-up prompt")).toBe(editor);
+    },
+  );
+
   it("forwards the composer's host Escape action", () => {
     const props = createFollowUpPromptBoxProps({ kind: "ready" });
     const onEscape = vi.fn();
@@ -752,8 +807,22 @@ describe("FollowUpPromptBox", () => {
       fireEvent.click(screen.getByText("Modifier submit"));
       expect(expectedModifier).toHaveBeenCalledOnce();
       expect(mocks.scrollToBottom).toHaveBeenCalledOnce();
+      expect(
+        screen
+          .getByText("Modifier submit")
+          .getAttribute("data-show-modifier-action"),
+      ).toBe("true");
     },
   );
+
+  it("keeps save shortcuts without offering an alternate send action in a ready editor", () => {
+    const props = createFollowUpPromptBoxProps({ kind: "ready" });
+    render(<FollowUpPromptBox {...props} />);
+    const modifier = screen.getByText("Modifier submit");
+    expect(modifier.getAttribute("data-show-modifier-action")).toBe("false");
+    fireEvent.click(modifier);
+    expect(props.composer?.onModifierSubmit).toHaveBeenCalledOnce();
+  });
 
   it.each([
     { setting: false, title: "Queue follow-up (Enter), Ctrl + Enter to steer" },
@@ -871,6 +940,25 @@ describe("FollowUpPromptBox", () => {
       null,
     );
     expect(screen.getByText("Local environment")).toBeTruthy();
+  });
+
+  it("keeps a collapsed composer steady while a pointer focuses an action", () => {
+    const props = createFollowUpPromptBoxProps({ kind: "ready" });
+    render(<FollowUpPromptBox {...props} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse prompt box" }),
+    );
+    const submit = screen.getByRole("button", { name: "Submit" });
+
+    fireEvent.pointerDown(submit, { button: 0, pointerType: "mouse" });
+    act(() => submit.focus());
+
+    expect(screen.getByTestId("prompt-box").getAttribute("data-compact")).toBe(
+      "true",
+    );
+    fireEvent.pointerUp(submit, { button: 0, pointerType: "mouse" });
+    fireEvent.click(submit);
+    expect(props.composer?.onSubmit).toHaveBeenCalledOnce();
   });
 
   it("toggles between focused and collapsed with the composer shortcut", () => {
@@ -1170,6 +1258,89 @@ describe("FollowUpPromptBox", () => {
     }
   });
 
+  it.each([false, true])(
+    "cancels a pending keyboard collapse when pressing a control (overlay: %s)",
+    (isOverlay) => {
+      mocks.isCompactViewport = true;
+      mocks.isPointerCoarse = true;
+      vi.useFakeTimers();
+      const originalDescriptor = Object.getOwnPropertyDescriptor(
+        window,
+        "visualViewport",
+      );
+      const visualViewport = Object.assign(new EventTarget(), { height: 500 });
+      Object.defineProperty(window, "visualViewport", {
+        configurable: true,
+        value: visualViewport,
+      });
+
+      try {
+        const props = createFollowUpPromptBoxProps({ kind: "ready" });
+        render(<FollowUpPromptBox {...props} />);
+        const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
+        const control = screen.getByRole("button", { name: "Submit" });
+        if (isOverlay) control.setAttribute("aria-haspopup", "menu");
+        act(() => input.focus());
+        act(() => {
+          visualViewport.height = 300;
+          visualViewport.dispatchEvent(new Event("resize"));
+          vi.advanceTimersByTime(20);
+        });
+        act(() => input.blur());
+        act(() => vi.advanceTimersByTime(550));
+
+        fireEvent.pointerDown(control, { button: 0, pointerType: "touch" });
+        act(() => vi.advanceTimersByTime(300));
+
+        expect(
+          screen.getByTestId("prompt-box").getAttribute("data-compact"),
+        ).toBe("false");
+        fireEvent.pointerUp(control, { button: 0, pointerType: "touch" });
+        fireEvent.click(control);
+        expect(props.composer?.onSubmit).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+        if (originalDescriptor) {
+          Object.defineProperty(window, "visualViewport", originalDescriptor);
+        } else {
+          Reflect.deleteProperty(window, "visualViewport");
+        }
+      }
+    },
+  );
+
+  it.each(["pointerUp", "pointerCancel"] as const)(
+    "resumes deferred focus loss after a control gesture ends with %s",
+    (releaseEvent) => {
+      mocks.isCompactViewport = true;
+      vi.useFakeTimers();
+      try {
+        render(
+          <FollowUpPromptBox
+            {...createFollowUpPromptBoxProps({ kind: "ready" })}
+          />,
+        );
+        const input = screen.getByRole("textbox", { name: "Follow-up prompt" });
+        const control = screen.getByRole("button", { name: "Submit" });
+        act(() => input.focus());
+        fireEvent.pointerDown(control);
+        act(() => input.blur());
+        act(() => vi.advanceTimersByTime(20));
+        expect(
+          screen.getByTestId("prompt-box").getAttribute("data-compact"),
+        ).toBe("false");
+
+        fireEvent[releaseEvent](control);
+        act(() => vi.advanceTimersByTime(20));
+        expect(
+          screen.getByTestId("prompt-box").getAttribute("data-compact"),
+        ).toBe("true");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("stays expanded after pressing a non-focusable composer control", () => {
     mocks.isCompactViewport = true;
     const props = createFollowUpPromptBoxProps({ kind: "ready" });
@@ -1344,8 +1515,7 @@ describe("FollowUpPromptBox", () => {
   it("uses the caller-specific compact placeholder", () => {
     mocks.isCompactViewport = true;
     const props = createFollowUpPromptBoxProps({
-      kind: "blocked",
-      reason: "stopping",
+      kind: "queue-while-stopping",
     });
     if (props.composer === null) throw new Error("Missing composer");
     props.composer.compactPromptPlaceholder = "Stopping side chat...";

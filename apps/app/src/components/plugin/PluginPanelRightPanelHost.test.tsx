@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -22,6 +23,7 @@ import {
   serializeFixedPanelTabsState,
 } from "@/lib/fixed-panel-tabs-state";
 import { PluginPanelRightPanelHost } from "./PluginPanelRightPanelHost";
+import { openPluginDetailsInWorkspace } from "./plugin-detail-opener";
 import { getPluginPagePanelStateId } from "./plugin-page-panel-state";
 import { useAppNavigationHost } from "@/lib/app-navigation-host";
 import {
@@ -70,7 +72,6 @@ const browserState = vi.hoisted(() => ({ available: false }));
 const viewportState = vi.hoisted(() => ({ isCompactViewport: false }));
 const createTerminal = vi.hoisted(() => vi.fn());
 const catalogQueryState = vi.hoisted(() => ({ queries: [] as string[] }));
-const openPaneContentInSplit = vi.hoisted(() => vi.fn());
 const threadTabsApi = vi.hoisted(() => ({
   get: vi.fn(),
   update: vi.fn(),
@@ -165,7 +166,7 @@ vi.mock("@/hooks/queries/plugin-catalog-queries", () => ({
 }));
 
 vi.mock("@/lib/split-layout/openPaneContentInSplit", () => ({
-  openPaneContentInSplit,
+  openPaneContentInSplit: vi.fn(),
 }));
 
 vi.mock("@/hooks/queries/plugin-settings-queries", () => ({
@@ -415,6 +416,16 @@ vi.mock("@/components/secondary-panel/ThreadSecondaryPanel", () => ({
             {tab.title}
           </button>
         ))}
+        <button
+          type="button"
+          onClick={() => {
+            for (const tab of tabs) {
+              tab.onClose();
+            }
+          }}
+        >
+          Close all tabs
+        </button>
         <button type="button" onClick={onOpenNewTab}>
           Add tab
         </button>
@@ -642,12 +653,7 @@ function CurrentPath() {
   return <output data-testid="current-path">{useLocation().pathname}</output>;
 }
 
-function renderHost(
-  panelPath = "board",
-  subPath = "",
-  store = createStore(),
-  pluginDetailTabsEnabled = false,
-) {
+function renderHost(panelPath = "board", subPath = "", store = createStore()) {
   const panelStateId = getPluginPagePanelStateId({
     panelPath,
     pluginId: "demo",
@@ -667,7 +673,6 @@ function renderHost(
                 panelPath={panelPath}
                 pluginId="demo"
                 subPath={subPath}
-                pluginDetailTabsEnabled={pluginDetailTabsEnabled}
               >
                 <div>Plugin page</div>
                 <PluginDetailNavigationLink />
@@ -696,7 +701,6 @@ describe("PluginPanelRightPanelHost", () => {
     fixedTabState.fileOpeners = [];
     fixedTabState.newThreadPanelActions = [];
     catalogQueryState.queries = [];
-    openPaneContentInSplit.mockReset();
     secondaryPanelState.collapseEnabled = false;
     secondaryPanelState.fixedTabs = [];
     secondaryPanelState.splitPanelStateId = undefined;
@@ -780,7 +784,7 @@ describe("PluginPanelRightPanelHost", () => {
   });
 
   it("opens plugin detail links in a header-controlled tab without leaving the plugin page", async () => {
-    renderHost("board", "", createStore(), true);
+    renderHost();
 
     fireEvent.click(screen.getByRole("link", { name: "Open Secrets plugin" }));
 
@@ -805,8 +809,23 @@ describe("PluginPanelRightPanelHost", () => {
     );
   });
 
+  it("accepts sidebar detail requests before the plugin panel registers", async () => {
+    fixedTabState.panelRegistered = false;
+    renderHost();
+    act(() => {
+      expect(
+        openPluginDetailsInWorkspace({ pluginId: "secrets", title: "Secrets" }),
+      ).toBe(true);
+    });
+    expect(await screen.findByText("Details for secrets")).toBeTruthy();
+    expect(screen.getByTestId("current-path").textContent).toBe(
+      "/plugins/demo/board",
+    );
+    expect(screen.getByText("Plugin page")).toBeTruthy();
+  });
+
   it("observes only the selected detail tab while retaining inactive tab metadata", async () => {
-    renderHost("board", "", createStore(), true);
+    renderHost();
 
     fireEvent.click(screen.getByRole("link", { name: "Open Secrets plugin" }));
     expect(await screen.findByText("Details for secrets")).toBeTruthy();
@@ -824,22 +843,25 @@ describe("PluginPanelRightPanelHost", () => {
     expect(catalogQueryState.queries).toEqual(["secrets"]);
   });
 
-  it("keeps split navigation for plugin-detail links outside the Plugin Guide", () => {
+  it("closes every plugin detail tab when several close in one event", async () => {
     renderHost();
 
     fireEvent.click(screen.getByRole("link", { name: "Open Secrets plugin" }));
+    expect(await screen.findByText("Details for secrets")).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("link", { name: "Open Automations plugin" }),
+    );
+    expect(await screen.findByText("Details for automations")).toBeTruthy();
 
-    expect(openPaneContentInSplit).toHaveBeenCalledTimes(1);
-    expect(openPaneContentInSplit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: { kind: "plugin-detail", pluginId: "secrets" },
-        route: "/plugins/secrets",
-      }),
+    fireEvent.click(screen.getByRole("button", { name: "Close all tabs" }));
+
+    await waitFor(() =>
+      expect(secondaryPanelState.tabKinds).not.toContain(
+        "marketplace-plugin-detail",
+      ),
     );
-    expect(screen.queryByTestId("marketplace-plugin-detail")).toBeNull();
-    expect(secondaryPanelState.tabKinds).not.toContain(
-      "marketplace-plugin-detail",
-    );
+    expect(screen.queryByRole("button", { name: "Secrets" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Automations" })).toBeNull();
   });
 
   it("closes the compact drawer when its remaining tab closes", async () => {
@@ -921,7 +943,7 @@ describe("PluginPanelRightPanelHost", () => {
     fireEvent.click(screen.getByText("Add tab"));
     expect(await screen.findByTestId("plugin-page-new-tab")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Close New tab" }));
-    expect(screen.getByText("Navigation for task/123")).toBeTruthy();
+    expect(await screen.findByText("Details for task/123")).toBeTruthy();
     expect(
       screen
         .getByTestId("shared-secondary-panel-region")

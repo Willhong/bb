@@ -66,7 +66,11 @@ vi.mock("@/hooks/mutations/thread-state-mutations", async (importOriginal) => {
     useMarkThreadUnread: () => ({ mutate: mocks.mutation }),
     usePinThread: () => ({ mutate: mocks.mutation }),
     useUnpinThread: () => ({ mutate: mocks.mutation }),
-    useUpdateThread: () => ({ isPending: false, mutate: mocks.mutation }),
+    useUpdateThread: () => ({
+      isPending: false,
+      mutate: mocks.mutation,
+      mutateAsync: mocks.mutation,
+    }),
   };
 });
 
@@ -133,7 +137,7 @@ beforeEach(() => {
     },
   });
   vi.mocked(sdk.threads.archiveAll).mockResolvedValue({
-    archivedThreadIds: ["thr_parent", "thr_child"],
+    archivedThreadIds: ["thr_child", "thr_parent"],
     ok: true,
   });
   vi.mocked(sdk.threads.unarchive).mockResolvedValue({ ok: true });

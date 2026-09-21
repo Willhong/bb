@@ -52,6 +52,9 @@ export interface PluginListItem {
   source: string;
   isOrphanedBuiltin: boolean;
   catalogEntryId: string | null;
+  catalogMarketplaceName: string | null;
+  categoryId?: InstalledPlugin["categoryId"];
+  category?: string;
   publisherLabel: string | null;
   sourceDisplay: string;
   updateState: PluginUpdateState;
@@ -108,6 +111,9 @@ export function toPluginListItem(plugin: InstalledPlugin): PluginListItem {
     source: plugin.source,
     isOrphanedBuiltin: plugin.isOrphanedBuiltin,
     catalogEntryId: plugin.catalogEntryId ?? null,
+    catalogMarketplaceName: plugin.catalogMarketplaceName ?? null,
+    categoryId: plugin.categoryId,
+    category: plugin.category,
     publisherLabel: plugin.publisherLabel,
     sourceDisplay: plugin.sourceDisplay,
     updateState: {
@@ -127,14 +133,6 @@ export function toPluginListItem(plugin: InstalledPlugin): PluginListItem {
             },
     },
   };
-}
-
-export async function fetchPluginList(
-  fetchImpl: FetchLike,
-  signal?: AbortSignal,
-): Promise<PluginListResult> {
-  const plugins = await fetchInstalledPlugins(fetchImpl, signal);
-  return { plugins: plugins.map(toPluginListItem) };
 }
 
 export async function fetchInstalledPlugins(

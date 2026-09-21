@@ -24,7 +24,6 @@ import {
 import { formatTimelineDecorationText } from "../src/timeline-row-title.js";
 import type {
   TimelineViewDelegationWorkRow,
-  TimelineWorkSummaryKind,
   TimelineWorkSummaryRow,
 } from "../src/timeline-view.js";
 
@@ -379,7 +378,7 @@ function parentChangeSystemRow({
 
 function workSummaryRow(
   children: TimelineViewWorkRow[],
-  kind: TimelineWorkSummaryKind = "step-summary",
+  kind: TimelineWorkSummaryRow["kind"] = "step-summary",
 ): TimelineWorkSummaryRow {
   return {
     ...baseRow("summary-1"),
@@ -1774,6 +1773,56 @@ const testsQuestion = {
     { value: "no", label: "No" },
   ],
 };
+
+describe("buildTimelineRowTitle form rows", () => {
+  const formRow = (
+    lifecycle: "pending" | "submitted" | "cancelled",
+    title?: string,
+  ): Extract<TimelineViewWorkRow, { workKind: "form" }> => ({
+    ...baseRow("form-1"),
+    kind: "work",
+    workKind: "form",
+    status: lifecycle === "pending" ? "pending" : "completed",
+    interactionId: "pi-form",
+    pluginId: "secrets",
+    rendererId: "secret-request",
+    title: "Add secrets to .env",
+    lifecycle,
+    statusReason: null,
+    presentation: {
+      label: {
+        pending: "Waiting for Add secrets to .env",
+        completed: "Submitted Add secrets to .env",
+      },
+      icon: { glyph: "Toolbox" },
+      ...(title === undefined ? {} : { title }),
+    },
+    payload: null,
+  });
+
+  it("names the form while it waits and once it is submitted", () => {
+    expect(
+      buildTimelineRowTitle(formRow("pending"), DEFAULT_OPTIONS).plain,
+    ).toBe("Waiting for Add secrets to .env");
+    expect(
+      buildTimelineRowTitle(formRow("submitted"), DEFAULT_OPTIONS).plain,
+    ).toBe("Submitted Add secrets to .env");
+    expect(
+      buildTimelineRowTitle(
+        formRow("submitted", "Added API_KEY to .env"),
+        DEFAULT_OPTIONS,
+      ).plain,
+    ).toBe("Added API_KEY to .env");
+    const cancelled = buildTimelineRowTitle(
+      formRow("cancelled"),
+      DEFAULT_OPTIONS,
+    );
+    expect(cancelled.plain).toBe("Submitted Add secrets to .env (interrupted)");
+    expect(cancelled.decorations).toEqual([
+      expect.objectContaining({ kind: "status", status: "interrupted" }),
+    ]);
+  });
+});
 
 describe("buildTimelineRowTitle question rows", () => {
   it("shows the prompt for a single pending question", () => {

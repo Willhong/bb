@@ -16,10 +16,13 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@bb/host-daemon-contract";
+import { resolveBundledNpmCli } from "@bb/plugin-build";
+import { omitNpmScriptPolicyEnv } from "@bb/process-utils";
 
 const execFileAsync = promisify(execFile);
 const HOST_DEPENDENCIES = [
   "@parcel/watcher",
+  "fs-native-extensions",
   "node-pty",
   "pino",
   "pino-pretty",
@@ -52,7 +55,7 @@ interface CreateBbAppArtifactServiceOptions {
   dataDir: string;
   commandRunner?: BbAppArtifactCommandRunner;
   protocolVersion?: number;
-  serverEntryUrl?: string;
+  serverEntryUrl: string;
 }
 
 interface BbAppPackageJson {
@@ -63,15 +66,21 @@ interface BbAppPackageJson {
   version: string;
 }
 
-async function defaultCommandRunner(
+export async function defaultCommandRunner(
   command: string,
   args: readonly string[],
   cwd: string,
 ): Promise<string> {
-  const result = await execFileAsync(command, [...args], {
-    cwd,
-    maxBuffer: 10 * 1024 * 1024,
-  });
+  const npmCliPath = command === "npm" ? resolveBundledNpmCli() : null;
+  const result = await execFileAsync(
+    npmCliPath === null ? command : process.execPath,
+    npmCliPath === null ? [...args] : [npmCliPath, ...args],
+    {
+      cwd,
+      env: omitNpmScriptPolicyEnv(process.env),
+      maxBuffer: 10 * 1024 * 1024,
+    },
+  );
   return result.stdout;
 }
 
@@ -232,7 +241,6 @@ export function createBbAppArtifactService(
   options: CreateBbAppArtifactServiceOptions,
 ): BbAppArtifactService {
   const commandRunner = options.commandRunner ?? defaultCommandRunner;
-  const serverEntryUrl = options.serverEntryUrl ?? import.meta.url;
   const cacheDir = join(options.dataDir, "install-cache");
   const protocolVersion =
     options.protocolVersion ?? HOST_DAEMON_PROTOCOL_VERSION;
@@ -240,7 +248,7 @@ export function createBbAppArtifactService(
   let artifactPromise: Promise<BbAppArtifact> | undefined;
 
   function getResolvedPackage(): Promise<ResolvedBbAppPackage> {
-    resolvedPackagePromise ??= resolveBbAppPackage(serverEntryUrl);
+    resolvedPackagePromise ??= resolveBbAppPackage(options.serverEntryUrl);
     return resolvedPackagePromise;
   }
 

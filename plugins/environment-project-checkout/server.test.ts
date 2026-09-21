@@ -5,8 +5,9 @@ import type {
 import {
   createFakePluginHost,
   makeHostResponse,
+  makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PROJECT_CHECKOUT_ENVIRONMENT_PROVIDER_ID } from "./provider-id.js";
 import plugin from "./server.js";
 
@@ -90,7 +91,7 @@ async function validateWith(args: {
   return provider.validate({
     project: PROJECT,
     host: HOST,
-    projectCheckout: { path: CHECKOUT_PATH },
+    projectCheckout: { experimental_ownsPath: false, path: CHECKOUT_PATH },
     gitRemote: null,
     inputs: args.inputs,
   });
@@ -277,3 +278,108 @@ describe("checkout provider validate", () => {
     expect(decision.action).toBe("refuse");
   });
 });
+
+it.each([false, true])(
+  "reports source ownership %s to core's hook policy",
+  async (owned) => {
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "environment-project-checkout",
+      experimental_callHostRpc: (call) => {
+        if (call.method !== "attach") throw new Error("Unexpected host method");
+        return { status: "attached", path: CHECKOUT_PATH, branchName: "main" };
+      },
+      sdk: { environments: { list: () => [] }, threads: { list: () => [] } },
+    });
+    try {
+      await plugin(bb);
+      const provider = harness.registrations.environmentProviders.get(
+        PROJECT_CHECKOUT_ENVIRONMENT_PROVIDER_ID,
+      );
+      if (!provider) throw new Error("Missing provider");
+      const result = await provider.create({
+        project: PROJECT,
+        host: HOST,
+        projectCheckout: { path: CHECKOUT_PATH, experimental_ownsPath: owned },
+        gitRemote: null,
+        inputs: {},
+        thread: makeThreadResponse(),
+        suggestedBranchName: "bb/test",
+        attempt: 1,
+        pathKey: "fixture",
+        rebuild: false,
+        experimental_claimPath: async () => true,
+        previous: null,
+        report: { step() {}, log() {} },
+        signal: new AbortController().signal,
+      });
+      expect(result).toMatchObject({
+        status: "created",
+        path: CHECKOUT_PATH,
+        ownsPath: owned,
+      });
+    } finally {
+      await harness.lifecycle.dispose();
+    }
+  },
+);
+
+it.each(["branch", "timeout", "abort"] as const)(
+  "ends a blocked path claim on %s without attaching",
+  async (mode) => {
+    const hostCall = vi.fn(() => {
+      throw new Error("Unexpected host call");
+    });
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "environment-project-checkout",
+      experimental_callHostRpc: hostCall,
+    });
+    const controller = new AbortController();
+    const claim = vi.fn(async () => false);
+    try {
+      await plugin(bb);
+      const provider = harness.registrations.environmentProviders.get(
+        PROJECT_CHECKOUT_ENVIRONMENT_PROVIDER_ID,
+      );
+      if (!provider) throw new Error("Missing provider");
+      vi.useFakeTimers();
+      const result = provider.create({
+        project: PROJECT,
+        host: HOST,
+        projectCheckout: { path: CHECKOUT_PATH, experimental_ownsPath: false },
+        gitRemote: null,
+        inputs:
+          mode === "branch"
+            ? { branch: { kind: "existing", name: "release" } }
+            : {},
+        thread: makeThreadResponse(),
+        suggestedBranchName: "bb/test",
+        attempt: 1,
+        pathKey: "blocked",
+        rebuild: false,
+        experimental_claimPath: claim,
+        previous: null,
+        report: { step() {}, log() {} },
+        signal: controller.signal,
+      });
+      if (mode === "abort") {
+        const assertion = expect(result).rejects.toThrow();
+        controller.abort();
+        await assertion;
+      } else {
+        if (mode === "timeout") {
+          vi.setSystemTime(Date.now() + 15 * 60 * 1000);
+          await vi.advanceTimersByTimeAsync(50);
+        }
+        await expect(result).resolves.toMatchObject({
+          status: "failed",
+          message: "Workspace is being prepared by another thread",
+        });
+      }
+      expect(hostCall).not.toHaveBeenCalled();
+      if (mode === "branch") expect(claim).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      await harness.lifecycle.dispose();
+    }
+  },
+);

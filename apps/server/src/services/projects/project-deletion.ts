@@ -3,11 +3,12 @@ import {
   sweepProviderEnvironment,
 } from "../environments/environment-engine.js";
 import { cancelAbandonedProviderCreations } from "../threads/thread-environment-providers.js";
-import { eq, isNotNull } from "drizzle-orm";
+import { eq, isNotNull, inArray } from "drizzle-orm";
 import {
   deleteProject,
   getProject,
   getEnvironment,
+  lifecycleThreadTreeIdsForProject,
   listEnvironments,
   markProjectDeleted,
   markThreadDeleted,
@@ -22,10 +23,7 @@ import type {
 } from "../../types.js";
 import { deleteProjectAttachments } from "./attachments.js";
 import { deferAfterResponse } from "../lib/response-deferral.js";
-import {
-  finalizeStoppedThread,
-  requestActiveRuntimeThreadStopIfNeeded,
-} from "../threads/thread-lifecycle.js";
+import { requestThreadStorageDeletion } from "../threads/thread-lifecycle.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
 import { emitPluginThreadDeleted } from "../plugins/plugin-thread-events.js";
 
@@ -62,7 +60,9 @@ function listProjectDeletionThreads(
       status: threads.status,
     })
     .from(threads)
-    .where(eq(threads.projectId, args.projectId))
+    .where(
+      inArray(threads.id, lifecycleThreadTreeIdsForProject(args.projectId)),
+    )
     .all();
 }
 
@@ -129,11 +129,10 @@ export function beginProjectDeletion(
   const { projectThreads } = tombstoneProjectThreadsForDeletion(deps, args);
   for (const thread of projectThreads) {
     const environment = thread.environmentId
-      ? (environmentsById.get(thread.environmentId) ?? null)
+      ? (environmentsById.get(thread.environmentId) ??
+        getEnvironment(deps.db, thread.environmentId))
       : null;
-    if (environment) {
-      requestActiveRuntimeThreadStopIfNeeded(deps, thread, environment);
-    }
+    requestThreadStorageDeletion(deps, thread, environment);
   }
 }
 
@@ -177,7 +176,8 @@ export async function advanceProjectDeletion(
   });
   for (const thread of projectThreads) {
     const environment = thread.environmentId
-      ? (environmentsById.get(thread.environmentId) ?? null)
+      ? (environmentsById.get(thread.environmentId) ??
+        getEnvironment(deps.db, thread.environmentId))
       : null;
 
     if (thread.deletedAt === null) {
@@ -188,12 +188,7 @@ export async function advanceProjectDeletion(
     }
     cancelAbandonedProviderCreations(deps, thread.id);
     deps.terminalSessions.closeDeletedThreadTerminals({ threadId: thread.id });
-    if (environment) {
-      requestActiveRuntimeThreadStopIfNeeded(deps, thread, environment);
-    }
-    finalizeStoppedThread(deps, {
-      threadId: thread.id,
-    });
+    requestThreadStorageDeletion(deps, thread, environment);
   }
 
   if (hasRemainingProjectThreads(deps, args.projectId)) {

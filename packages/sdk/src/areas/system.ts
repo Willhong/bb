@@ -1,4 +1,9 @@
 import type {
+  MachineEnvironmentReplace,
+  MachineEnvironmentSet,
+  MachineEnvironmentList,
+} from "@bb/server-contract";
+import type {
   AppKeybindingOverrides,
   AppSettings,
   AppSettingsUpdate,
@@ -26,7 +31,11 @@ import type {
   UiPreferencesResponse,
 } from "@bb/server-contract";
 import { systemVoiceTranscriptionResponseSchema } from "@bb/server-contract";
-import { signalRequestArgs, type CreateSdkAreaArgs } from "./common.js";
+import {
+  readExecutionOptions,
+  signalRequestArgs,
+  type CreateSdkAreaArgs,
+} from "./common.js";
 
 export interface SystemAttentionArgs {
   signal?: AbortSignal;
@@ -105,6 +114,16 @@ export interface SystemUiPreferencesArea {
 }
 
 export interface SystemArea {
+  setMachineEnvironmentVariable(
+    input: MachineEnvironmentSet,
+  ): Promise<MachineEnvironmentList>;
+  deleteMachineEnvironmentVariable(input: {
+    name: string;
+  }): Promise<MachineEnvironmentList>;
+  machineEnvironment(): Promise<MachineEnvironmentList>;
+  replaceMachineEnvironment(
+    input: MachineEnvironmentReplace,
+  ): Promise<MachineEnvironmentList>;
   attention(args?: SystemAttentionArgs): Promise<SystemAttentionResult>;
   config(args?: SystemConfigArgs): Promise<SystemConfigResult>;
   executionOptions(
@@ -175,6 +194,28 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
   };
   return {
     uiPreferences,
+    async setMachineEnvironmentVariable(input) {
+      return transport.readJson(
+        transport.api.v1.settings["machine-environment"].$post({ json: input }),
+      );
+    },
+    async deleteMachineEnvironmentVariable(input) {
+      return transport.readJson(
+        transport.api.v1.settings["machine-environment"].$delete({
+          json: input,
+        }),
+      );
+    },
+    async machineEnvironment() {
+      return transport.readJson(
+        transport.api.v1.settings["machine-environment"].$get(),
+      );
+    },
+    async replaceMachineEnvironment(input) {
+      return transport.readJson(
+        transport.api.v1.settings["machine-environment"].$put({ json: input }),
+      );
+    },
     async attention(input) {
       return transport.readJson(
         transport.api.v1.system.attention.$get(
@@ -192,18 +233,7 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
       );
     },
     async executionOptions(input = {}) {
-      return transport.readJson(
-        transport.api.v1.system["execution-options"].$get(
-          {
-            query: {
-              environmentId: input.environmentId,
-              hostId: input.hostId,
-              providerId: input.providerId,
-            },
-          },
-          ...signalRequestArgs(input.signal),
-        ),
-      );
+      return readExecutionOptions(transport, input);
     },
     async cliSkillsStatus(input = {}) {
       return transport.readJson(

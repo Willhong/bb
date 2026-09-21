@@ -112,7 +112,6 @@ const noop = () => {};
 
 const storyEnvironment: NewThreadEnvironmentConfig = {
   value: `host:${HOST_IDS.local}:local`,
-  onChange: noop,
   sources: STORY_PROJECT_SOURCES,
   host: makeHost({ id: HOST_IDS.local }),
   isLocal: true,
@@ -165,6 +164,7 @@ export function StoryComposer() {
   return (
     <ModelPickerStoryQueryProvider>
       <NewThreadPromptBoxUI
+        mentionMenuPlacement="top"
         id="story-compact-home-composer"
         value={value}
         mentionRanges={mentionRanges}

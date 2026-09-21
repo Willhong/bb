@@ -16,7 +16,7 @@ import type {
   ThreadOpenSignal,
   ThreadPaneActionSignal,
 } from "@bb/server-contract";
-import { buildDevWebSocketUrl } from "./dev-websocket-url";
+import { buildBrowserWebSocketUrl } from "./dev-websocket-url";
 import {
   isDocumentVisible,
   subscribeToDocumentVisibility,
@@ -95,9 +95,7 @@ export class WebSocketManager {
   connect(): void {
     if (this.socket) return;
 
-    const url =
-      buildDevWebSocketUrl({ path: "/ws" }) ??
-      `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
+    const url = buildBrowserWebSocketUrl("/ws");
 
     const socket = new ReconnectingWebSocket(url, undefined, {
       minReconnectionDelay: 1000,
@@ -203,7 +201,7 @@ export class WebSocketManager {
     }
     switch (this.socket.readyState) {
       case WebSocket.OPEN:
-        this.sendPing();
+        this.sendPing({ ignoreRecentActivity: true });
         return;
       case WebSocket.CONNECTING:
         return;
@@ -232,11 +230,14 @@ export class WebSocketManager {
     this.clearPongTimer();
   }
 
-  private sendPing(): void {
+  private sendPing(options?: { ignoreRecentActivity: boolean }): void {
     if (this.socket?.readyState !== WebSocket.OPEN) {
       return;
     }
-    if (Date.now() - this.lastServerActivityAt < REALTIME_PONG_TIMEOUT_MS) {
+    if (
+      !options?.ignoreRecentActivity &&
+      Date.now() - this.lastServerActivityAt < REALTIME_PONG_TIMEOUT_MS
+    ) {
       return;
     }
     this.sendMessage({ type: "ping" });
@@ -258,7 +259,6 @@ export class WebSocketManager {
 
   private noteServerActivity(): void {
     this.lastServerActivityAt = Date.now();
-    this.clearPongTimer();
   }
 
   private markSocketLost(at: number): void {
@@ -278,6 +278,7 @@ export class WebSocketManager {
     }
 
     if (pongMessageLenientSchema.safeParse(parsed).success) {
+      this.clearPongTimer();
       return;
     }
 

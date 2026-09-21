@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
 import {
@@ -17,6 +18,8 @@ import {
 } from "@bb/provider-bridge-protocol";
 import {
   JsonRpcResponseError,
+  PROVIDER_TOOL_CALL_CANCELLED_METHOD,
+  providerToolCallCancellationSchema,
   getJsonRpcStringParam,
   ignoredJsonRpcResultSchema,
   parseJsonRpcLine,
@@ -36,6 +39,7 @@ import {
 } from "./execution-options.js";
 import {
   handleRuntimeProviderRequest,
+  RuntimeToolCalls,
   type ResolveRuntimeProviderRequestThreadIdArgs,
   type RuntimeProviderRequestKind,
 } from "./runtime-provider-requests.js";
@@ -58,6 +62,7 @@ import type {
   AgentRuntimeBridgeLaunch,
   AgentRuntimeExecutionOptions,
   AgentRuntimeOptions,
+  AgentRuntimeSkillRoot,
   ReapedIdleProviderSession,
 } from "./types.js";
 import {
@@ -117,6 +122,7 @@ interface FindReapableIdleProviderSessionArgs {
 
 interface ResolveProviderProcessKeyArgs {
   bridgeLaunch: AgentRuntimeBridgeLaunch;
+  skillRoots?: readonly AgentRuntimeSkillRoot[];
   providerId: string;
 }
 
@@ -133,6 +139,15 @@ interface RequestRecoveryArgs {
   providerId: string;
   providerThreadId: string;
   threadId: string;
+}
+
+export class CompetingTurnError extends Error {
+  constructor(threadId: string) {
+    super(
+      `Refusing to start a competing turn for thread "${threadId}" while another turn is active or starting`,
+    );
+    this.name = "CompetingTurnError";
+  }
 }
 
 export class AgentRuntimeRecoveryError extends Error {
@@ -185,6 +200,7 @@ const PREPARED_THREAD_REWIND_RETRY_MS = 30_000;
 
 interface ThreadRuntimeConfig {
   bridgeLaunch: AgentRuntimeBridgeLaunch;
+  skillRoots: readonly AgentRuntimeSkillRoot[];
   contributedEnv: readonly AgentRuntimeContributedEnvEntry[];
   dynamicTools?: DynamicTool[];
   disallowedTools?: readonly string[];
@@ -291,6 +307,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
   const suppressedThreadEventIds = new Set<string>();
   const threadGoalState = new RuntimeThreadGoalState();
   const turnState = new RuntimeTurnState();
+  const toolCalls = new RuntimeToolCalls();
   const backgroundWorkState = new RuntimeBackgroundWorkState();
   const threadEventGrammar = new ThreadEventGrammar();
   const bridgeNodeEnv = defaultBridgeNodeEnv();
@@ -315,6 +332,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       handleStdoutLine(args.line, args.providerProcess),
     onProcessExit: options.onProcessExit,
     onProviderThreadDetached: (threadId) => {
+      toolCalls.cancelThread(threadId);
       threadIdentityRegistry.clearThread(threadId);
       clearThreadRuntimeConfig(threadId);
       turnState.clearThread(threadId);
@@ -329,7 +347,19 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
   function resolveProviderProcessKey(
     args: ResolveProviderProcessKeyArgs,
   ): string {
-    return `${args.providerId}#bridge:${bridgeLaunchProcessKey(args.bridgeLaunch)}`;
+    const roots = args.skillRoots ?? skillRoots;
+    for (const root of roots) {
+      if (!path.isAbsolute(root.path)) {
+        throw new Error(
+          `Agent runtime skill root "${root.id}" must use an absolute path: ${root.path}`,
+        );
+      }
+    }
+    const catalogKey =
+      roots.length === 0
+        ? ""
+        : `#skills:${createHash("sha256").update(JSON.stringify(roots)).digest("hex")}`;
+    return `${args.providerId}#bridge:${bridgeLaunchProcessKey(args.bridgeLaunch)}${catalogKey}`;
   }
 
   function requireProviderProcessForThread(threadId: string): ProviderProcess {
@@ -760,9 +790,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       turnState.getActiveTurnId(threadId) !== null ||
       pendingTurnStarts.has(threadId)
     ) {
-      throw new Error(
-        `Refusing to start a competing turn for thread "${threadId}" while another turn is active or starting`,
-      );
+      throw new CompetingTurnError(threadId);
     }
   }
 
@@ -776,25 +804,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       threadId,
       providerThreadId,
     });
-  }
-
-  function resolveProviderIdentityTargetThreadId(args: {
-    eventThreadId: string;
-    proc: ProviderProcess;
-    sourceThreadId: string | undefined;
-  }): string | undefined {
-    if (
-      args.sourceThreadId !== undefined &&
-      args.proc.identity.threadIds.has(args.sourceThreadId)
-    ) {
-      return args.sourceThreadId;
-    }
-    if (args.proc.identity.threadIds.has(args.eventThreadId)) {
-      return args.eventThreadId;
-    }
-    return threadIdentityRegistry.resolvePendingProviderThreadIdentity(
-      args.proc.identity,
-    );
   }
 
   function forgetThreadRuntimeStateForProviderState(
@@ -1051,6 +1060,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     const resumeInstructions = args.instructions ?? currentConfig.instructions;
     await runtime.resumeThread({
       bridgeLaunch: currentConfig.bridgeLaunch,
+      skillRoots: currentConfig.skillRoots,
       environmentId: currentConfig.environmentId,
       threadId: args.threadId,
       ...(currentConfig.projectId !== undefined
@@ -1091,6 +1101,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       processKey,
       providerId,
       bridgeLaunch,
+      skillRoots: threadConfig?.skillRoots,
     });
     const proc = providerProcesses.requireProviderProcess({
       processKey,
@@ -1200,45 +1211,15 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
 
   function emitTranslatedEvents(args: EmitTranslatedEventsArgs): void {
     for (const event of args.events) {
-      if (event.type !== "thread/identity" || !event.providerThreadId) {
-        continue;
-      }
-      const targetThreadId = resolveProviderIdentityTargetThreadId({
+      const scope = {
         eventThreadId: event.threadId,
-        proc: args.proc,
+        providerState: args.proc.identity,
         sourceThreadId: args.sourceThreadId,
-      });
-      if (targetThreadId === undefined) {
-        options.onStderr?.(
-          `Dropping thread/identity for provider thread "${event.providerThreadId}" from "${args.proc.providerId}"; no bb thread could be resolved`,
-        );
-        continue;
-      }
-      const ownerThreadId =
-        threadIdentityRegistry.resolveBbThreadIdForProviderThread({
-          providerState: args.proc.identity,
-          providerThreadId: event.providerThreadId,
-        });
-      if (ownerThreadId !== undefined && ownerThreadId !== targetThreadId) {
-        options.onStderr?.(
-          `Ignoring thread/identity that would bind provider thread "${event.providerThreadId}" to bb thread "${targetThreadId}"; bb thread "${ownerThreadId}" already owns it on "${args.proc.providerId}"`,
-        );
-        continue;
-      }
-      recordProviderThreadIdentity(
-        args.proc,
-        targetThreadId,
-        event.providerThreadId,
-      );
-    }
-
-    for (const event of args.events) {
+      };
       const resolvedBbThreadId =
-        threadIdentityRegistry.resolveProviderEventThreadId({
-          eventThreadId: event.threadId,
-          providerState: args.proc.identity,
-          sourceThreadId: args.sourceThreadId,
-        });
+        event.type === "thread/identity"
+          ? threadIdentityRegistry.resolveProviderIdentityThreadId(scope)
+          : threadIdentityRegistry.resolveProviderEventThreadId(scope);
 
       if (!resolvedBbThreadId) {
         options.onStderr?.(
@@ -1250,6 +1231,13 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
 
       if (suppressedThreadEventIds.has(targetThreadId)) {
         continue;
+      }
+      if (event.type === "thread/identity" && event.providerThreadId) {
+        recordProviderThreadIdentity(
+          args.proc,
+          targetThreadId,
+          event.providerThreadId,
+        );
       }
       const stampedEvent = stampThreadEventScope({
         event,
@@ -1267,6 +1255,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       }
 
       const normalizedEvent = normalizeProviderThreadNameEvent(stampedEvent);
+      if (
+        normalizedEvent.type === "turn/completed" &&
+        normalizedEvent.scope.kind === "turn"
+      ) {
+        toolCalls.cancelThread(targetThreadId, normalizedEvent.scope.turnId);
+      }
       turnState.observe(normalizedEvent);
       backgroundWorkState.observe(normalizedEvent);
       observeProviderSessionIdleState(normalizedEvent);
@@ -1276,6 +1270,18 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
   }
 
   function handleProviderNotification(args: RuntimeParsedMessageArgs): void {
+    if (args.parsed.method === PROVIDER_TOOL_CALL_CANCELLED_METHOD) {
+      const cancellation = providerToolCallCancellationSchema.safeParse(
+        args.parsed.params,
+      );
+      if (cancellation.success) {
+        toolCalls.cancel(
+          args.proc.interactiveRequestScope,
+          cancellation.data.requestId,
+        );
+      }
+      return;
+    }
     const sourceThreadId = getJsonRpcStringParam(args.parsed, "threadId");
     if (
       sourceThreadId !== undefined &&
@@ -1334,6 +1340,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
           threadRuntimeConfigs.get(threadId)?.options,
         onInteractiveRequest: options.onInteractiveRequest,
         onToolCall: options.onToolCall,
+        toolCalls,
         parsedId: parsedLine.parsedId,
         parsedMethod: parsedLine.parsedMethod,
         providerProcess: proc,
@@ -1479,11 +1486,20 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
   }
 
   const runtime: AgentRuntime = {
-    async ensureProvider({ providerId, bridgeLaunch }) {
+    async ensureProvider({
+      providerId,
+      bridgeLaunch,
+      skillRoots: sessionSkillRoots = skillRoots,
+    }) {
       await providerProcesses.ensureProvider({
-        processKey: resolveProviderProcessKey({ bridgeLaunch, providerId }),
+        processKey: resolveProviderProcessKey({
+          bridgeLaunch,
+          providerId,
+          skillRoots: sessionSkillRoots,
+        }),
         providerId,
         bridgeLaunch,
+        skillRoots: sessionSkillRoots,
       });
     },
 
@@ -1493,10 +1509,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       projectId,
       providerId,
       bridgeLaunch,
+      skillRoots: sessionSkillRoots = skillRoots,
       contributedEnv = [],
       clientRequestId,
       input,
-      inputGroups,
       options: execOpts,
       instructions,
       dynamicTools,
@@ -1510,8 +1526,13 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
           const processKey = resolveProviderProcessKey({
             bridgeLaunch,
             providerId,
+            skillRoots: sessionSkillRoots,
           });
-          await runtime.ensureProvider({ providerId, bridgeLaunch });
+          await runtime.ensureProvider({
+            providerId,
+            bridgeLaunch,
+            skillRoots: sessionSkillRoots,
+          });
 
           const proc = providerProcesses.requireProviderProcess({
             processKey,
@@ -1531,11 +1552,11 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
           threadIdentityRegistry.registerThreadProvider({
             providerId,
             providerState: proc.identity,
-            expectsIdentityNotification: true,
             threadId,
           });
           setThreadRuntimeConfig(threadId, {
             bridgeLaunch,
+            skillRoots: sessionSkillRoots,
             contributedEnv,
             dynamicTools,
             disallowedTools,
@@ -1554,7 +1575,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             envVars: resolvedEnvironment.envVars,
             execOpts,
             instructions,
-            skillRoots,
           });
           const adapterCommand: AdapterCommand = fork
             ? {
@@ -1631,7 +1651,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             await runtime.runTurn({
               threadId,
               input,
-              ...(inputGroups !== undefined ? { inputGroups } : {}),
               clientRequestId,
               options: execOpts,
               contributedEnv,
@@ -1655,6 +1674,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       sourceProviderThreadId,
       retainThroughProviderCheckpoint,
       bridgeLaunch,
+      skillRoots: sessionSkillRoots = skillRoots,
       options: execOpts,
       instructions,
       dynamicTools,
@@ -1674,8 +1694,13 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
           const processKey = resolveProviderProcessKey({
             bridgeLaunch,
             providerId,
+            skillRoots: sessionSkillRoots,
           });
-          await runtime.ensureProvider({ providerId, bridgeLaunch });
+          await runtime.ensureProvider({
+            providerId,
+            bridgeLaunch,
+            skillRoots: sessionSkillRoots,
+          });
           const proc = providerProcesses.requireProviderProcess({
             processKey,
             providerId,
@@ -1696,7 +1721,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
           threadIdentityRegistry.registerThreadProvider({
             providerId,
             providerState: proc.identity,
-            expectsIdentityNotification: true,
             threadId: stagingThreadId,
           });
           let retainedForDiscard = false;
@@ -1718,7 +1742,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                 envVars: resolvedEnvironment.envVars,
                 execOpts,
                 instructions,
-                skillRoots,
               }),
               dynamicTools,
               disallowedTools,
@@ -1822,6 +1845,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       providerThreadId,
       providerId,
       bridgeLaunch,
+      skillRoots: sessionSkillRoots = skillRoots,
       contributedEnv = [],
       options: execOpts,
       instructions,
@@ -1835,8 +1859,13 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
           const processKey = resolveProviderProcessKey({
             bridgeLaunch,
             providerId,
+            skillRoots: sessionSkillRoots,
           });
-          await runtime.ensureProvider({ providerId, bridgeLaunch });
+          await runtime.ensureProvider({
+            providerId,
+            bridgeLaunch,
+            skillRoots: sessionSkillRoots,
+          });
 
           const proc = providerProcesses.requireProviderProcess({
             processKey,
@@ -1847,18 +1876,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             options: execOpts,
             providerId,
           });
-          if (providerThreadId !== undefined) {
-            const ownerThreadId =
-              threadIdentityRegistry.resolveBbThreadIdForProviderThread({
-                providerState: proc.identity,
-                providerThreadId,
-              });
-            if (ownerThreadId !== undefined && ownerThreadId !== threadId) {
-              throw new Error(
-                `Cannot resume thread "${threadId}" on "${providerId}": provider thread "${providerThreadId}" is already hosted by thread "${ownerThreadId}"`,
-              );
-            }
-          }
           const resolvedEnvironment = resolveRuntimeThreadEnvironment({
             contributedEnv,
             environmentId,
@@ -1868,11 +1885,11 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
           threadIdentityRegistry.registerThreadProvider({
             providerId,
             providerState: proc.identity,
-            expectsIdentityNotification: providerThreadId === undefined,
             threadId,
           });
           setThreadRuntimeConfig(threadId, {
             bridgeLaunch,
+            skillRoots: sessionSkillRoots,
             contributedEnv,
             dynamicTools,
             disallowedTools,
@@ -1901,7 +1918,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
               envVars: resolvedEnvironment.envVars,
               execOpts,
               instructions,
-              skillRoots,
             }),
             dynamicTools,
             disallowedTools,
@@ -1956,7 +1972,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     async runTurn({
       threadId,
       input,
-      inputGroups,
       clientRequestId,
       options: execOpts,
       contributedEnv,
@@ -2006,7 +2021,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             threadId,
             providerThreadId,
             input,
-            ...(inputGroups !== undefined ? { inputGroups } : {}),
             clientRequestId,
             options: toProviderExecutionContext({
               envVars: resolvedEnvironment.envVars,
@@ -2063,7 +2077,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       threadId,
       expectedTurnId,
       input,
-      inputGroups,
       clientRequestId,
       options: execOpts,
       contributedEnv,
@@ -2125,7 +2138,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             providerThreadId,
             expectedTurnId,
             input,
-            ...(inputGroups !== undefined ? { inputGroups } : {}),
             clientRequestId,
             options: toProviderExecutionContext({
               envVars: resolvedEnvironment.envVars,
@@ -2190,6 +2202,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     },
 
     async stopThread({ threadId }) {
+      toolCalls.cancelThread(threadId);
       return runThreadOperation({
         threadId,
         work: async () => {

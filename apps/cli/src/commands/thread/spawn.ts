@@ -4,12 +4,15 @@ import {
   PERSONAL_PROJECT_ID,
   threadVisibilitySchema,
   type GitBranchSelection,
+  type EnvironmentMachineSelection,
   type Thread,
   type JsonValue,
 } from "@bb/domain";
 import type { CreateThreadEnvironmentArgs } from "@bb/server-contract";
-import { action } from "../../action.js";
+import { action, CliUsageError } from "../../action.js";
 import { createCliBbSdk } from "../../client.js";
+import { missingProjectHint } from "../../context-hints.js";
+import { requireTextInput, TEXT_FILE_HELP_SUFFIX } from "../../text-input.js";
 import {
   resolveExplicitIdFlag,
   resolveContextThreadId,
@@ -20,6 +23,7 @@ import {
   resolveMachineTargetOption,
 } from "../machine.js";
 import {
+  collectOption,
   outputJson,
   parseReasoningLevel,
   prependErrorContext,
@@ -27,7 +31,7 @@ import {
 import {
   parsePermissionMode,
   buildPromptInputs,
-  collectOption,
+  uploadClientAttachmentInputs,
   PERMISSION_MODE_HELP,
   PLAN_HELP,
   parseServiceTier,
@@ -38,7 +42,8 @@ const PROVIDER_HELP =
   "Provider ID for the thread. Omit to use the project's remembered provider choice";
 
 interface ThreadSpawnCommandOptions {
-  prompt: string;
+  prompt?: string;
+  promptFile?: string;
   json?: boolean;
   project?: string;
   environment?: string;
@@ -51,12 +56,15 @@ interface ThreadSpawnCommandOptions {
   model?: string;
   reasoningLevel?: string;
   title?: string;
+  lifecycleOwnerThread?: string;
   serviceTier?: string;
   permissionMode?: string;
   plan?: boolean;
   parentSelf?: boolean;
   machine?: string;
   host?: string;
+  newMachine?: string;
+  machineInputs?: string;
   file?: string[];
   image?: string[];
   section?: string;
@@ -175,15 +183,16 @@ export function buildSpawnEnvironment(args: {
   };
 }
 
-function parseEnvironmentInputs(
+function parseJsonFlag(
   flagValue: string | undefined,
+  flagName: "--environment-inputs" | "--machine-inputs",
 ): JsonValue | null {
   if (flagValue === undefined) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(flagValue);
   } catch {
-    throw new Error("--environment-inputs must be valid JSON.");
+    throw new Error(`${flagName} must be valid JSON.`);
   }
   return jsonValueSchema.parse(parsed);
 }
@@ -196,6 +205,9 @@ async function buildProviderSpawnEnvironment(args: {
   newEnvironmentKind: string | undefined;
   baseBranch: string | undefined;
   machineHostId: string | null;
+  machine: EnvironmentMachineSelection | null;
+  machineInputs: JsonValue | null;
+  machineInputsProvided: boolean;
   projectId: string;
   resolveDefaultHostId: () => Promise<string | null>;
 }): Promise<CreateThreadEnvironmentArgs> {
@@ -220,7 +232,7 @@ async function buildProviderSpawnEnvironment(args: {
       `Unknown environment provider '${requested}'.${available ? ` Available: ${available}.` : ""}`,
     );
   }
-  let inputs = parseEnvironmentInputs(args.environmentInputs);
+  let inputs = parseJsonFlag(args.environmentInputs, "--environment-inputs");
   if (match.inputs !== null && inputs === null) {
     if (match.acceptsEmptyInputs) {
       inputs = {};
@@ -235,7 +247,48 @@ async function buildProviderSpawnEnvironment(args: {
       `The '${match.id}' environment provider takes no --environment-inputs.`,
     );
   }
-  const machine = {
+  if (match.machineProviderId) {
+    if (args.machine !== null || args.machineHostId !== null)
+      throw new Error(
+        "This environment provider chooses its own new machine; omit machine selectors.",
+      );
+    let machineInputs = args.machineInputs;
+    if (match.machineInputs !== undefined) {
+      if (match.machineInputs !== null && machineInputs === null) {
+        if (match.machineAcceptsEmptyInputs) machineInputs = {};
+        else {
+          throw new Error(
+            `The '${match.machineProviderId}' machine provider needs --machine-inputs <json>; \`bb environment providers --json\` shows its schema.`,
+          );
+        }
+      }
+      if (match.machineInputs === null && machineInputs !== null) {
+        throw new Error(
+          `The '${match.machineProviderId}' machine provider takes no --machine-inputs.`,
+        );
+      }
+    }
+    return {
+      type: "provider",
+      environmentProviderId: match.id,
+      ...(match.machineInputs === undefined || match.machineInputs === null
+        ? {}
+        : {
+            machine: {
+              type: "new" as const,
+              machineProviderId: match.machineProviderId,
+              inputs: machineInputs,
+            },
+          }),
+      inputs,
+    };
+  }
+  if (args.machineInputsProvided && args.machine === null) {
+    throw new Error(
+      "--machine-inputs requires --new-machine <provider-id> or a composed --environment-provider.",
+    );
+  }
+  const machine = args.machine ?? {
     type: "existing" as const,
     hostId: requireHostId(
       args.machineHostId ?? (await args.resolveDefaultHostId()),
@@ -255,10 +308,22 @@ export function registerSpawnCommand(
 ): void {
   parent
     .command("spawn")
+    .aliases(["create", "new"])
     .description(
       "Spawn a new thread; omitted execution flags use remembered project defaults, then the target provider catalog default",
     )
-    .requiredOption("--prompt <prompt>", "Initial prompt for the thread")
+    .option(
+      "--prompt <prompt>",
+      "Initial prompt for the thread (required unless --prompt-file is given)",
+    )
+    .option(
+      "--prompt-file <path>",
+      `Read the initial prompt from a file instead of --prompt; ${TEXT_FILE_HELP_SUFFIX}`,
+    )
+    .option(
+      "--lifecycle-owner-thread <id>",
+      "Archive/delete this thread with its lifecycle owner",
+    )
     .option("--json", "Print machine-readable JSON output")
     .requiredOption("--project <id>", "Project ID")
     .option(
@@ -278,6 +343,14 @@ export function registerSpawnCommand(
       "Execution machine ID or unambiguous name",
     )
     .option("--host <id-or-name>", "Alias for --machine")
+    .option(
+      "--new-machine <provider-id>",
+      "Create the thread on a new machine from this machine provider",
+    )
+    .option(
+      "--machine-inputs <json>",
+      "Persisted non-secret inputs for --new-machine or a composed --environment-provider; store credentials in plugin settings",
+    )
     .option("--parent-thread <id>", "Parent thread ID for worker thread links")
     .option("--parent-self", "Parent the new thread to BB_THREAD_ID")
     .option("--provider <id>", PROVIDER_HELP)
@@ -295,13 +368,13 @@ export function registerSpawnCommand(
     .option("--plan", PLAN_HELP)
     .option(
       "--file <path>",
-      "Pass a host-readable absolute or uploaded attachment file path (repeatable)",
+      "Upload an absolute path or file: URL from this CLI machine or pass an uploaded attachment path (repeatable)",
       collectOption,
       [],
     )
     .option(
       "--image <path>",
-      "Pass a host-readable absolute or uploaded attachment image path (repeatable)",
+      "Upload an absolute path or file: URL from this CLI machine or pass an uploaded attachment path (repeatable)",
       collectOption,
       [],
     )
@@ -327,20 +400,45 @@ export function registerSpawnCommand(
     )
     .action(
       action(async (opts: ThreadSpawnCommandOptions) => {
+        const prompt = await requireTextInput({
+          file: opts.promptFile,
+          fileLabel: "--prompt-file",
+          inline: opts.prompt,
+          inlineLabel: "--prompt <prompt>",
+        });
         const projectId = resolveExplicitIdFlag({
           flagName: "--project flag",
           value: opts.project,
         });
         if (!projectId) {
-          throw new Error("Missing required option --project <id>.");
+          throw new CliUsageError({
+            code: "missing_required",
+            hint: missingProjectHint(),
+            message: "Missing required option --project <id>.",
+          });
         }
         const environmentValue = resolveSpawnEnvironmentValue(opts.environment);
-        if (opts.environmentInputs !== undefined && !opts.environmentProvider) {
+        if (
+          opts.environmentInputs !== undefined &&
+          !opts.environmentProvider &&
+          !opts.newMachine
+        ) {
           throw new Error(
             "--environment-inputs requires --environment-provider <id>.",
           );
         }
         const machineTarget = resolveMachineTargetOption(opts);
+        if (machineTarget && opts.newMachine) {
+          throw new Error(
+            "Cannot combine --new-machine with --machine or --host.",
+          );
+        }
+        if (opts.machineInputs !== undefined && !opts.newMachine) {
+          if (!opts.environmentProvider)
+            throw new Error(
+              "--machine-inputs requires --new-machine <provider-id> or a composed --environment-provider.",
+            );
+        }
         if (
           machineTarget &&
           environmentValue &&
@@ -350,9 +448,58 @@ export function registerSpawnCommand(
             "Cannot combine --machine or --host with an existing environment ID; that environment already selects its machine.",
           );
         }
+        const machineProvider = opts.newMachine
+          ? (
+              await createCliBbSdk(getUrl()).hosts.experimental_listProviders()
+            ).find((provider) => provider.id === opts.newMachine?.trim())
+          : undefined;
+        if (opts.newMachine && machineProvider === undefined) {
+          throw new Error(
+            `Unknown machine provider '${opts.newMachine.trim()}'.`,
+          );
+        }
+        let machineInputs = parseJsonFlag(
+          opts.machineInputs,
+          "--machine-inputs",
+        );
+        if (
+          machineProvider &&
+          machineProvider.inputs !== null &&
+          machineInputs === null
+        ) {
+          if (machineProvider.acceptsEmptyInputs) machineInputs = {};
+          else {
+            throw new Error(
+              `The '${machineProvider?.id}' machine provider needs --machine-inputs <json>; \`bb machine providers --json\` shows its schema.`,
+            );
+          }
+        }
+        if (
+          machineProvider &&
+          machineProvider.inputs === null &&
+          machineInputs !== null
+        ) {
+          throw new Error(
+            `The '${machineProvider.id}' machine provider takes no --machine-inputs.`,
+          );
+        }
+        const newMachineSelection =
+          machineProvider === undefined
+            ? null
+            : {
+                type: "new" as const,
+                machineProviderId: machineProvider.id,
+                inputs: machineInputs,
+              };
         const selectedEnvironmentProvider = opts.environmentProvider;
+        if (machineProvider && selectedEnvironmentProvider === undefined) {
+          throw new Error(
+            `The '${machineProvider.id}' machine provider requires an environment provider; combine --new-machine with --environment-provider <id>.`,
+          );
+        }
         const needsHostId =
           !opts.environmentProvider &&
+          !opts.newMachine &&
           (Boolean(opts.newEnvironment) ||
             (environmentValue !== undefined &&
               looksLikePath(environmentValue)));
@@ -373,6 +520,9 @@ export function registerSpawnCommand(
               newEnvironmentKind: opts.newEnvironment,
               baseBranch: opts.baseBranch,
               machineHostId: hostId,
+              machine: newMachineSelection,
+              machineInputs,
+              machineInputsProvided: opts.machineInputs !== undefined,
               projectId,
               resolveDefaultHostId: resolveLocalHostId,
             })
@@ -414,17 +564,22 @@ export function registerSpawnCommand(
         let thread: Thread;
         try {
           const sdk = createCliBbSdk(getUrl());
+          const input = await uploadClientAttachmentInputs({
+            input: buildPromptInputs({
+              message: prompt,
+              plan: opts.plan,
+              files: opts.file,
+              images: opts.image,
+            }),
+            resolveProjectId: async () => projectId,
+            sdk,
+          });
           thread = await sdk.threads.spawn({
             origin: "cli",
             projectId,
             ...(providerId ? { providerId } : {}),
             ...(opts.model ? { model: opts.model } : {}),
-            input: buildPromptInputs({
-              message: opts.prompt,
-              plan: opts.plan,
-              files: opts.file,
-              images: opts.image,
-            }),
+            input,
             ...(reasoningLevel ? { reasoningLevel } : {}),
             ...(opts.title ? { title: opts.title } : {}),
             ...(serviceTier ? { serviceTier } : {}),
@@ -434,6 +589,9 @@ export function registerSpawnCommand(
             startedOnBehalfOf: null,
             originKind: opts.originKind ?? null,
             ...(parentThreadId ? { parentThreadId } : {}),
+            ...(opts.lifecycleOwnerThread !== undefined
+              ? { lifecycleOwnerThreadId: opts.lifecycleOwnerThread }
+              : {}),
             ...(opts.section ? { sectionId: opts.section } : {}),
             ...(opts.sourceThread ? { sourceThreadId: opts.sourceThread } : {}),
             ...(sourceSeqEnd !== undefined ? { sourceSeqEnd } : {}),

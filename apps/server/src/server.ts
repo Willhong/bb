@@ -1,11 +1,14 @@
 import { recheckEnvironmentProvisioning } from "./services/threads/thread-environment-providers.js";
+import { enrolledInstallerScript } from "./services/machines/manual-enrollment-command.js";
+import { getMachineEnrollmentService } from "./services/machines/machine-services.js";
+import { withManualMachineProvider } from "./services/machines/manual-provider.js";
 import { registerDesktopBrowserRoutes } from "./routes/desktop-browsers.js";
+import { INSTALL_MACHINE_SCRIPT_PATH } from "./install-machine-asset.js";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { extname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { terminalWebSocketQuerySchema } from "@bb/server-contract";
 import { compress } from "hono/compress";
@@ -38,6 +41,11 @@ import {
   setPluginEnvironmentProviderBridge,
 } from "./services/plugins/plugin-environment-provider-registry.js";
 import { recheckEnvironmentProviderCreations } from "./services/threads/thread-environment-providers.js";
+import {
+  setServerAccessBridge,
+  setServerAccessRecheckHandler,
+} from "./services/plugins/plugin-server-access-registry.js";
+import { setPluginMachineProviderBridge } from "./services/plugins/plugin-machine-provider-registry.js";
 import { invalidateEnvironmentProviderMachineAvailability } from "./services/environments/provider-machine-availability.js";
 import { requestQueuedMessageDispatch } from "./services/threads/queued-message-dispatch.js";
 import { registerInternalEventRoutes } from "./internal/events.js";
@@ -68,7 +76,7 @@ import {
   onDaemonSocketOpen,
   validateDaemonWebSocket,
 } from "./ws/daemon-protocol.js";
-import { roundDurationMs } from "./services/lib/duration.js";
+import { roundDurationMs } from "@bb/process-utils";
 import {
   onTerminalSocketClose,
   onTerminalSocketMessage,
@@ -83,7 +91,8 @@ import {
   createPluginCatalogService,
   type PluginCatalogService,
 } from "./services/plugin-catalog/plugin-catalog-service.js";
-import { callHostRetryableOnlineRpc } from "./services/hosts/online-rpc.js";
+import { callHostRetryableOnlineRpcForWork } from "./services/hosts/online-rpc.js";
+import { requestMatchesEntityTag } from "./services/hosts/daemon-file-response.js";
 import {
   allowedAppOrigins,
   browserRequestProblem,
@@ -96,6 +105,28 @@ import {
 const PLUGIN_WIRE_HTTP_PATH = /^\/api\/v1\/plugins\/[^/]+\/http(?:\/|$)/u;
 import { rankAcceptedAssetEncodings } from "./asset-content-encoding.js";
 import { apiJsonCompression } from "./api-response-compression.js";
+import type { ServerBindHost } from "@bb/config/server";
+import { registerServerMoveRoutes } from "./routes/server-move.js";
+import {
+  INTERNAL_SERVER_MOVE_PENDING_PATH,
+  registerInternalServerMoveRoutes,
+} from "./internal/server-move.js";
+import {
+  createServerMoveCoordinator,
+  type ServerMoveCoordinator,
+} from "./services/server-move/coordinator.js";
+import { createDefaultServerMoveEnvironment } from "./services/server-move/environment.js";
+import { readServerMoveHealth } from "./services/server-move/health.js";
+import type { RestoredServerMoveRun } from "./services/server-move/reconcile.js";
+import {
+  serverMoveFreezeMiddleware,
+  serverMoveWriteFreezeMiddleware,
+} from "./services/server-move/freeze.js";
+import { isServerMoveSnapshotFenced } from "./services/server-move/freeze-state.js";
+import {
+  createManualServerImportCompletion,
+  type PendingServerMove,
+} from "./services/server-move/pending-boot.js";
 
 type CloseWebSockets = () => Promise<void>;
 type NodeWebSocketServer = ReturnType<typeof createNodeWebSocket>["wss"];
@@ -107,6 +138,7 @@ interface ServerApp {
   injectWebSocket: ReturnType<typeof createNodeWebSocket>["injectWebSocket"];
   pluginService: PluginService;
   pluginCatalogService: PluginCatalogService;
+  serverMove: ServerMoveCoordinator;
 }
 
 interface CloseWebSocketServerArgs {
@@ -132,8 +164,17 @@ function normalizeInternalAuthPath(path: string): string {
   return path.replace(/\/+$/u, "");
 }
 
+export interface ServerMoveAppOptions {
+  bindHost: ServerBindHost | null;
+  manualImportPending: boolean;
+  pending: PendingServerMove | null;
+  restoredRun: RestoredServerMoveRun | null;
+  retireProcess(): void;
+}
+
 interface CreateAppOptions {
   bbAppArtifactService?: BbAppArtifactService;
+  serverMove?: ServerMoveAppOptions;
   slowApiRequestLogThresholdMs?: number;
   staticDir?: string;
 }
@@ -153,13 +194,10 @@ const WEB_SOCKET_SHUTDOWN_CODE = 1001;
 const WEB_SOCKET_SHUTDOWN_FORCE_CLOSE_MS = 1_000;
 const WEB_SOCKET_SHUTDOWN_REASON = "server-shutdown";
 const SLOW_API_REQUEST_LOG_THRESHOLD_MS = 1_000;
-const INSTALL_MACHINE_SCRIPT_PATH = fileURLToPath(
-  new URL("./assets/install-machine.sh", import.meta.url),
-);
 const THREAD_EVENT_WAIT_PATH_PATTERN =
   /^\/api\/v1\/threads\/[^/]+\/events\/wait$/u;
 const PLUGIN_APP_ASSET_PATH_PATTERN =
-  /^\/api\/v1\/plugins\/[^/]+\/assets\/app\.(?:js|css)$/u;
+  /^\/api\/v1\/(?:plugins\/[^/]+\/assets|plugin-app-assets\/[a-f0-9]{16})\/app\.(?:js|css)$/u;
 const PRECOMPRESSED_STATIC_FILES = [
   { encoding: "br", extension: ".br" },
   { encoding: "gzip", extension: ".gz" },
@@ -236,18 +274,6 @@ async function shellEtag(filePath: string): Promise<string | undefined> {
   }
 }
 
-export function ifNoneMatchSatisfied(
-  ifNoneMatchHeader: string,
-  etag: string,
-): boolean {
-  if (ifNoneMatchHeader.trim() === "*") return true;
-  const opaque = (tag: string): string => tag.trim().replace(/^W\//u, "");
-  const target = opaque(etag);
-  return ifNoneMatchHeader
-    .split(",")
-    .some((candidate) => opaque(candidate) === target);
-}
-
 const STATIC_MIME_TYPES: Record<string, string> = {
   ".html": "text/html",
   ".js": "application/javascript",
@@ -279,8 +305,7 @@ export function registerStaticAppRoutes(app: Hono, staticDir: string): void {
         : undefined;
     if (
       etag !== undefined &&
-      args.ifNoneMatchHeader !== undefined &&
-      ifNoneMatchSatisfied(args.ifNoneMatchHeader, etag)
+      requestMatchesEntityTag(args.ifNoneMatchHeader, etag)
     ) {
       const headers = new Headers();
       headers.set("cache-control", staticCacheControlForPath(args.urlPath));
@@ -431,6 +456,19 @@ export function createApp(
       dataDir: deps.config.dataDir,
       serverEntryUrl: import.meta.url,
     });
+  const serverMoveOptions: ServerMoveAppOptions = options?.serverMove ?? {
+    bindHost: null,
+    manualImportPending: false,
+    pending: null,
+    restoredRun: null,
+    retireProcess: () => {
+      deps.logger.warn(
+        {},
+        "Server move finished, but this server has no process retire hook",
+      );
+    },
+  };
+  const pendingServerMove = serverMoveOptions.pending;
 
   app.use("*", async (context, next) => {
     captureTrustedRemoteAddress(context);
@@ -447,6 +485,9 @@ export function createApp(
     "*",
     cors({
       origin: (origin, context) => {
+        if (context.req.path === "/health") {
+          return "*";
+        }
         const allowedCorsOrigins = allowedAppOrigins(deps);
         const requestOrigin = new URL(context.req.url).origin;
         if (origin === requestOrigin || allowedCorsOrigins.has(origin)) {
@@ -467,21 +508,49 @@ export function createApp(
     });
   });
   app.onError((error) => errorToResponse(error, deps.logger));
-  app.get("/health", (context) =>
-    context.json(
-      deps.config.launchId === undefined
-        ? { ok: true }
-        : { ok: true, launchId: deps.config.launchId },
-    ),
-  );
-  app.get("/install.sh", async (context) => {
-    const script = await readFile(INSTALL_MACHINE_SCRIPT_PATH);
-    return new Response(script, {
-      headers: {
-        "cache-control": "no-store",
-        "content-type": "text/x-shellscript; charset=utf-8",
-      },
+  app.get("/health", async (context) => {
+    const serverMove = await readServerMoveHealth({
+      dataDir: deps.config.dataDir,
+      pending: pendingServerMove,
     });
+    return context.json({
+      ok: true,
+      ...(deps.config.launchId === undefined
+        ? {}
+        : { launchId: deps.config.launchId }),
+      ...(serverMove === null ? {} : { serverMove }),
+    });
+  });
+  app.get("/install.sh", async (context) => {
+    const script = await readFile(INSTALL_MACHINE_SCRIPT_PATH, "utf8");
+    const credential = context.req.header("X-BB-Enrollment");
+    const bootstrap =
+      credential === undefined
+        ? null
+        : await getMachineEnrollmentService(deps).pendingBootstrapForCredential(
+            credential,
+          );
+    if (credential !== undefined && bootstrap === null) {
+      return new Response(
+        "Enrollment is expired or unavailable. Generate a new command in bb.\n",
+        {
+          status: 403,
+          headers: {
+            "cache-control": "no-store",
+            "content-type": "text/plain",
+          },
+        },
+      );
+    }
+    return new Response(
+      bootstrap === null ? script : enrolledInstallerScript(script, bootstrap),
+      {
+        headers: {
+          "cache-control": "no-store",
+          "content-type": "text/x-shellscript; charset=utf-8",
+        },
+      },
+    );
   });
   app.get("/install/version", async (context) => {
     return context.json({
@@ -546,6 +615,9 @@ export function createApp(
     if (normalizedPath === "/internal/ws") {
       return next();
     }
+    if (normalizedPath === INTERNAL_SERVER_MOVE_PENDING_PATH) {
+      return next();
+    }
     try {
       const daemon = await verifyAuthenticatedDaemon(
         deps,
@@ -558,6 +630,7 @@ export function createApp(
     return next();
   });
   const pluginService = createPluginService({
+    machineEnrollments: getMachineEnrollmentService(deps),
     db: deps.db,
     hub: deps.hub,
     logger: deps.logger,
@@ -572,7 +645,7 @@ export function createApp(
     aiServices: deps.aiServices,
     ensureSharedPortTunnel: (hostId) =>
       deps.sharedPorts.ensureTunnelIdentity(hostId, () =>
-        callHostRetryableOnlineRpc(deps, {
+        callHostRetryableOnlineRpcForWork(deps, {
           command: { type: "connect-tunnel.ensure-identity" },
           hostId,
           timeoutMs: 30_000,
@@ -616,6 +689,16 @@ export function createApp(
   setEnvironmentProvisioningRecheckHandler((threadId) =>
     recheckEnvironmentProvisioning(deps, threadId),
   );
+  setPluginMachineProviderBridge(
+    withManualMachineProvider(
+      pluginService.machineProviders,
+      getMachineEnrollmentService(deps),
+    ),
+  );
+  setServerAccessBridge(pluginService.serverAccessProviders);
+  setServerAccessRecheckHandler(() => {
+    deps.hub.notifySystem(["config-changed"]);
+  });
   setEnvironmentProviderRecheckHandler((pluginId) => {
     invalidateEnvironmentProviderMachineAvailability();
     deps.hub.notifySystem(["config-changed"]);
@@ -623,6 +706,38 @@ export function createApp(
   });
   // Bridge runtime-config assembly to plugin skills + context (§4.4).
   setPluginAgentContributions(pluginService);
+  const serverMove = createServerMoveCoordinator(
+    createDefaultServerMoveEnvironment({
+      bindHost: serverMoveOptions.bindHost,
+      deps,
+      env: process.env,
+      pluginService,
+      retireProcess: serverMoveOptions.retireProcess,
+      serverEntryUrl: import.meta.url,
+    }),
+  );
+  if (serverMoveOptions.restoredRun !== null) {
+    serverMove.restore(serverMoveOptions.restoredRun);
+  }
+  const serverMoveFreezeState = {
+    isFrozen: () => pendingServerMove !== null || serverMove.isFrozen(),
+  };
+  const daemonWriteFreezeState = {
+    isFrozen: () =>
+      pendingServerMove !== null || isServerMoveSnapshotFenced(deps.db),
+  };
+  app.use("/api/v1/*", serverMoveFreezeMiddleware(serverMoveFreezeState));
+  for (const path of ["/internal/hosts/enroll", "/internal/hosts/enroll-key"]) {
+    app.use(path, serverMoveWriteFreezeMiddleware(serverMoveFreezeState));
+  }
+  for (const path of [
+    "/internal/session/events",
+    "/internal/session/tool-call",
+    "/internal/session/interactive-request",
+    "/internal/session/interactive-request/interrupt",
+  ]) {
+    app.use(path, serverMoveWriteFreezeMiddleware(daemonWriteFreezeState));
+  }
   const publicApi = new Hono();
   publicApi.use("*", async (context, next) => {
     if (PLUGIN_WIRE_HTTP_PATH.test(context.req.path)) {
@@ -657,6 +772,7 @@ export function createApp(
   registerPluginCatalogRoutes(publicApi, pluginCatalogService);
   registerPluginRoutes(publicApi, deps, pluginService, upgradeWebSocket);
   registerSkillsRegistryRoutes(publicApi, deps);
+  registerServerMoveRoutes(publicApi, deps, serverMove);
   app.route("/api/v1", publicApi);
   app.use("/api/v1/*", () => {
     throw new ApiError(404, "not_found", "Not found");
@@ -664,7 +780,18 @@ export function createApp(
 
   const internalApi = new Hono();
   registerInternalHostRoutes(internalApi, deps);
-  registerInternalSessionRoutes(internalApi, deps, pluginService);
+  registerInternalSessionRoutes(internalApi, deps, pluginService, {
+    movedTo: () => serverMove.movedTo(),
+    pendingMoveId: () => pendingServerMove?.moveId ?? null,
+    sessionOpened: createManualServerImportCompletion({
+      deps,
+      pending: serverMoveOptions.manualImportPending,
+    }),
+  });
+  registerInternalServerMoveRoutes(internalApi, deps, {
+    pending: pendingServerMove,
+    serverMove,
+  });
   registerInternalSkillRoutes(internalApi, deps);
   registerInternalPluginHostArtifactRoutes(internalApi, deps);
   registerInternalEventRoutes(internalApi, deps);
@@ -672,18 +799,24 @@ export function createApp(
   registerInternalInteractiveRequestRoutes(internalApi, deps);
   app.route("/internal", internalApi);
 
+  const assertBrowserWebSocketAllowed = (
+    context: Parameters<typeof browserRequestProblem>[0],
+  ): void => {
+    const problem = browserRequestProblem(context, deps);
+    if (problem !== null) {
+      throw new ApiError(
+        problem.status,
+        "forbidden_origin",
+        problem.error,
+        false,
+      );
+    }
+  };
+
   app.get(
     "/ws",
     upgradeWebSocket((context) => {
-      const problem = browserRequestProblem(context, deps);
-      if (problem !== null) {
-        throw new ApiError(
-          problem.status,
-          "forbidden_origin",
-          problem.error,
-          false,
-        );
-      }
+      assertBrowserWebSocketAllowed(context);
       return {
         onOpen: (_event, socket) => onClientSocketOpen(deps.hub, socket),
         onMessage: (event, socket) =>
@@ -696,15 +829,7 @@ export function createApp(
   app.get(
     "/ws/terminals/:terminalId",
     upgradeWebSocket((context) => {
-      const problem = browserRequestProblem(context, deps);
-      if (problem !== null) {
-        throw new ApiError(
-          problem.status,
-          "forbidden_origin",
-          problem.error,
-          false,
-        );
-      }
+      assertBrowserWebSocketAllowed(context);
       const terminalId = context.req.param("terminalId");
       const query = terminalWebSocketQuerySchema.safeParse({
         sinceSeq: context.req.query("sinceSeq"),
@@ -722,14 +847,12 @@ export function createApp(
             socket,
             sinceSeq: query.data.sinceSeq,
             terminalId,
-            threadId: null,
           }),
         onMessage: (event, socket) =>
           onTerminalSocketMessage(deps, {
             raw: event.data,
             socket,
             terminalId,
-            threadId: null,
           }),
         onClose: (_event, socket) =>
           onTerminalSocketClose(deps, {
@@ -764,18 +887,17 @@ export function createApp(
               socket,
             },
             pluginService,
+            serverMove,
           ),
         onClose: () => onDaemonSocketClose(deps, websocketContext.sessionId),
       };
     }),
   );
 
-  if (!options?.staticDir) {
-    app.get("/", (context) => context.text("bb server"));
-  }
-
   if (options?.staticDir) {
     registerStaticAppRoutes(app, options.staticDir);
+  } else {
+    app.get("/", (context) => context.text("bb server"));
   }
 
   return {
@@ -789,5 +911,6 @@ export function createApp(
     injectWebSocket,
     pluginService,
     pluginCatalogService,
+    serverMove,
   };
 }

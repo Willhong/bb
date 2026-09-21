@@ -21,6 +21,7 @@ import { searchPickerOptions } from "./picker-search";
 import { useResetPickerScroll } from "./useResetPickerScroll";
 
 const PROJECT_SEARCH_MIN_OPTIONS = 5;
+const NO_HIGHLIGHT_VALUE = "__project-picker-idle__";
 const PROJECT_PICKER_ITEM_CLASS_NAME = "py-[0.3125rem] text-xs max-md:py-2";
 
 export interface ProjectSelectorOption {
@@ -63,6 +64,7 @@ export function ProjectSelector({
 }: ProjectSelectorProps) {
   const [open, setOpen] = useState(defaultOpen ?? false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [highlightedValue, setHighlightedValue] = useState(NO_HIGHLIGHT_VALUE);
   const commandRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listRef = useResetPickerScroll<HTMLDivElement>(searchQuery);
@@ -81,14 +83,21 @@ export function ProjectSelector({
   );
   const selected = value !== null ? projects.find((p) => p.id === value) : null;
   const fallback = !allowNoProject && !selected ? projects[0] : null;
+  const noProjectSelected = allowNoProject && value === null;
   const triggerLabel = isLoading
     ? "Loading projects…"
-    : (selected?.name ?? fallback?.name ?? "Work in a project");
+    : (selected?.name ??
+      fallback?.name ??
+      (noProjectSelected ? "No project" : "Work in a project"));
   const compactTriggerLabel = isLoading
     ? "Loading…"
     : (selected?.name ?? fallback?.name ?? "No project");
   const triggerIcon =
-    isLoading || selected || fallback ? "Folder" : "FolderPlus";
+    isLoading || selected || fallback
+      ? "Folder"
+      : noProjectSelected
+        ? "FolderMinus"
+        : "FolderPlus";
   const createProjectAction = createProject;
   const createProjectLabel = createProjectAction?.isCreating
     ? "Creating..."
@@ -97,6 +106,7 @@ export function ProjectSelector({
     projects.length > 0 && (Boolean(createProjectAction) || allowNoProject);
   const handleOpenChange = (nextOpen: boolean) => {
     setOpen(nextOpen);
+    setHighlightedValue(NO_HIGHLIGHT_VALUE);
     if (!nextOpen) {
       setSearchQuery("");
     }
@@ -165,6 +175,8 @@ export function ProjectSelector({
           ref={commandRef}
           label="Search projects"
           shouldFilter={false}
+          value={highlightedValue}
+          onValueChange={setHighlightedValue}
           className="min-h-0"
         >
           {showSearch ? (

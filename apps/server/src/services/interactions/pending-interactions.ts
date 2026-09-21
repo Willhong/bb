@@ -24,8 +24,11 @@ import {
   isPluginExtensionPendingInteraction,
   isPluginPendingInteraction,
   parseExtensionKind,
+  pluginInteractionDescriptionSchema,
   type JsonValue,
   type PendingInteraction,
+  type PluginInteractionDescription,
+  type ThreadEventItemPresentation,
   type PendingInteractionCreate,
   type PendingInteractionResolution,
   type ThreadChangeMetadata,
@@ -33,7 +36,12 @@ import {
 import type { HostDaemonCommand } from "@bb/host-daemon-contract";
 import type { CommandResultReportForType } from "../../internal/command-result-side-effects.js";
 import { ApiError } from "../../errors.js";
-import type { AppDeps, LoggedWorkSessionDeps } from "../../types.js";
+import type {
+  AppDeps,
+  LoggedWorkSessionDeps,
+  ServerLogger,
+} from "../../types.js";
+import type { PluginInteractionRequest } from "@get-bb/plugin-sdk";
 import { productionErrorLogFields } from "../lib/error-log-fields.js";
 import {
   threadEnvironmentUnavailableDetails,
@@ -56,6 +64,10 @@ import {
   validatePendingInteractionResolution,
 } from "./pending-interaction-validation.js";
 import { emitPluginInteractionPending } from "../plugins/plugin-thread-events.js";
+import {
+  SERVER_MOVE_FROZEN_RETRY_MS,
+  isServerMoveFrozen,
+} from "../server-move/freeze-state.js";
 
 type RegisterPendingInteractionResult =
   | {
@@ -106,12 +118,18 @@ export type PluginInteractionResult =
   | { outcome: "submitted"; value: JsonValue }
   | { outcome: "cancelled"; reason: PluginInteractionCancelReason };
 
+type DescribePluginSubmission = NonNullable<
+  PluginInteractionRequest["describeSubmission"]
+>;
+
 interface RequestPluginInteractionArgs {
   pluginId: string;
   threadId: string;
   rendererId: string;
   title: string;
   payload: JsonValue;
+  presentation: ThreadEventItemPresentation;
+  describeSubmission: DescribePluginSubmission | null;
   timeoutMs: number;
   signal?: AbortSignal;
 }
@@ -120,6 +138,46 @@ interface PluginInteractionWaiter {
   resolve: (result: PluginInteractionResult) => void;
   timer: ReturnType<typeof setTimeout>;
   removeAbortListener: () => void;
+  describeSubmission: DescribePluginSubmission | null;
+  submitting: boolean;
+}
+
+const DESCRIBE_SUBMISSION_TIMEOUT_MS = 2_000;
+
+async function runDescribeSubmission(args: {
+  describeSubmission: DescribePluginSubmission | null;
+  value: JsonValue;
+  interactionId: string;
+  logger: ServerLogger;
+}): Promise<PluginInteractionDescription | undefined> {
+  if (args.describeSubmission === null) return undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const described = await Promise.race([
+      Promise.resolve(args.describeSubmission(args.value)),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("describeSubmission timed out")),
+          DESCRIBE_SUBMISSION_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    const parsed = pluginInteractionDescriptionSchema.safeParse(described);
+    if (!parsed.success) {
+      throw new Error(
+        parsed.error.issues.map((issue) => issue.message).join("; "),
+      );
+    }
+    return parsed.data;
+  } catch (error) {
+    args.logger.warn(
+      { err: error, interactionId: args.interactionId },
+      "Plugin interaction describeSubmission failed; row keeps its completed label",
+    );
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 interface GetThreadInteractionArgs {
@@ -321,12 +379,6 @@ export class PendingInteractionLifecycle {
     this.interactionSettledListener = listener;
   }
 
-  listThreadInteractions(threadId: string): PendingInteraction[] {
-    return this.parseListRows(
-      listPendingInteractionsByThread(this.deps.db, { threadId }),
-    );
-  }
-
   listPendingThreadInteractions(threadId: string): PendingInteraction[] {
     return this.parseListRows(
       listPendingInteractionsByThread(this.deps.db, {
@@ -348,10 +400,15 @@ export class PendingInteractionLifecycle {
     return interaction;
   }
 
-  hasPendingThreadInteraction(threadId: string): boolean {
-    return (
-      getActivePendingInteractionForThread(this.deps.db, threadId) !== null
-    );
+  /**
+   * Whether a pending interaction holds this thread's turn. A provider's
+   * question or approval does: the provider is blocked on it, so nothing
+   * else can be sent until it settles. A plugin's card has no turn and never
+   * blocks a send; whatever answers it later steers or starts a turn.
+   */
+  hasTurnBoundPendingThreadInteraction(threadId: string): boolean {
+    const active = getActivePendingInteractionForThread(this.deps.db, threadId);
+    return active !== null && active.turnId !== null;
   }
 
   registerPendingInteraction(
@@ -491,6 +548,7 @@ export class PendingInteractionLifecycle {
           kind: "plugin",
           title: args.title,
           data: args.payload,
+          presentation: args.presentation,
         }),
       });
     });
@@ -505,18 +563,26 @@ export class PendingInteractionLifecycle {
         });
       };
       args.signal?.addEventListener("abort", abort, { once: true });
-      const timer = setTimeout(() => {
+      const expire = () => {
+        const waiter = this.pluginWaiters.get(interaction.id);
+        if (waiter !== undefined && isServerMoveFrozen(this.deps.db)) {
+          waiter.timer = setTimeout(expire, SERVER_MOVE_FROZEN_RETRY_MS);
+          return;
+        }
         this.cancelPluginInteractionFromCallback({
           interactionId: interaction.id,
           threadId: interaction.threadId,
           reason: "timeout",
         });
-      }, args.timeoutMs);
+      };
+      const timer = setTimeout(expire, args.timeoutMs);
       this.pluginWaiters.set(interaction.id, {
         resolve,
         timer,
         removeAbortListener: () =>
           args.signal?.removeEventListener("abort", abort),
+        describeSubmission: args.describeSubmission,
+        submitting: false,
       });
       if (args.signal?.aborted) {
         abort();
@@ -557,11 +623,11 @@ export class PendingInteractionLifecycle {
     return pending;
   }
 
-  respondToInteraction(args: {
+  async respondToInteraction(args: {
     interactionId: string;
     threadId: string;
     value: JsonValue;
-  }): PendingInteraction {
+  }): Promise<PendingInteraction> {
     const current = this.getThreadInteraction(args);
     if (isPluginExtensionPendingInteraction(current)) {
       return this.resolvePendingInteraction({
@@ -573,19 +639,48 @@ export class PendingInteractionLifecycle {
     return this.respondToPluginInteraction(args);
   }
 
-  respondToPluginInteraction(args: {
+  async respondToPluginInteraction(args: {
     interactionId: string;
     threadId: string;
     value: JsonValue;
-  }): PendingInteraction {
+  }): Promise<PendingInteraction> {
     const current = this.getThreadInteraction(args);
     if (!isPluginPendingInteraction(current)) {
       throw new ApiError(400, "invalid_request", "Plugin interaction expected");
     }
     if (current.status !== "pending") throw buildResolveConflictError(current);
+    const waiter = this.pluginWaiters.get(current.id);
+    if (waiter === undefined) {
+      const interrupted = this.cancelPluginInteraction({
+        interactionId: current.id,
+        threadId: current.threadId,
+        reason: "request-aborted",
+      });
+      throw buildResolveConflictError(interrupted);
+    }
+    if (waiter.submitting) {
+      throw new ApiError(
+        409,
+        "invalid_request",
+        "Pending interaction is already being submitted",
+      );
+    }
+    waiter.submitting = true;
+    const description = await runDescribeSubmission({
+      describeSubmission: waiter.describeSubmission,
+      value: args.value,
+      interactionId: current.id,
+      logger: this.deps.logger,
+    });
+    if (this.pluginWaiters.get(current.id) !== waiter) {
+      throw buildResolveConflictError(this.requireInteraction(current.id));
+    }
     const updated = setPendingInteractionResolved(this.deps.db, {
       id: current.id,
-      resolution: JSON.stringify({ kind: "plugin_submitted" }),
+      resolution: JSON.stringify({
+        kind: "plugin_submitted",
+        ...(description === undefined ? {} : { description }),
+      }),
     });
     if (!updated)
       throw buildResolveConflictError(this.requireInteraction(current.id));
@@ -688,22 +783,6 @@ export class PendingInteractionLifecycle {
     return interaction;
   }
 
-  completeResolvingInteraction(
-    args: CompleteResolvingInteractionArgs,
-  ): PendingInteraction | null {
-    const updated = setPendingInteractionResolved(this.deps.db, {
-      id: args.interactionId,
-      resolution: JSON.stringify(args.resolution),
-    });
-    if (!updated) {
-      return null;
-    }
-
-    const interaction = toPendingInteraction(updated);
-    this.settleInteractionTerminalState(interaction);
-    return interaction;
-  }
-
   completeResolvingInteractionInTransaction(
     deps: PendingInteractionTransactionDeps,
     args: CompleteResolvingInteractionArgs,
@@ -718,22 +797,6 @@ export class PendingInteractionLifecycle {
 
     const interaction = toPendingInteraction(updated);
     this.settleInteractionTerminalStateInTransaction(deps, interaction);
-    return interaction;
-  }
-
-  interruptPendingInteraction(
-    args: InterruptPendingInteractionArgs,
-  ): PendingInteraction | null {
-    const updated = setPendingInteractionInterrupted(this.deps.db, {
-      id: args.interactionId,
-      statusReason: args.reason,
-    });
-    if (!updated) {
-      return null;
-    }
-
-    const interaction = toPendingInteraction(updated);
-    this.settleInteractionTerminalState(interaction);
     return interaction;
   }
 
@@ -869,16 +932,12 @@ export class PendingInteractionLifecycle {
       resolution: args.resolution,
     });
     const resolutionJson = JSON.stringify(args.resolution);
-    const updated = this.deps.db.transaction((tx) => {
-      const resolving = setPendingInteractionResolving(tx, {
+    const updated = this.deps.db.transaction((tx) =>
+      setPendingInteractionResolving(tx, {
         id: args.interaction.id,
         resolution: resolutionJson,
-      });
-      if (resolving) {
-        return resolving;
-      }
-      return null;
-    });
+      }),
+    );
 
     if (updated) {
       startLiveHostCommand(

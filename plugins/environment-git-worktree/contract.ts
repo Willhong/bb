@@ -6,8 +6,47 @@ export const worktreeBaseBranchSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("named"), name: z.string().min(1) }).strict(),
   z.object({ kind: z.literal("default") }).strict(),
 ]);
+export type WorktreeBaseBranch = z.infer<typeof worktreeBaseBranchSchema>;
+
+export const discoveredWorktreeSchema = z
+  .object({
+    path: z.string().min(1),
+    branch: z.string().nullable(),
+    locked: z.boolean(),
+    prunable: z.boolean(),
+  })
+  .strict();
+export type DiscoveredWorktree = z.infer<typeof discoveredWorktreeSchema>;
 
 export const worktreeHostContract = defineRpcContract({
+  defaultBaseBranch: {
+    input: z.object({ sourcePath: z.string().min(1) }).strict(),
+    output: z.object({ branch: z.string().min(1).nullable() }).strict(),
+  },
+  listWorktrees: {
+    input: z.object({ sourcePath: z.string().min(1) }).strict(),
+    output: z.object({ worktrees: z.array(discoveredWorktreeSchema) }).strict(),
+  },
+  resolveExistingWorktree: {
+    input: z
+      .object({
+        sourcePath: z.string().min(1),
+        path: z.string().min(1),
+      })
+      .strict(),
+    output: z.discriminatedUnion("status", [
+      z
+        .object({
+          status: z.literal("resolved"),
+          path: z.string().min(1),
+          branch: z.string().nullable(),
+        })
+        .strict(),
+      z
+        .object({ status: z.literal("failed"), message: z.string().min(1) })
+        .strict(),
+    ]),
+  },
   create: {
     input: z
       .object({
@@ -17,7 +56,6 @@ export const worktreeHostContract = defineRpcContract({
         branchName: z.string().min(1),
         baseBranch: worktreeBaseBranchSchema,
         branchMode: z.enum(["reset", "reuse-existing"]),
-        timeoutMs: z.number().int().positive(),
       })
       .strict(),
     output: z.discriminatedUnion("status", [
@@ -39,7 +77,6 @@ export const worktreeHostContract = defineRpcContract({
         operationId: z.string().min(1),
         pathKey: z.string().min(1),
         path: z.string().min(1).nullable(),
-        timeoutMs: z.number().int().positive(),
       })
       .strict(),
     output: z.discriminatedUnion("status", [

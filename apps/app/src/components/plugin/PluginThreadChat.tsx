@@ -4,7 +4,6 @@ import type {
   ThreadChatMessageAction,
   ThreadChatProps,
 } from "@get-bb/plugin-sdk";
-import { PERSONAL_PROJECT_ID } from "@bb/domain";
 import {
   formatEnvironmentDisplay,
   type EnvironmentDisplayHostContext,
@@ -29,9 +28,10 @@ import { useHostDaemon } from "@/hooks/useHostDaemon";
 import { useHosts } from "@/hooks/queries/host-queries";
 import {
   findEnvironmentDisplayProvider,
-  getEnvironmentWorkspaceSummaryDisplay,
+  getEnvironmentSummaryChrome,
 } from "@/lib/environment-workspace-display";
 import { useSystemEnvironmentProviders } from "@/hooks/queries/environment-provider-queries";
+import { useSystemMachineProviders } from "@/hooks/queries/machine-provider-queries";
 import { formatWorkspaceCheckoutDisplay } from "@/lib/workspace-checkout-display";
 import { BbHttpError } from "@/lib/sdk";
 import {
@@ -114,12 +114,12 @@ function PluginThreadChatBody({
   const environmentQuery = useEnvironment(thread?.environmentId ?? null);
   const environment = environmentQuery.data ?? null;
   const hostsQuery = useHosts({ enabled: environment !== null });
-  const environmentHostName = environment
-    ? (hostsQuery.data?.find((host) => host.id === environment.hostId)?.name ??
-      null)
+  const environmentHost = environment
+    ? (hostsQuery.data?.find((host) => host.id === environment.hostId) ?? null)
     : null;
   const hasMultipleMachines = (hostsQuery.data?.length ?? 0) > 1;
   const { providers: environmentProviders } = useSystemEnvironmentProviders();
+  const { providers: machineProviders } = useSystemMachineProviders();
   const timelineNavigation = useThreadTimelineNavigation();
   const canUseHostFileNavigation =
     thread !== undefined &&
@@ -199,20 +199,22 @@ function PluginThreadChatBody({
       host,
       providerLookup,
     });
-    const summaryDisplay = getEnvironmentWorkspaceSummaryDisplay({
+    const chrome = getEnvironmentSummaryChrome({
       display,
       providerLookup,
       environmentName: environment.name,
       hasMultipleMachines,
-      hostName: environmentHostName,
-      isProjectless: thread?.projectId === PERSONAL_PROJECT_ID,
+      host: environmentHost,
+      machineProviders,
     });
     return (
       <ThreadEnvironmentSummary
-        environmentLabel={summaryDisplay?.label}
-        environmentCompactLabel={summaryDisplay?.compactLabel}
-        environmentIcon={summaryDisplay?.icon}
-        environmentTypeLabel={summaryDisplay?.typeLabel}
+        environmentLabel={chrome.environmentLabel}
+        environmentCompactLabel={chrome.environmentCompactLabel}
+        environmentHost={chrome.environmentHost}
+        environmentIcon={chrome.environmentIcon}
+        environmentMachineProvider={chrome.environmentMachineProvider}
+        environmentProviderName={chrome.environmentProviderName}
         environmentCheckout={
           environment.branchName
             ? formatWorkspaceCheckoutDisplay({
@@ -228,11 +230,11 @@ function PluginThreadChatBody({
     );
   }, [
     environment,
-    environmentHostName,
+    environmentHost,
     environmentProviders,
     hasMultipleMachines,
     isLocalDaemonHost,
-    thread?.projectId,
+    machineProviders,
   ]);
 
   const isThreadMissing =

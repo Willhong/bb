@@ -13,6 +13,7 @@ const mockUseThreadDetailBootstrap = vi.hoisted(() => vi.fn());
 const commandHandlers = vi.hoisted(() => new Map<string, () => boolean>());
 
 vi.mock("@/components/commands/AppCommandProvider", () => ({
+  useIndexedAppCommandHandlers: () => {},
   useAppCommandHandler: (command: string, handler: () => boolean) => {
     commandHandlers.set(command, handler);
   },
@@ -30,11 +31,14 @@ vi.mock("@/components/sidebar/AppSidebar", () => ({
 }));
 
 vi.mock("@/hooks/queries/system-queries", () => ({
+  useUiPreferences: () => ({ data: undefined, isError: false }),
   useSystemConfig: () => ({
     data: {
       experiments: {
         changelogPreview: false,
         mobileApp: false,
+        multiMachinePicker: false,
+        serverMove: false,
         sidebarProgressiveDisclosure: false,
         timelineWindowing: false,
       },
@@ -51,6 +55,10 @@ vi.mock("@/components/project/ProjectActionsProvider", () => ({
   ProjectActionsProvider: ({ children }: { children: ReactNode }) => (
     <>{children}</>
   ),
+}));
+
+vi.mock("@/hooks/mutations/thread-state-mutations", () => ({
+  useMoveThreadToSection: () => vi.fn(),
 }));
 
 vi.mock("@/components/thread/ThreadActionsProvider", () => ({
@@ -89,7 +97,6 @@ vi.mock("@/lib/bb-desktop", () => ({
   DEFAULT_DESKTOP_WINDOW_STATE: { isFullScreen: false },
   MACOS_CHROME_CONTROL_AXIS_CLASS: "",
   MACOS_CHROME_CONTROL_NO_DRAG_CLASS: "",
-  MACOS_CHROME_TRAFFIC_LIGHT_AXIS_NUDGE_CLASS: "",
   MACOS_TRAFFIC_LIGHT_RESERVE_OFFSET_CLASS: "",
   MACOS_WINDOW_DRAG_CLASS: "",
   MACOS_WINDOW_NO_DRAG_CLASS: "",

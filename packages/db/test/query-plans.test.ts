@@ -1,3 +1,4 @@
+import { advanceThreadPruning } from "../src/data/thread-pruning.js";
 import { findEnvironmentPathClaim } from "../src/data/environments.js";
 import { describe, expect, it } from "vitest";
 import { threadScope, turnScope } from "@bb/domain";
@@ -15,7 +16,10 @@ import {
 } from "../src/data/pending-interactions.js";
 import {
   appendDaemonEventsInTransaction,
-  hasParentedEventCrossingSequence,
+  getFirstParentedTimelineBoundarySequence,
+  hasTimelineGroupingContextRowsInRange,
+  listStoredEventRowsInSequenceRange,
+  getLastStoredProviderThreadId,
   insertEvents,
   listActiveBackgroundTaskCountsByThreadIds,
   listItemEventSpansByItems,
@@ -25,23 +29,25 @@ import {
   listStoredConversationOutlineEventRows,
   listStoredEventRows,
   listStoredEventRowsByParentToolCallIds,
+  listStoredTurnCompletedKeys,
   listTodoSnapshotEventRowsForThread,
-  pruneContextWindowUsageEventsBeforeSequence,
+  pruneContextWindowUsageEvents,
   pruneResolvedItemDeltas,
 } from "../src/data/events.js";
 import {
-  COMPLETED_EVENT_OUTPUT_TRUNCATION_THRESHOLD_CHARS,
   MAX_COMPLETED_EVENT_OUTPUT_MIGRATION_EVENT_DATA_BYTES,
   migrateNextCompletedEventItemOutput,
   migrateNextLegacyImageGenerationOutput,
   pruneClosedSessions,
   pruneDestroyedEnvironments,
 } from "../src/data/sweeps.js";
+import { COMPLETED_EVENT_OUTPUT_TRUNCATION_THRESHOLD_CHARS } from "../src/retained-event-output.js";
 import {
   deleteExpiredRetainedEventOutputs,
   hydrateRetainedEventOutputRows,
 } from "../src/data/retained-event-outputs.js";
 import { getDatabaseMaintenanceActivity } from "../src/data/maintenance.js";
+import { replaceStoredProviderModelCatalog } from "../src/data/provider-model-catalogs.js";
 import { openSession } from "../src/data/sessions.js";
 import {
   listDueScheduledQueuedThreadMessages,
@@ -134,7 +140,6 @@ function setup(): TestDb {
   migrate(db);
   const host = upsertHost(db, noopNotifier, {
     name: "query-plan-host",
-    type: "persistent",
   });
   const { project } = createProject(db, noopNotifier, {
     name: "query-plan-project",
@@ -237,6 +242,42 @@ function assertEmittedQueryPlanUsesIndex(
 }
 
 describe("slow query index plans", () => {
+  it("resolves a provider session with two indexed lookups regardless of history length", () => {
+    const { db, thread } = setup();
+    try {
+      insertEvents(
+        db,
+        noopNotifier,
+        Array.from({ length: 50 }, (_, index) => ({
+          threadId: thread.id,
+          sequence: index + 1,
+          scope: threadScope(),
+          providerThreadId: "provider-owner-plan",
+          type: "thread/identity" as const,
+          itemId: null,
+          itemKind: null,
+          parentToolCallId: null,
+          data: JSON.stringify({ providerThreadId: "provider-owner-plan" }),
+        })),
+      );
+      const captured = captureStatements(db, () => {
+        expect(getLastStoredProviderThreadId(db, thread.id)).toBe(
+          "provider-owner-plan",
+        );
+      });
+      expect(captured).toHaveLength(2);
+      const [identityQuery, ownerQuery] = captured;
+      expect(queryPlanDetails({ db, ...identityQuery! })).toContain(
+        "USING INDEX events_thread_type_sequence_idx",
+      );
+      expect(queryPlanDetails({ db, ...ownerQuery! })).toContain(
+        "USING INDEX events_provider_identity_idx",
+      );
+    } finally {
+      db.$client.close();
+    }
+  });
+
   it("seeks accepted inputs past each thread's latest interruption", () => {
     const { db, thread } = setup();
     try {
@@ -364,29 +405,107 @@ describe("slow query index plans", () => {
     db.$client.close();
   });
 
-  it("uses the thread/type/sequence index for filtered event pages", () => {
+  it.each([undefined, 20])(
+    "uses the thread/type/sequence index for filtered event pages after %s",
+    (afterSequence) => {
+      const { db, thread } = setup();
+
+      const captured = captureStatements(db, () => {
+        expect(
+          listStoredEventRows(db, {
+            afterSequence,
+            beforeSequence: 100,
+            limit: 25,
+            order: "desc",
+            threadId: thread.id,
+            types: ["provider/error", "turn/completed"],
+          }),
+        ).toEqual([]);
+      });
+      expect(captured).toHaveLength(2);
+      for (const query of captured) {
+        const details = queryPlanDetails({
+          db,
+          params: query.params,
+          sql: query.sql,
+        });
+        expect(details).toMatch(/USING INDEX events_thread_type_sequence_idx/u);
+        expect(details).not.toMatch(/events_thread_sequence_idx/u);
+      }
+
+      db.$client.close();
+    },
+  );
+
+  it("looks up completed turns by thread and turn key", () => {
     const { db, thread } = setup();
+    insertEvents(
+      db,
+      noopNotifier,
+      ["turn-plan-1", "turn-plan-2", "turn-plan-3"].flatMap((turnId, index) => [
+        {
+          threadId: thread.id,
+          sequence: index * 2 + 1,
+          type: "turn/started" as const,
+          scope: turnScope(turnId),
+          itemId: null,
+          itemKind: null,
+          parentToolCallId: null,
+          data: JSON.stringify({ providerThreadId: "provider-plan" }),
+        },
+        ...(turnId === "turn-plan-2"
+          ? []
+          : [
+              {
+                threadId: thread.id,
+                sequence: index * 2 + 2,
+                type: "turn/completed" as const,
+                scope: turnScope(turnId),
+                itemId: null,
+                itemKind: null,
+                parentToolCallId: null,
+                data: JSON.stringify({
+                  providerThreadId: "provider-plan",
+                  status: "completed",
+                }),
+              },
+            ]),
+      ]),
+    );
 
     const captured = captureStatements(db, () => {
       expect(
-        listStoredEventRows(db, {
-          beforeSequence: 100,
-          limit: 25,
-          order: "desc",
-          threadId: thread.id,
-          types: ["provider/error", "turn/completed"],
+        listStoredTurnCompletedKeys(db, {
+          keys: [
+            { threadId: thread.id, turnId: "turn-plan-1" },
+            { threadId: thread.id, turnId: "turn-plan-3" },
+          ],
         }),
-      ).toEqual([]);
+      ).toEqual([
+        { threadId: thread.id, turnId: "turn-plan-1" },
+        { threadId: thread.id, turnId: "turn-plan-3" },
+      ]);
     });
-    expect(captured).toHaveLength(2);
-    for (const query of captured) {
-      const details = queryPlanDetails({
-        db,
-        params: query.params,
-        sql: query.sql,
+
+    const fullChunkCaptured = captureStatements(db, () => {
+      listStoredTurnCompletedKeys(db, {
+        keys: Array.from({ length: 250 }, (_, index) => ({
+          threadId: thread.id,
+          turnId: `turn-plan-${index + 1}`,
+        })),
       });
-      expect(details).toMatch(/USING INDEX events_thread_type_sequence_idx/u);
-      expect(details).not.toMatch(/events_thread_sequence_idx/u);
+    });
+
+    expect(captured).toHaveLength(1);
+    expect(fullChunkCaptured).toHaveLength(1);
+    for (const query of [captured[0]!, fullChunkCaptured[0]!]) {
+      const details = queryPlanDetails({ db, ...query });
+      expect(details).toContain("MULTI-INDEX OR");
+      expect(details).toContain(
+        "events_thread_turn_type_item_sequence_idx (thread_id=? AND turn_id=? AND type=?)",
+      );
+      expect(details).not.toContain("turn_id>?");
+      expect(details).not.toMatch(/SCAN events/u);
     }
 
     db.$client.close();
@@ -468,22 +587,21 @@ describe("slow query index plans", () => {
     db.$client.close();
   });
 
-  it("resolves parent crossings through the covering delegating-item index", () => {
+  it("resolves root turn starts for the parented boundary through the turn index", () => {
     const { db, thread } = setup();
 
     const captured = captureStatements(db, () => {
       expect(
-        hasParentedEventCrossingSequence(db, {
-          sequence: 2,
+        getFirstParentedTimelineBoundarySequence(db, {
+          maxSeq: 10,
+          sequenceStart: 0,
           threadId: thread.id,
         }),
-      ).toBe(false);
+      ).toBeNull();
     });
-    const query = captured.find((entry) =>
-      entry.sql.includes("parent_event.item_id"),
-    );
+    const query = captured.find((entry) => entry.sql.includes("root_start"));
     if (!query) {
-      throw new Error("Expected the parent-crossing lookup SQL");
+      throw new Error("Expected the parented timeline boundary SQL");
     }
     const details = queryPlanDetails({
       db,
@@ -491,8 +609,46 @@ describe("slow query index plans", () => {
       sql: query.sql,
     });
     expect(details).toMatch(
-      /SEARCH parent_event .*USING COVERING INDEX events_delegating_item_lookup_idx/u,
+      /SEARCH root_start (?:EXISTS )?USING (?:COVERING )?INDEX events_thread_turn_type_item_sequence_idx \(thread_id=\? AND turn_id=\? AND type=\?\)/u,
     );
+    expect(details).toMatch(
+      /SEARCH events USING (?:COVERING )?INDEX events_delegating_item_lookup_idx/u,
+    );
+
+    db.$client.close();
+  });
+
+  it.each([
+    {
+      name: "probes appended grouping-context rows",
+      run: (db: DbConnection, threadId: string) =>
+        hasTimelineGroupingContextRowsInRange(db, {
+          afterSequence: 10,
+          threadId,
+          throughSequence: 30,
+        }),
+    },
+    {
+      name: "lists rows in a sequence range",
+      run: (db: DbConnection, threadId: string) =>
+        listStoredEventRowsInSequenceRange(db, {
+          afterSequence: 10,
+          limit: 513,
+          maxInlineOutputChars: 32_000,
+          threadId,
+          throughSequence: 30,
+        }),
+    },
+  ])("$name through the thread sequence index", ({ run }) => {
+    const { db, thread } = setup();
+
+    const [query] = captureStatements(db, () => run(db, thread.id));
+    if (!query) {
+      throw new Error("Expected the sequence-range SQL");
+    }
+    expect(queryPlanDetails({ db, ...query }).split("\n")).toEqual([
+      "SEARCH events USING INDEX events_thread_sequence_idx (thread_id=? AND sequence>? AND sequence<?)",
+    ]);
 
     db.$client.close();
   });
@@ -678,7 +834,6 @@ describe("slow query index plans", () => {
       hostId: host.id,
       instanceId: "closed-prune-query-plan",
       hostName: "query-plan-host",
-      hostType: "persistent",
       dataDir: "/tmp/query-plan-host-data",
       protocolVersion: 1,
       heartbeatIntervalMs: 10_000,
@@ -814,7 +969,6 @@ describe("slow query index plans", () => {
 
   it("uses the thread/type/sequence index for emitted context-window prune SQL", () => {
     const { db, logger, thread } = setup();
-    const sequenceCutoff = 3;
     insertEvents(db, noopNotifier, [
       {
         data: JSON.stringify({
@@ -867,8 +1021,7 @@ describe("slow query index plans", () => {
     }
     logger.clear();
 
-    pruneContextWindowUsageEventsBeforeSequence(db, {
-      sequenceCutoff,
+    pruneContextWindowUsageEvents(db, {
       threadId: thread.id,
     });
 
@@ -876,8 +1029,7 @@ describe("slow query index plans", () => {
       logger,
       predicate: (fields) =>
         fields.operation === "run" &&
-        fields.sql.includes("DELETE FROM events") &&
-        fields.sql.includes("root_usage"),
+        fields.sql.startsWith("DELETE FROM events"),
     });
     assertEmittedQueryPlanUsesIndex({
       db,
@@ -886,10 +1038,12 @@ describe("slow query index plans", () => {
       params: [
         thread.id,
         "thread/contextWindowUsage/updated",
+        500,
         thread.id,
         "thread/contextWindowUsage/updated",
-        sequenceCutoff,
-        "$.contextWindowUsage.modelContextWindow",
+        thread.id,
+        2,
+        1,
       ],
     });
 
@@ -1285,7 +1439,26 @@ describe("slow query index plans", () => {
     db.$client.close();
   });
 
-  it("uses materialized parent ids and the consolidated index for delta pruning", () => {
+  it("pins maintenance discovery to the typed sequence index", () => {
+    const { db } = setup();
+    const statements = captureStatements(db, () => {
+      advanceThreadPruning(db, "turn-diffs");
+    });
+    const discovery = statements.find((statement) =>
+      statement.sql.includes(
+        "FROM events INDEXED BY events_thread_type_sequence_idx",
+      ),
+    );
+    expect(discovery).toBeDefined();
+    if (!discovery) throw new Error("Missing maintenance discovery query");
+    expect(queryPlanDetails({ db, ...discovery })).toContain(
+      "USING INDEX events_thread_type_sequence_idx",
+    );
+    expect(discovery.sql).toContain("LIMIT ?");
+    db.$client.close();
+  });
+
+  it("bounds delta support probes with the consolidated scope index", () => {
     const { db, logger, thread } = setup();
     const turnId = "turn_resolved_delta_query_plan";
     const itemId = "call_resolved_delta_query_plan";
@@ -1330,14 +1503,39 @@ describe("slow query index plans", () => {
     ]);
     logger.clear();
 
-    expect(pruneResolvedItemDeltas(db, { threadId: thread.id })).toBe(1);
+    const statements = captureStatements(db, () => {
+      expect(pruneResolvedItemDeltas(db, { threadId: thread.id })).toBe(1);
+    });
+    const discovery = statements.find((statement) =>
+      statement.sql.includes("WITH candidate_ids AS MATERIALIZED"),
+    );
+    if (!discovery) throw new Error("Missing typed delta candidate discovery");
+    const discoveryPlan = queryPlanDetails({ db, ...discovery });
+    expect(
+      discoveryPlan.match(/USING INDEX events_thread_type_sequence_idx/gu),
+    ).toHaveLength(4);
+    expect(discoveryPlan).toContain("USING INDEX sqlite_autoindex_events_1");
+    expect(discoveryPlan).not.toContain("events_thread_sequence_idx");
+    const supportQueries = statements.filter((statement) =>
+      statement.sql.includes(
+        "FROM events INDEXED BY events_thread_turn_type_item_sequence_idx",
+      ),
+    );
+    expect(supportQueries.length).toBeGreaterThan(0);
+    for (const statement of supportQueries) {
+      expect(queryPlanDetails({ db, ...statement })).toContain(
+        "USING INDEX events_thread_turn_type_item_sequence_idx",
+      );
+      expect(statement.sql).toContain("LIMIT ?");
+    }
     const pruneQuery = findOnlyDebugLog({
       logger,
       predicate: (fields) =>
         fields.operation === "run" &&
         fields.sql.startsWith("DELETE FROM events"),
     });
-    expect(pruneQuery.fields.sql).toContain("parent_tool_call_id IS");
+    expect(pruneQuery.fields.sql).toContain("WHERE id IN");
+    expect(pruneQuery.fields.bindingArgumentCount).toBeLessThanOrEqual(500);
     expect(pruneQuery.fields.sql).not.toContain("json_extract");
 
     const completedLookupPlan = queryPlanDetails({
@@ -1484,6 +1682,48 @@ describe("slow query index plans", () => {
     expect(queryPlanDetails({ db, ...statement! })).toContain(
       "events_thread_turn_type_item_sequence_idx",
     );
+
+    db.$client.close();
+  });
+
+  it("prunes stored provider model catalogs through the primary-key prefix", () => {
+    const { db, host, logger } = setup();
+    const pruneWorkspaceRowsFetchedBefore = 10_000;
+    const isCatalogDelete = (fields: SlowDbQueryLogFields): boolean =>
+      fields.operation === "run" &&
+      fields.sql.startsWith('delete from "provider_model_catalogs"');
+    logger.clear();
+
+    replaceStoredProviderModelCatalog(db, {
+      row: {
+        hostId: host.id,
+        providerId: "acp-pi-acp",
+        scopeKey: "/w/current",
+        fingerprint: "catalog-prune-plan",
+        modelsJson: "[]",
+        selectedOnlyModelsJson: "[]",
+        fetchedAt: 20_000,
+      },
+      pruneWorkspaceRowsFetchedBefore,
+    });
+
+    const prune = findOnlyDebugLog({ logger, predicate: isCatalogDelete });
+    const pruneParams = [
+      host.id,
+      "acp-pi-acp",
+      "",
+      pruneWorkspaceRowsFetchedBefore,
+    ];
+    expect(prune.fields.bindingArgumentCount).toBe(pruneParams.length);
+    const pruneDetails = queryPlanDetails({
+      db,
+      params: pruneParams,
+      sql: prune.fields.sql,
+    });
+    expect(pruneDetails).toMatch(
+      /USING (COVERING )?INDEX sqlite_autoindex_provider_model_catalogs_1 \(host_id=\? AND provider_id=\?\)/u,
+    );
+    expect(pruneDetails).not.toMatch(/SCAN provider_model_catalogs/u);
 
     db.$client.close();
   });

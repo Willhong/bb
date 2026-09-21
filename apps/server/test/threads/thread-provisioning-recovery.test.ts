@@ -1,15 +1,27 @@
+import { intendedThreadHostId } from "../../src/services/threads/dispatch-attempt.js";
 import { dispatchTurnDuringReprovision } from "../../src/services/threads/thread-turn-dispatch.js";
 import { requestThreadStopForCurrentState } from "../../src/services/threads/thread-lifecycle.js";
 import { runEnvironmentProvisioningSweep } from "../../src/services/system/periodic-sweeps.js";
 import { eq } from "drizzle-orm";
-import { environments, getEnvironment, getThread, listEvents } from "@bb/db";
+import {
+  environments,
+  getEnvironment,
+  getLatestSessionForHost,
+  getThread,
+  listEvents,
+  setThreadStartupContext,
+  markThreadDeleted,
+} from "@bb/db";
 import {
   encodeClientTurnRequestIdNumber,
   threadScope,
   type ResolvedThreadExecutionOptions,
 } from "@bb/domain";
-import { describe, expect, it } from "vitest";
-import { runThreadLifecycleSweep } from "../../src/services/system/periodic-sweeps.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  runThreadLifecycleSweep,
+  runPeriodicSweeps,
+} from "../../src/services/system/periodic-sweeps.js";
 import {
   appendThreadProvisioningEvent,
   buildCwdBranchEntries,
@@ -26,7 +38,9 @@ import {
   requestThreadProvision,
 } from "../../src/services/threads/thread-provisioning.js";
 import {
+  internalAuthHeaders,
   listQueuedThreadCommands,
+  registerTestHostRpcCapture,
   reportNextEnvironmentAttachSuccess,
   reportQueuedCommandError,
   reportQueuedCommandSuccess,
@@ -44,7 +58,12 @@ import {
   seedThread,
 } from "../helpers/seed.js";
 import { installFakeEnvironmentProvider } from "../helpers/environment-provider.js";
+import { advanceUntilTrue } from "../helpers/fake-timers.js";
 import { withTestHarness } from "../helpers/test-app.js";
+import { handleDaemonSocketClosed } from "../../src/internal/session-owner-side-effects.js";
+import { DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS } from "../../src/constants.js";
+import { onDaemonSocketOpen } from "../../src/ws/daemon-protocol.js";
+import { HOST_DAEMON_PROTOCOL_VERSION } from "@bb/host-daemon-contract";
 
 const THREAD_START_EXECUTION = {
   model: "gpt-5",
@@ -102,7 +121,7 @@ describe("thread provisioning recovery", () => {
     });
   });
 
-  it("does not record a restart error while same-process workspace-ready provisioning is still live", async () => {
+  it("does not fail a live start when provisioning advances again after dispatch", async () => {
     await withTestHarness(async (harness) => {
       const { host } = seedHostSession(harness.deps, {
         id: "host-live-thread-start-recovery",
@@ -174,7 +193,7 @@ describe("thread provisioning recovery", () => {
         expect(
           listQueuedThreadCommands(harness, "thread.start", thread.id),
         ).toHaveLength(1);
-        expect(getThread(harness.db, thread.id)?.status).not.toBe("error");
+        expect(getThread(harness.db, thread.id)?.status).toBe("starting");
         expect(
           listEvents(harness.db, { threadId: thread.id }).map(
             (event) => event.type,
@@ -837,3 +856,280 @@ it("waits for the host to reconnect before recovering workspace setup", async ()
     expect(getEnvironment(harness.db, environment.id)?.status).toBe("ready");
   });
 });
+
+it("resumes workspace setup when the same daemon reconnects", async () => {
+  await withTestHarness(async (harness) => {
+    const { host, session } = seedHostSession(harness.deps, {
+      id: "host-provision-reconnect",
+    });
+    const { project } = seedProjectWithSource(harness.deps, {
+      hostId: host.id,
+    });
+    const environment = seedEnvironment(harness.deps, {
+      hostId: host.id,
+      projectId: project.id,
+      path: "/tmp/provision-reconnect",
+      status: "provisioning",
+    });
+    const thread = seedThread(harness.deps, {
+      projectId: project.id,
+      environmentId: environment.id,
+      status: "starting",
+    });
+    requestThreadProvision(harness.deps, {
+      thread,
+      environmentIntent: { type: "reuse", environmentId: environment.id },
+      execution: THREAD_START_EXECUTION,
+      fork: null,
+      input: textInput("resume after reconnect"),
+      startedOnBehalfOf: null,
+      titleProvided: true,
+    });
+    await advanceThreadProvisioning(harness.deps, { threadId: thread.id });
+    handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+
+    const response = await harness.app.request("/internal/session/open", {
+      method: "POST",
+      headers: internalAuthHeaders(harness, { hostId: host.id }),
+      body: JSON.stringify({
+        hostId: host.id,
+        instanceId: session.instanceId,
+        hostName: host.name,
+        hasMachineCredential: false,
+        platform: "darwin",
+        dataDir: "/tmp/provision-reconnect-host-data",
+        localApiPort: null,
+        protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+        activeThreads: [],
+      }),
+    });
+    expect(response.status).toBe(201);
+    const reconnectedSession = getLatestSessionForHost(harness.db, {
+      hostId: host.id,
+    });
+    expect(reconnectedSession).not.toBeNull();
+    const socket = registerTestHostRpcCapture(harness, {
+      hostId: host.id,
+      sessionId: reconnectedSession!.id,
+    });
+    onDaemonSocketOpen(harness.deps, {
+      hostId: host.id,
+      sessionId: reconnectedSession!.id,
+      socket,
+    });
+
+    const attach = await waitForQueuedCommand(
+      harness,
+      ({ command }) =>
+        command.type === "environment.attach" &&
+        command.environmentId === environment.id,
+    );
+    expect(attach.command).toMatchObject({ environmentId: environment.id });
+    expect(getEnvironment(harness.db, environment.id)?.status).toBe(
+      "provisioning",
+    );
+    await reportQueuedCommandError(harness, attach, {
+      errorCode: "test_cleanup",
+      errorMessage: "test cleanup",
+    });
+  });
+});
+
+it("fails workspace setup only after the active-work disconnect grace", async () => {
+  await withTestHarness(async (harness) => {
+    const { host, session } = seedHostSession(harness.deps, {
+      id: "host-provision-disconnect-grace",
+    });
+    const { project } = seedProjectWithSource(harness.deps, {
+      hostId: host.id,
+    });
+    const environment = seedEnvironment(harness.deps, {
+      hostId: host.id,
+      projectId: project.id,
+      path: "/tmp/provision-disconnect-grace",
+      status: "provisioning",
+    });
+    const thread = seedThread(harness.deps, {
+      projectId: project.id,
+      environmentId: environment.id,
+      status: "starting",
+    });
+    requestThreadProvision(harness.deps, {
+      thread,
+      environmentIntent: { type: "reuse", environmentId: environment.id },
+      execution: THREAD_START_EXECUTION,
+      fork: null,
+      input: textInput("survive a brief disconnect"),
+      startedOnBehalfOf: null,
+      titleProvided: true,
+    });
+    await advanceThreadProvisioning(harness.deps, { threadId: thread.id });
+
+    vi.useFakeTimers();
+    try {
+      handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+      await vi.advanceTimersByTimeAsync(
+        DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS - 1,
+      );
+      expect(getEnvironment(harness.db, environment.id)?.status).toBe(
+        "provisioning",
+      );
+      expect(getThread(harness.db, thread.id)?.status).toBe("starting");
+
+      await advanceUntilTrue(
+        () => getEnvironment(harness.db, environment.id)?.status === "error",
+        1,
+      );
+      expect(getThread(harness.db, thread.id)?.status).toBe("error");
+      expect(
+        listEvents(harness.db, { threadId: thread.id })
+          .map((row) => row.type)
+          .slice(-2),
+      ).toEqual(["system/thread-provisioning", "system/error"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+it.each(["pending", "starting"] as const)(
+  "starts a follow-up after stopping %s setup before an environment attaches",
+  async (status) => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/stopped-before-attachment",
+        status: "ready",
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        status,
+      });
+      const startup = {
+        environmentIntent: {
+          type: "reuse" as const,
+          environmentId: environment.id,
+        },
+        fork: null,
+        startedOnBehalfOf: null,
+        titleProvided: true,
+      };
+      if (status === "pending") {
+        setThreadStartupContext(harness.db, {
+          threadId: thread.id,
+          startupContext: JSON.stringify({ kind: "pending", ...startup }),
+        });
+      } else {
+        requestThreadProvision(harness.deps, {
+          ...startup,
+          thread,
+          execution: THREAD_START_EXECUTION,
+          input: textInput("cancelled initial prompt"),
+        });
+      }
+      const stopped = await harness.app.request(
+        `/api/v1/threads/${thread.id}/stop`,
+        { method: "POST" },
+      );
+      expect(stopped.status).toBe(200);
+      expect(getThread(harness.db, thread.id)).toMatchObject({
+        status: status === "pending" ? "pending" : "idle",
+        environmentId: null,
+      });
+      expect(intendedThreadHostId(harness.deps, thread.id)).toBe(host.id);
+      const response = await harness.app.request(
+        `/api/v1/threads/${thread.id}/send`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            input: textInput("new follow-up after stop"),
+            mode: "auto",
+            model: THREAD_START_EXECUTION.model,
+          }),
+        },
+      );
+      expect(response.status, await response.text()).toBe(200);
+      const start = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "thread.start" && command.threadId === thread.id,
+      );
+      expect(start.command).toMatchObject({
+        input: textInput("new follow-up after stop"),
+        threadId: thread.id,
+      });
+      expect(getThread(harness.db, thread.id)?.environmentId).toBe(
+        environment.id,
+      );
+      expect(
+        listQueuedThreadCommands(harness, "thread.start", thread.id),
+      ).toHaveLength(1);
+      await reportQueuedCommandError(harness, start, {
+        errorCode: "test_cleanup",
+        errorMessage: "Settle pending test start",
+      });
+    });
+  },
+);
+
+it.each(["startup", "periodic"] as const)(
+  "finishes deleting an unattached thread after asynchronous cleanup during %s recovery",
+  async (sweep) => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        status: "starting",
+      });
+      const other = seedThread(harness.deps, {
+        projectId: project.id,
+        status: "idle",
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        status: "error",
+      });
+      harness.db
+        .update(environments)
+        .set({ ownerThreadId: thread.id, teardownStatus: "running" })
+        .where(eq(environments.id, environment.id))
+        .run();
+      markThreadDeleted(harness.db, harness.hub, { threadId: thread.id });
+      await (sweep === "startup"
+        ? runThreadLifecycleSweep(harness.deps)
+        : runPeriodicSweeps({
+            ...harness.deps,
+            pluginSchedules: harness.pluginService,
+            plugins: harness.pluginService,
+          }));
+      expect(getThread(harness.db, thread.id)).toMatchObject({
+        id: thread.id,
+        deletedAt: expect.any(Number),
+      });
+      harness.db
+        .update(environments)
+        .set({ status: "destroyed", teardownStatus: "removed" })
+        .where(eq(environments.id, environment.id))
+        .run();
+      await (sweep === "startup"
+        ? runThreadLifecycleSweep(harness.deps)
+        : runPeriodicSweeps({
+            ...harness.deps,
+            pluginSchedules: harness.pluginService,
+            plugins: harness.pluginService,
+          }));
+      expect(getThread(harness.db, thread.id)).toBeNull();
+      expect(getThread(harness.db, other.id)?.deletedAt).toBeNull();
+    });
+  },
+);

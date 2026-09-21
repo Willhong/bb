@@ -18,6 +18,12 @@ import {
 import { wsManager } from "./ws";
 
 const unavailableSystemConfig: SystemConfigResponse = {
+  serverAccess: {
+    providers: [],
+    defaultProviderId: "direct",
+    effectiveUrl: null,
+    urlSource: null,
+  },
   generalSettings: defaultAppSettings,
   keybindings: [],
   defaultKeybindings: [],
@@ -25,6 +31,8 @@ const unavailableSystemConfig: SystemConfigResponse = {
   experiments: {
     changelogPreview: false,
     mobileApp: false,
+    multiMachinePicker: false,
+    serverMove: false,
     sidebarProgressiveDisclosure: false,
     timelineWindowing: false,
   },
@@ -173,12 +181,18 @@ systemConfigRefreshTickAtom.onMount = (setRefreshTick) => {
     setRefreshTick((count) => count + 1);
   });
   const unsubscribeChanged = wsManager.onChanged((message) => {
+    const hostConnectionChanged =
+      message.entity === "host" &&
+      message.changes.some(
+        (change) =>
+          change === "host-connected" || change === "host-disconnected",
+      );
     if (
-      message.entity === "host" ||
+      hostConnectionChanged ||
       (message.entity === "system" &&
         message.changes.includes("config-changed"))
     ) {
-      if (message.entity === "host") {
+      if (hostConnectionChanged) {
         invalidateSystemConfig();
       }
       setRefreshTick((count) => count + 1);

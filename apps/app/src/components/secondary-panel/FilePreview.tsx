@@ -2,11 +2,11 @@ import { SourceLoadingSkeleton } from "@/components/code/code-loading-skeletons"
 import {
   type CSSProperties,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import type { UrlTransform } from "react-markdown";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Button } from "@bb/shared-ui/button";
 import { SourceCodeHost } from "@/components/code/SourceCodeHost";
@@ -40,6 +40,7 @@ import {
 } from "@/lib/code-overflow-mode";
 import { cn } from "@bb/shared-ui/lib/utils";
 import { SecondaryPanelSelectionActions } from "./SecondaryPanelSelectionActions.js";
+import { useImageTabLightbox } from "./ImageTabLightboxContext.js";
 
 export interface FilePreviewFile {
   cacheKey?: string;
@@ -50,16 +51,17 @@ export interface FilePreviewFile {
 type IframePreviewSandbox = "allow-scripts";
 
 interface IframeFilePreviewTarget {
-  sandbox: IframePreviewSandbox | null;
+  sandbox: IframePreviewSandbox;
   title: string;
   url: string;
 }
 
-type FilePreviewState =
+export type FilePreviewState =
   | { kind: "loading" }
   | { kind: "empty" }
   | { kind: "not-found" }
   | { kind: "error"; message?: string }
+  | { kind: "unsupported"; message: string }
   | { kind: "image"; url: string }
   | { kind: "video"; url: string }
   | ({ kind: "iframe" } & IframeFilePreviewTarget)
@@ -74,7 +76,6 @@ type FilePreviewState =
       file: FilePreviewFile;
       lineRange: FilePreviewLineRange | null;
       textPreviewKind: TextFilePreviewKind | null;
-      markdownUrlTransform?: UrlTransform;
     };
 
 interface FilePreviewProps {
@@ -137,7 +138,6 @@ interface FilePreviewPathProps {
 interface MarkdownFilePreviewProps {
   file: FilePreviewFile;
   onSelectionAddToChat?: (text: string) => void;
-  urlTransform?: UrlTransform;
   markdownLinkRouting?: MarkdownLinkRouting;
 }
 
@@ -203,7 +203,7 @@ const HTML_FILE_PREVIEW_IFRAME_STYLE = {
 } as CSSProperties;
 const IFRAME_LOADING_INDICATOR_DELAY_MS = 160;
 const FILE_PREVIEW_HEADER_ICON_BUTTON_CLASS =
-  "h-5 w-5 rounded-sm p-0 [&_svg]:size-3 max-md:pointer-coarse:h-9 max-md:pointer-coarse:w-9 max-md:pointer-coarse:[&_svg]:size-5";
+  "h-5 w-5 rounded-sm p-0 [&_[data-icon-root]]:size-3 max-md:pointer-coarse:h-9 max-md:pointer-coarse:w-9 max-md:pointer-coarse:[&_[data-icon-root]]:size-5";
 const FILE_PREVIEW_VIEW_MODE_BUTTON_CLASS =
   "h-5 rounded-sm px-2 text-muted-foreground max-md:pointer-coarse:h-[30px]";
 
@@ -535,9 +535,12 @@ function FilePreviewBody({
     return (
       <FilePreviewMessage
         message={state.message ?? "Failed to load file"}
-        role={state.message === undefined ? "alert" : undefined}
+        role="alert"
       />
     );
+  }
+  if (state.kind === "unsupported") {
+    return <FilePreviewMessage message={state.message} />;
   }
   if (state.kind === "image") {
     return <FilePreviewImage url={state.url} alt={path} />;
@@ -576,7 +579,6 @@ function FilePreviewBody({
     return (
       <MarkdownFilePreview
         file={state.file}
-        urlTransform={state.markdownUrlTransform}
         markdownLinkRouting={markdownLinkRouting}
         onSelectionAddToChat={onSelectionAddToChat}
       />
@@ -697,7 +699,6 @@ function FilePreviewHeader({
                     }}
                     aria-label="Open in external browser"
                   >
-                    {}
                     <Icon name="Globe" aria-hidden />
                   </Button>
                 </TooltipTrigger>
@@ -894,7 +895,6 @@ function HtmlFilePreviewBody({
 function MarkdownFilePreview({
   file,
   onSelectionAddToChat,
-  urlTransform,
   markdownLinkRouting,
 }: MarkdownFilePreviewProps) {
   return (
@@ -903,7 +903,6 @@ function MarkdownFilePreview({
         <MarkdownPreview
           allowHtml
           content={file.contents}
-          urlTransform={urlTransform}
           linkRouting={markdownLinkRouting}
         />
       </div>
@@ -944,9 +943,7 @@ function CsvFilePreview({ file, onSelectionAddToChat }: CsvFilePreviewProps) {
 
   return (
     <SecondaryPanelSelectionActions onSelectionAddToChat={onSelectionAddToChat}>
-      {}
       <div className="flex min-h-0 flex-auto flex-col bg-surface-raised px-4 py-4">
-        {}
         <div
           ref={scrollRef}
           className="persistent-scrollbar min-h-0 overflow-auto overscroll-contain rounded-md border border-border bg-background"
@@ -1042,6 +1039,13 @@ function CsvFilePreview({ file, onSelectionAddToChat }: CsvFilePreviewProps) {
 
 function FilePreviewImage({ url, alt }: FilePreviewImageProps) {
   const [isLightboxOpen, setIsLightboxOpen] = useState(false);
+  const imageTabLightbox = useImageTabLightbox();
+
+  useLayoutEffect(() => {
+    if (imageTabLightbox?.isOpen) {
+      imageTabLightbox.update({ alt, src: url });
+    }
+  }, [alt, imageTabLightbox, url]);
 
   return (
     <div className="pt-4">
@@ -1049,16 +1053,24 @@ function FilePreviewImage({ url, alt }: FilePreviewImageProps) {
         type="button"
         className="block w-full cursor-zoom-in"
         aria-label={`Open ${alt} in full screen preview`}
-        onClick={() => setIsLightboxOpen(true)}
+        onClick={() => {
+          if (imageTabLightbox) {
+            imageTabLightbox.open({ alt, src: url });
+            return;
+          }
+          setIsLightboxOpen(true);
+        }}
       >
         <img src={url} alt={alt} className="mx-auto block h-auto max-w-full" />
       </button>
-      <ImageLightbox
-        title={alt}
-        imageSrc={isLightboxOpen ? url : null}
-        imageAlt={alt}
-        onClose={() => setIsLightboxOpen(false)}
-      />
+      {imageTabLightbox === null ? (
+        <ImageLightbox
+          title={alt}
+          imageSrc={isLightboxOpen ? url : null}
+          imageAlt={alt}
+          onClose={() => setIsLightboxOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1122,7 +1134,7 @@ function IframeFilePreview({ sandbox, title, url }: IframeFilePreviewTarget) {
       <iframe
         title={title}
         src={url}
-        sandbox={sandbox === null ? undefined : sandbox}
+        sandbox={sandbox}
         style={HTML_FILE_PREVIEW_IFRAME_STYLE}
         onLoad={() => setLoadState("loaded")}
         onError={() => setLoadState("error")}

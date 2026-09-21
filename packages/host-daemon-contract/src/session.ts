@@ -1,10 +1,14 @@
+import { hostDaemonContributedEnvEntrySchema } from "./commands.js";
 import { desktopBrowserChangedSchema } from "./desktop-browser.js";
+import {
+  serverMovedMessageSchema,
+  serverMoveProgressMessageSchema,
+} from "./server-move.js";
 import type { Hono } from "hono";
 import { hc } from "hono/client";
 import {
   discoveredWorkspacePropertiesSchema,
   ENVIRONMENT_CHANGE_KINDS,
-  hostTypeSchema,
   jsonValueSchema,
   pendingInteractionCreateSchema,
   pendingInteractionStatusSchema,
@@ -94,20 +98,20 @@ const hostDaemonPluginHostGenerationSchema = z
   })
   .strict();
 
-export const hostDaemonSessionOpenRequestSchema = z.object({
-  hostId: z.string().min(1),
-  instanceId: z.string().min(1),
-  hostName: z.string().min(1),
-  hostType: hostTypeSchema,
-  connectMachineId: z.string().min(1).optional(),
-  hasMachineCredential: z.boolean(),
-  platform: hostPlatformSchema,
-  dataDir: z.string().min(1),
-  localApiPort: z.number().int().min(1).max(65_535).nullable().default(null),
-  protocolVersion: z.number().int().positive(),
-  activeThreads: z.array(hostDaemonActiveThreadSchema),
-  loadedEnvironments: z.array(hostDaemonLoadedEnvironmentSchema).default([]),
-});
+export const hostDaemonSessionOpenRequestSchema = z
+  .object({
+    hostId: z.string().min(1),
+    instanceId: z.string().min(1),
+    hostName: z.string().min(1),
+    hasMachineCredential: z.boolean(),
+    platform: hostPlatformSchema,
+    dataDir: z.string().min(1),
+    localApiPort: z.number().int().min(1).max(65_535).nullable().default(null),
+    protocolVersion: z.number().int().positive(),
+    activeThreads: z.array(hostDaemonActiveThreadSchema),
+    loadedEnvironments: z.array(hostDaemonLoadedEnvironmentSchema).default([]),
+  })
+  .strict();
 export type HostDaemonSessionOpenRequest = z.output<
   typeof hostDaemonSessionOpenRequestSchema
 >;
@@ -116,8 +120,6 @@ export const hostDaemonEnrollRequestSchema = z
   .object({
     hostId: z.string().min(1),
     hostName: z.string().min(1),
-    hostType: hostTypeSchema,
-    connectMachineId: z.string().min(1).optional(),
   })
   .strict();
 export type HostDaemonEnrollRequest = z.infer<
@@ -152,9 +154,17 @@ export type HostDaemonEnrollKeyResponse = z.infer<
   typeof hostDaemonEnrollKeyResponseSchema
 >;
 
+const machineEnvironmentSchema = z
+  .object({
+    revision: z.number().int().nonnegative(),
+    entries: z.array(hostDaemonContributedEnvEntrySchema),
+  })
+  .strict();
+
 export const hostDaemonSessionOpenResponseSchema = z
   .object({
     sessionId: z.string().min(1),
+    machineEnvironment: machineEnvironmentSchema,
     heartbeatIntervalMs: z.number().int().positive(),
     leaseTimeoutMs: z.number().int().positive(),
     watchSet: hostDaemonWatchSetSchema.default({
@@ -443,11 +453,18 @@ const hostDaemonOnlineRpcResponseSuccessSchema = z.discriminatedUnion(
     onlineRpcResponseSuccessSchemaFor("workspace.diffFiles"),
     onlineRpcResponseSuccessSchemaFor("workspace.diffPatch"),
     onlineRpcResponseSuccessSchemaFor("workspace.pull_request"),
+    onlineRpcResponseSuccessSchemaFor("server_move.inspect"),
+    onlineRpcResponseSuccessSchemaFor("server_move.probe"),
+    onlineRpcResponseSuccessSchemaFor("server_move.prepare"),
+    onlineRpcResponseSuccessSchemaFor("server_move.activate"),
+    onlineRpcResponseSuccessSchemaFor("server_move.abort"),
+    onlineRpcResponseSuccessSchemaFor("server_move.delete_old_copy"),
     commandRpcResponseSuccessSchemaFor("thread.rewind.discard"),
     commandRpcResponseSuccessSchemaFor("thread.rewind.prepare"),
     commandRpcResponseSuccessSchemaFor("thread.start"),
     commandRpcResponseSuccessSchemaFor("turn.submit"),
     commandRpcResponseSuccessSchemaFor("thread.stop"),
+    commandRpcResponseSuccessSchemaFor("thread.storage.delete"),
     commandRpcResponseSuccessSchemaFor("thread.goal.clear"),
     commandRpcResponseSuccessSchemaFor("thread.plan.cancel"),
     commandRpcResponseSuccessSchemaFor("thread.rename"),
@@ -511,6 +528,7 @@ const hostDaemonTerminalOpenTargetSchema = z.discriminatedUnion("kind", [
 const hostDaemonTerminalOpenMessageSchema = z
   .object({
     type: z.literal("terminal.open"),
+    contributedEnv: z.array(hostDaemonContributedEnvEntrySchema).default([]),
     requestId: terminalRequestIdSchema,
     terminalId: terminalIdSchema,
     threadId: z.string().min(1).optional(),
@@ -577,6 +595,18 @@ const hostDaemonTerminalCloseMessageSchema = z
 export const hostDaemonServerWsMessageSchema = z.discriminatedUnion("type", [
   z
     .object({
+      type: z.literal("machine-environment.replace"),
+      environment: machineEnvironmentSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("machine.shutdown"),
+    })
+    .strict(),
+  serverMovedMessageSchema,
+  z
+    .object({
       type: z.literal("session-close"),
       reason: hostDaemonSessionCloseReasonSchema,
     })
@@ -602,6 +632,12 @@ export type HostDaemonServerWsMessage = z.infer<
 const hostDaemonHeartbeatMessageSchema = z
   .object({
     type: z.literal("heartbeat"),
+  })
+  .strict();
+
+const hostDaemonMachineShutdownAckMessageSchema = z
+  .object({
+    type: z.literal("machine.shutdown-ack"),
   })
   .strict();
 
@@ -715,6 +751,7 @@ const hostDaemonTerminalErrorMessageSchema = z
 
 export const hostDaemonDaemonWsMessageSchema = z.union([
   desktopBrowserChangedSchema,
+  hostDaemonMachineShutdownAckMessageSchema,
   hostDaemonHeartbeatMessageSchema,
   hostDaemonEnvironmentChangeMessageSchema,
   hostDaemonEnvironmentMetadataChangeMessageSchema,
@@ -722,6 +759,7 @@ export const hostDaemonDaemonWsMessageSchema = z.union([
   pluginHostWorkerExitedMessageSchema,
   pluginHostSignalMessageSchema,
   environmentHookProgressMessageSchema,
+  serverMoveProgressMessageSchema,
   hostDaemonTerminalOpenedMessageSchema,
   hostDaemonTerminalOutputMessageSchema,
   hostDaemonTerminalReplayMessageSchema,

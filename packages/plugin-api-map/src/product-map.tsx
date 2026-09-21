@@ -1,7 +1,6 @@
 import {
   Fragment,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -9,8 +8,8 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
+import { Icon } from "@bb/shared-ui/icon";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ArrowLeft01Icon, ArrowRight01Icon } from "@hugeicons/core-free-icons";
 
 import { cn } from "./cn";
 import { SurfaceCard, useSurfaceCard } from "./surface-card";
@@ -43,6 +42,7 @@ import {
   RealComposerAnnotated,
   SettingsWireframe,
   SurfaceMapContext,
+  useBrowserLayoutEffect,
   useSurfaceMap,
 } from "./wireframes";
 
@@ -110,7 +110,6 @@ function PlatformCard({ surface }: { surface: PluginSurface }) {
           </span>
           {surface.experimental ? <ExperimentalBadge /> : null}
         </span>
-        {}
         <span className="line-clamp-2 text-sm text-muted-foreground @3xl:line-clamp-1">
           {renderSurfaceCopy(surface.tagline ?? surface.summary)}
         </span>
@@ -167,9 +166,6 @@ export function spatialFixtureScale(
     heightScale,
   );
 }
-
-const useBrowserLayoutEffect =
-  typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 const FIXTURE_WIDTH_BANDS: Record<
   string,
@@ -446,8 +442,8 @@ function PanButton({
         FOCUS_RING_CLASS,
       )}
     >
-      <HugeiconsIcon
-        icon={direction === "previous" ? ArrowLeft01Icon : ArrowRight01Icon}
+      <Icon
+        name={direction === "previous" ? "ChevronLeft" : "ChevronRight"}
         className="size-4"
       />
     </button>
@@ -485,19 +481,17 @@ function useStageHeight(
 }
 
 export function ProductMap({
-  header,
   pluginPageHref,
+  renderPluginIcon,
   initialSlideId,
   onSlideChange,
   onCopyForAgent,
-  tone = "primary",
 }: {
-  header?: ReactNode;
   pluginPageHref?: (displayName: string) => string | null;
+  renderPluginIcon?: (displayName: string) => ReactNode;
   initialSlideId?: string;
   onSlideChange?: (slideId: string) => void;
   onCopyForAgent?: (surface: PluginSurface) => Promise<boolean>;
-  tone?: "primary" | "supporting";
 }) {
   const slides = SURFACE_GROUPS;
   const containerRef = useRef<HTMLDivElement>(null);
@@ -567,11 +561,12 @@ export function ProductMap({
       numberOf: (id: string) => SURFACE_NUMBERS.get(id) ?? null,
       onSelect: card.open,
       pluginPageHref,
+      renderPluginIcon,
       currentGroupId: slides[index].id,
       onGoToSurface: goToSurface,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hoverId, card.openId, pluginPageHref, index],
+    [hoverId, card.openId, pluginPageHref, renderPluginIcon, index],
   );
 
   const cardNode = openSurface ? (
@@ -607,32 +602,21 @@ export function ProductMap({
   return (
     <SurfaceMapContext.Provider value={mapState}>
       <div ref={containerRef} className="relative">
-        {}
         <div data-map-column className="mx-auto w-full max-w-[100rem]">
-          {header}
-
           <section
             aria-roledescription="carousel"
             aria-label="bb surfaces a plugin can extend"
             onKeyDown={onKeyDown}
-            className={header ? "mt-8" : "mt-2"}
+            className="mt-2"
           >
-            {}
             <div className="mb-3 border-b border-border-hairline pb-3">
-              {tone === "supporting" ? (
-                <h3 className="text-sm font-medium">
-                  <SlideTitle title={slides[index].title} />
-                </h3>
-              ) : (
-                <h2 className="text-base font-semibold">
-                  <SlideTitle title={slides[index].title} />
-                </h2>
-              )}
+              <h2 className="text-base font-semibold">
+                <SlideTitle title={slides[index].title} />
+              </h2>
               <p className="mt-1 max-w-2xl text-sm leading-relaxed text-subtle-foreground/75">
                 {slides[index].blurb}
               </p>
             </div>
-            {}
             <div className="mx-auto flex w-fit max-w-full items-center gap-1">
               <PanButton
                 direction="previous"
@@ -718,7 +702,6 @@ export function ProductMap({
               </div>
             </div>
 
-            {}
             {cardNode ? (
               <div
                 data-guide-card-flow

@@ -5,7 +5,10 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { Host } from "@bb/domain";
 import { makeHost } from "@bb/test-helpers/domain-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SystemEnvironmentProvider } from "@bb/server-contract";
+import type {
+  SystemEnvironmentProvider,
+  SystemMachineProvider,
+} from "@bb/server-contract";
 import { EnvironmentSlot, ProjectlessMachineSlot } from "./NewThreadPromptBox";
 
 const host = makeHost({
@@ -26,8 +29,10 @@ describe("ProjectlessMachineSlot", () => {
   };
 
   const personalWorkspaceProvider: SystemEnvironmentProvider = {
+    machineProviderId: null,
     id: "personal-workspace",
     displayName: "Personal workspace",
+    description: "Prepare a workspace for this thread.",
     icon: "Folder",
     logoUrl: null,
     pluginId: "environment-personal-workspace",
@@ -54,10 +59,11 @@ describe("ProjectlessMachineSlot", () => {
       localDaemonHostId: string | null;
       primaryHostId: string | null;
     } | null;
+    machineProviders?: readonly SystemMachineProvider[];
+    multiMachinePickerEnabled?: boolean;
   }) {
     return {
       value: "provider:personal-workspace",
-      onChange: vi.fn(),
       sources: [],
       host,
       isLocal: true,
@@ -70,6 +76,8 @@ describe("ProjectlessMachineSlot", () => {
               primaryHostId: host.id,
             },
       providers: [personalWorkspaceProvider],
+      machineProviders: overrides?.machineProviders,
+      multiMachinePickerEnabled: overrides?.multiMachinePickerEnabled,
       selectedProviderHostId: overrides?.selectedProviderHostId ?? host.id,
       onSelectProvider: overrides?.onSelectProvider ?? vi.fn(),
     };
@@ -102,25 +110,43 @@ describe("ProjectlessMachineSlot", () => {
   });
 
   it("counts provider-made machines in the projectless machine chip", () => {
+    const modalHost = makeHost({
+      id: "host_modal",
+      name: "Modal sandbox 3f9a",
+      type: "ephemeral",
+      machineProviderId: "modal-sandbox",
+    });
     render(
       <ProjectlessMachineSlot
         environment={makeEnvironment({
+          selectedProviderHostId: modalHost.id,
           machines: {
-            hosts: [
-              host,
-              makeHost({
-                id: "host_modal",
-                name: "Modal sandbox 3f9a",
-              }),
-            ],
+            hosts: [host, modalHost],
             localDaemonHostId: host.id,
             primaryHostId: host.id,
           },
+          machineProviders: [
+            {
+              id: "modal-sandbox",
+              displayName: "Modal Sandbox",
+              description: "Run a machine for development.",
+              icon: "Cloud",
+              logoUrl: null,
+              pluginId: "environment-modal-sandbox",
+              inputs: null,
+              acceptsEmptyInputs: true,
+              supportsSuspend: true,
+            },
+          ],
         })}
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Machine" })).toBeTruthy();
+    const chip = screen.getByRole("button", { name: "Machine" });
+    expect(chip.querySelector('[data-icon="Cloud"]')).not.toBeNull();
+    expect(chip.querySelector('[data-icon="Laptop"]')).toBeNull();
+    expect(chip.textContent).toContain(modalHost.name);
+    expect(chip.textContent).not.toContain("Modal Sandbox");
   });
 
   it("names the selected machine in the chip", () => {
@@ -150,13 +176,36 @@ describe("ProjectlessMachineSlot", () => {
 
     const trigger = screen.getByRole("button", { name: "Machine" });
     expect(trigger.textContent).toContain("Mac Studio");
-    fireEvent.pointerDown(trigger, { button: 0 });
-    fireEvent.click(screen.getByRole("menuitem", { name: /Local host/u }));
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("option", { name: /Local host/u }));
 
     expect(onSelectProvider).toHaveBeenCalledWith(
       personalWorkspaceProvider,
       host.id,
     );
+  });
+
+  it("passes the experiment through to machine search", () => {
+    const manyHosts = Array.from({ length: 6 }, (_, index) =>
+      makeHost({ id: `host_${index}`, name: `Machine ${index}` }),
+    );
+    render(
+      <ProjectlessMachineSlot
+        environment={makeEnvironment({
+          machines: {
+            hosts: manyHosts,
+            localDaemonHostId: manyHosts[0]!.id,
+            primaryHostId: manyHosts[0]!.id,
+          },
+          multiMachinePickerEnabled: true,
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Machine" }));
+    expect(
+      screen.getByRole("combobox", { name: "Search machines" }),
+    ).toBeTruthy();
   });
 });
 
@@ -168,8 +217,10 @@ describe("EnvironmentSlot", () => {
   };
 
   const personalProvider: SystemEnvironmentProvider = {
+    machineProviderId: null,
     id: "personal-workspace",
     displayName: "Personal workspace",
+    description: "Prepare a workspace for this thread.",
     icon: "Folder",
     logoUrl: null,
     pluginId: "environment-personal-workspace",
@@ -186,8 +237,10 @@ describe("EnvironmentSlot", () => {
   };
 
   const sandboxProvider: SystemEnvironmentProvider = {
+    machineProviderId: null,
     id: "modal-sandbox",
     displayName: "Modal sandbox",
+    description: "Prepare a workspace for this thread.",
     icon: "Cloud",
     logoUrl: null,
     pluginId: "environment-modal-sandbox",
@@ -203,10 +256,24 @@ describe("EnvironmentSlot", () => {
     inputs: null,
   };
 
+  const modalMachineProvider: SystemMachineProvider = {
+    id: "modal-sandbox",
+    displayName: "Modal sandbox",
+    description: "Run a machine for development.",
+    icon: "Box",
+    logoUrl: null,
+    pluginId: "environment-modal-sandbox",
+    inputs: null,
+    acceptsEmptyInputs: true,
+    supportsSuspend: true,
+  };
+
   function makeEnvironment(overrides: {
     isLoading?: boolean;
     value?: string;
     providers?: readonly SystemEnvironmentProvider[];
+    machineProviders?: readonly SystemMachineProvider[];
+    multiMachinePickerEnabled?: boolean;
     onSelectProvider?: (
       provider: SystemEnvironmentProvider,
       hostId: string | null,
@@ -214,7 +281,6 @@ describe("EnvironmentSlot", () => {
   }) {
     return {
       value: overrides.value ?? "provider:personal-workspace",
-      onChange: vi.fn(),
       sources: [],
       host,
       isLocal: true,
@@ -227,6 +293,8 @@ describe("EnvironmentSlot", () => {
       providers: overrides.providers ?? [personalProvider],
       selectedProviderHostId: host.id,
       onSelectProvider: overrides.onSelectProvider ?? vi.fn(),
+      machineProviders: overrides.machineProviders,
+      multiMachinePickerEnabled: overrides.multiMachinePickerEnabled,
     };
   }
 
@@ -302,6 +370,21 @@ describe("EnvironmentSlot", () => {
     expect(screen.queryByText("Modal sandbox")).toBeNull();
   });
 
+  it("keeps the machine slot when only one environment is available", () => {
+    render(
+      <EnvironmentSlot
+        projectless
+        environment={makeEnvironment({
+          providers: [personalProvider],
+          machineProviders: [modalMachineProvider],
+        })}
+        worktree={makeWorktree()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Machine" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Environment" })).toBeNull();
+  });
+
   it("shows the reused environment instead of the machine slot when a thread reuses one", () => {
     render(
       <QueryClientProvider client={new QueryClient()}>
@@ -346,8 +429,8 @@ describe("EnvironmentSlot", () => {
       </QueryClientProvider>,
     );
     const trigger = screen.getAllByRole("button", { name: "Environment" })[0];
-    fireEvent.pointerDown(trigger!, { button: 0 });
-    expect(screen.getByRole("menu")).toBeTruthy();
+    fireEvent.click(trigger!);
+    expect(screen.getByRole("dialog", { name: "Environment" })).toBeTruthy();
 
     rerender(
       <QueryClientProvider client={queryClient}>
@@ -359,7 +442,7 @@ describe("EnvironmentSlot", () => {
       </QueryClientProvider>,
     );
 
-    expect(screen.getByRole("menu")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Environment" })).toBeTruthy();
     expect(document.querySelector('button[aria-label="Environment"]')).toBe(
       trigger,
     );
@@ -381,8 +464,8 @@ describe("EnvironmentSlot", () => {
       </QueryClientProvider>,
     );
     const trigger = screen.getByRole("button", { name: "Environment" });
-    fireEvent.pointerDown(trigger, { button: 0 });
-    expect(screen.getByRole("menu")).toBeTruthy();
+    fireEvent.click(trigger);
+    expect(screen.getByRole("dialog", { name: "Environment" })).toBeTruthy();
 
     rerender(
       <QueryClientProvider client={queryClient}>
@@ -394,7 +477,7 @@ describe("EnvironmentSlot", () => {
       </QueryClientProvider>,
     );
 
-    expect(screen.getByRole("menu")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Environment" })).toBeTruthy();
     expect(document.querySelector('button[aria-label="Environment"]')).toBe(
       trigger,
     );

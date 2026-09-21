@@ -1,3 +1,7 @@
+import { ensureHostSessionReadyForWork } from "../hosts/host-lifecycle.js";
+import { isMachineWaitingForExecution } from "../machines/lifecycle.js";
+import { isServerMoveFrozen } from "../server-move/freeze-state.js";
+import { waitForMachineMaintenance } from "../machines/provider-orchestration.js";
 import {
   getQueuedThreadMessage,
   getThread,
@@ -6,6 +10,7 @@ import {
   listQueuedThreadMessagePluginWaitRefs,
   listQueuedThreadMessagesByWaitHolder,
   listQueuedThreadMessagesWaitingOnKind,
+  listRetryableFailedQueuedThreadMessages,
   listThreadIdsWithHostOfflineQueueWaits,
 } from "@bb/db";
 import {
@@ -29,7 +34,7 @@ import {
 } from "./queued-messages.js";
 
 export interface QueueWaitPluginDirectory {
-  isPluginLoaded(pluginId: string): boolean;
+  isPluginExpectedToRun(pluginId: string): boolean;
 }
 
 export type QueuedMessageDispatchWake =
@@ -43,6 +48,7 @@ export type QueuedMessageDispatchWake =
   | { kind: "plugin-recheck" }
   | { kind: "plugin-unregistered"; pluginId: string }
   | { kind: "idle-recovery"; now: number }
+  | { kind: "failed-retry"; now: number }
   | {
       kind: "orphaned-plugin-recovery";
       plugins: QueueWaitPluginDirectory;
@@ -57,7 +63,7 @@ interface QueuedMessageDispatchRef {
 
 type PreparedQueuedMessageDispatchWake = Exclude<
   QueuedMessageDispatchWake,
-  { kind: "provisioning-ended" } | { kind: "host-connected" }
+  { kind: "provisioning-ended" }
 >;
 
 const pendingPluginRechecks = new WeakSet<
@@ -92,20 +98,8 @@ function prepareQueuedMessageDispatchWake(
       });
       return [];
     case "host-connected": {
-      const prepared: PreparedQueuedMessageDispatchWake[] = [];
-      for (const threadId of listThreadIdsWithHostOfflineQueueWaits(
-        deps.db,
-        wake.hostId,
-      )) {
-        const cleared = clearThreadQueueWaitsOfKind(deps, {
-          threadId,
-          kind: "host-offline",
-        });
-        if (cleared > 0) {
-          prepared.push({ kind: "thread-ready", threadId });
-        }
-      }
-      return prepared;
+      if (isMachineWaitingForExecution(deps, wake.hostId)) return [];
+      return [wake];
     }
     default:
       return [wake];
@@ -116,12 +110,15 @@ function dispatchWakeContext(
   wake: PreparedQueuedMessageDispatchWake,
 ): Record<string, number | string | undefined> {
   switch (wake.kind) {
+    case "host-connected":
+      return { hostId: wake.hostId, wake: wake.kind };
     case "workspace-ready":
     case "thread-ready":
     case "turn-started":
     case "interaction-settled":
       return { threadId: wake.threadId, wake: wake.kind };
     case "idle-recovery":
+    case "failed-retry":
       return { now: wake.now, wake: wake.kind };
     case "orphaned-plugin-recovery":
       return { wake: wake.kind };
@@ -156,10 +153,53 @@ function schedulePreparedQueuedMessageDispatch(
   });
 }
 
+const queuedMachineReadiness = new WeakMap<
+  QueueDispatchDeps["db"],
+  Set<string>
+>();
+
+export function requestQueuedMachineReadiness(
+  deps: QueueDispatchDeps,
+  hostId: string,
+): void {
+  const pending = queuedMachineReadiness.get(deps.db) ?? new Set<string>();
+  queuedMachineReadiness.set(deps.db, pending);
+  if (pending.has(hostId)) return;
+  pending.add(hostId);
+  void waitForMachineMaintenance(deps, hostId)
+    .then(() => {
+      return ensureHostSessionReadyForWork(deps, { hostId });
+    })
+    .then(() => {
+      requestQueuedMessageDispatch(deps, { kind: "host-connected", hostId });
+    })
+    .catch((error) => {
+      deps.logger.warn(
+        { hostId, error },
+        "Could not prepare machine for queued messages",
+      );
+    })
+    .finally(() => pending.delete(hostId));
+}
+
 export function requestQueuedMessageDispatch(
   deps: QueueDispatchDeps,
   wake: QueuedMessageDispatchWake,
 ): void {
+  if (isServerMoveFrozen(deps.db)) {
+    return;
+  }
+  if (
+    wake.kind === "host-connected" &&
+    isMachineWaitingForExecution(deps, wake.hostId)
+  ) {
+    if (
+      listThreadIdsWithHostOfflineQueueWaits(deps.db, wake.hostId).length > 0
+    ) {
+      requestQueuedMachineReadiness(deps, wake.hostId);
+    }
+    return;
+  }
   for (const prepared of prepareQueuedMessageDispatchWake(deps, wake)) {
     schedulePreparedQueuedMessageDispatch(deps, prepared);
   }
@@ -169,6 +209,9 @@ export async function runQueuedMessageDispatch(
   deps: QueueDispatchDeps,
   wake: QueuedMessageDispatchWake,
 ): Promise<void> {
+  if (isServerMoveFrozen(deps.db)) {
+    return;
+  }
   for (const prepared of prepareQueuedMessageDispatchWake(deps, wake)) {
     await executePreparedQueuedMessageDispatch(deps, prepared);
   }
@@ -179,6 +222,23 @@ async function executePreparedQueuedMessageDispatch(
   wake: PreparedQueuedMessageDispatchWake,
 ): Promise<void> {
   switch (wake.kind) {
+    case "host-connected":
+      for (const threadId of listThreadIdsWithHostOfflineQueueWaits(
+        deps.db,
+        wake.hostId,
+      )) {
+        for (const row of listQueuedThreadMessagesWaitingOnKind(deps.db, {
+          kind: "host-offline",
+          threadId,
+        })) {
+          await attemptAutomaticQueuedMessage(deps, row, {
+            now: Date.now(),
+            respectRequeuePacing: false,
+            retryingFailure: false,
+          });
+        }
+      }
+      return;
     case "workspace-ready":
       await runWorkspaceReadyDispatch(deps, wake.threadId);
       return;
@@ -203,6 +263,9 @@ async function executePreparedQueuedMessageDispatch(
     case "idle-recovery":
       releaseStaleQueuedMessageDispatchClaims(deps, wake.now);
       await runIdleThreadRecovery(deps);
+      return;
+    case "failed-retry":
+      await runFailedRetryDispatch(deps, wake.now);
       return;
     case "orphaned-plugin-recovery":
       await runOrphanedPluginWaitRecovery(deps, wake.plugins);
@@ -263,6 +326,7 @@ async function runTurnStartedDispatch(
     await attemptAutomaticQueuedMessage(deps, row, {
       now: Date.now(),
       respectRequeuePacing: false,
+      retryingFailure: false,
     });
   }
 }
@@ -287,6 +351,7 @@ async function runWorkspaceReadyDispatch(
     await attemptAutomaticQueuedMessage(deps, row, {
       now: Date.now(),
       respectRequeuePacing: false,
+      retryingFailure: false,
     });
   }
 }
@@ -295,7 +360,7 @@ async function runInteractionSettledDispatch(
   deps: QueueDispatchDeps,
   threadId: string,
 ): Promise<void> {
-  if (deps.pendingInteractions.hasPendingThreadInteraction(threadId)) return;
+  if (deps.pendingInteractions.hasTurnBoundPendingThreadInteraction(threadId)) return;
   const cleared = clearThreadQueueWaitsOfKind(deps, {
     threadId,
     kind: "interaction",
@@ -308,7 +373,11 @@ async function runInteractionSettledDispatch(
 async function attemptAutomaticQueuedMessage(
   deps: QueueDispatchDeps,
   row: QueuedMessageDispatchRef,
-  args: { now: number; respectRequeuePacing: boolean },
+  args: {
+    now: number;
+    respectRequeuePacing: boolean;
+    retryingFailure: boolean;
+  },
 ): Promise<void> {
   if (args.respectRequeuePacing && isDispatchRequeuedRecently(row.threadId))
     return;
@@ -321,8 +390,10 @@ async function attemptAutomaticQueuedMessage(
         kind: "automatic",
         isGroupEligible: createAutomaticQueuedMessageGroupEligibility(deps, {
           now: args.now,
+          retryingFailure: args.retryingFailure,
           thread,
         }),
+        retryingFailure: args.retryingFailure,
       },
       mode: "auto",
       queuedMessageId: row.id,
@@ -340,7 +411,12 @@ async function attemptAutomaticQueuedMessage(
       );
       return;
     }
-    recordQueuedMessageDrainFailure(deps, { error, row, thread });
+    recordQueuedMessageDrainFailure(deps, {
+      error,
+      now: args.now,
+      row,
+      thread,
+    });
     deps.logger.warn(
       {
         queuedMessageId: row.id,
@@ -360,6 +436,7 @@ async function runPluginRecheckDispatch(
     await attemptAutomaticQueuedMessage(deps, row, {
       now,
       respectRequeuePacing: true,
+      retryingFailure: false,
     });
   }
 }
@@ -393,6 +470,40 @@ async function runDueScheduledDispatch(
     await attemptAutomaticQueuedMessage(deps, row, {
       now,
       respectRequeuePacing: true,
+      retryingFailure: false,
+    });
+  }
+}
+
+/**
+ * Re-attempts rows whose booked retry has come due.
+ *
+ * This is the only automatic path that may claim a row with a recorded
+ * failure, and it exists because a failure is not a verdict about the message:
+ * it is what the server was able to do at one instant, usually an instant
+ * during a restart. Every other wake asks "did the thing this row waits for
+ * happen?", which a row that failed can no longer be asked — its wait may have
+ * gone stale while it sat there, and the edge that would have cleared it has
+ * passed. So this one re-asks the whole question instead, and the row's
+ * remaining attempts are what stop it asking forever.
+ */
+async function runFailedRetryDispatch(
+  deps: QueueDispatchDeps,
+  now: number,
+): Promise<void> {
+  for (const row of listRetryableFailedQueuedThreadMessages(deps.db, now)) {
+    deps.logger.info(
+      {
+        failureCount: row.failureCount,
+        queuedMessageId: row.id,
+        threadId: row.threadId,
+      },
+      "Retrying a queued message whose dispatch failed",
+    );
+    await attemptAutomaticQueuedMessage(deps, row, {
+      now,
+      respectRequeuePacing: true,
+      retryingFailure: true,
     });
   }
 }
@@ -412,10 +523,10 @@ async function runOrphanedPluginWaitRecovery(
     const pluginId = row.waitHolder.slice(
       QUEUED_MESSAGE_PLUGIN_WAIT_HOLDER_PREFIX.length,
     );
-    if (plugins.isPluginLoaded(pluginId)) continue;
+    if (plugins.isPluginExpectedToRun(pluginId)) continue;
     deps.logger.info(
       { queuedMessageId: row.id, pluginId, threadId: row.threadId },
-      "Clearing a queue wait: its holding plugin is no longer running",
+      "Clearing a queue wait: its holding plugin is not going to run",
     );
     clearQueuedMessageWait(deps, {
       queuedMessageId: row.id,

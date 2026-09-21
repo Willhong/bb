@@ -1,5 +1,10 @@
-import { BrowserWindow, ipcMain } from "electron";
-import { escapeHtmlText } from "@bb/domain";
+import { ipcMain, type BrowserWindow } from "electron";
+import { escapeHtmlText } from "@bb/text-utils";
+import {
+  createDesktopDialogWindow,
+  DESKTOP_DIALOG_BASE_CSS,
+  showDesktopDialogHtml,
+} from "./desktop-dialog-window.js";
 import {
   BB_DESKTOP_SERVER_URL_DIALOG_CANCEL_CHANNEL,
   BB_DESKTOP_SERVER_URL_DIALOG_SUBMIT_CHANNEL,
@@ -25,32 +30,9 @@ function renderServerUrlDialogHtml(initialUrl: string | null): string {
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
-  <title>Set Server URL</title>
+  <title>${initialUrl === null ? "Add Server" : "Set Server URL"}</title>
   <style>
-    :root {
-      color-scheme: light dark;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-
-    body {
-      background: Canvas;
-      color: CanvasText;
-      margin: 0;
-      padding: 20px;
-    }
-
-    h1 {
-      font-size: 14px;
-      font-weight: 600;
-      margin: 0 0 4px;
-    }
-
-    p {
-      color: color-mix(in srgb, CanvasText 70%, transparent);
-      font-size: 12px;
-      line-height: 1.45;
-      margin: 0 0 12px;
-    }
+${DESKTOP_DIALOG_BASE_CSS}
 
     input {
       background: Field;
@@ -78,15 +60,6 @@ function renderServerUrlDialogHtml(initialUrl: string | null): string {
       margin-top: 12px;
     }
 
-    button {
-      background: color-mix(in srgb, CanvasText 8%, Canvas);
-      border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
-      border-radius: 6px;
-      color: CanvasText;
-      font-size: 13px;
-      padding: 5px 14px;
-    }
-
     button[type="submit"] {
       background: AccentColor;
       border-color: AccentColor;
@@ -95,8 +68,8 @@ function renderServerUrlDialogHtml(initialUrl: string | null): string {
   </style>
 </head>
 <body>
-  <h1>Set Server URL</h1>
-  <p>Point this app at a bb server. Leave empty to use only This Mac.</p>
+  <h1>${initialUrl === null ? "Add Server" : "Set Server URL"}</h1>
+  <p>${initialUrl === null ? "Save another bb server to the Server menu." : "Edit this saved server. Leave empty to remove it."}</p>
   <form>
     <input name="url" type="text" placeholder="https://example.com:38886" value="${escapeHtmlText(initialUrl ?? "")}" autocomplete="off" spellcheck="false">
     <div data-error></div>
@@ -122,22 +95,10 @@ export function openServerUrlDialog(
     return openDialog.result;
   }
 
-  const dialogWindow = new BrowserWindow({
-    fullscreenable: false,
-    height: 208,
-    maximizable: false,
-    minimizable: false,
-    modal: args.parentWindow !== null,
-    parent: args.parentWindow ?? undefined,
-    resizable: false,
-    show: false,
-    title: "Set Server URL",
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      preload: args.preloadPath,
-      sandbox: true,
-    },
+  const dialogWindow = createDesktopDialogWindow({
+    parentWindow: args.parentWindow,
+    preloadPath: args.preloadPath,
+    title: args.initialUrl === null ? "Add Server" : "Set Server URL",
     width: 440,
   });
 
@@ -177,7 +138,7 @@ export function openServerUrlDialog(
         if (!parsed.success) {
           return { ok: false, message: "Enter a valid http(s) URL." };
         }
-        if (parsed.data.url.trim().length === 0) {
+        if (parsed.data.url.trim().length === 0 && args.initialUrl !== null) {
           finish({ kind: "clear" });
           return { ok: true };
         }
@@ -197,13 +158,9 @@ export function openServerUrlDialog(
 
   openDialog = { result, window: dialogWindow };
 
-  dialogWindow.once("ready-to-show", () => {
-    dialogWindow.show();
-  });
-  void dialogWindow.loadURL(
-    `data:text/html;charset=utf-8,${encodeURIComponent(
-      renderServerUrlDialogHtml(args.initialUrl),
-    )}`,
+  showDesktopDialogHtml(
+    dialogWindow,
+    renderServerUrlDialogHtml(args.initialUrl),
   );
 
   return result;

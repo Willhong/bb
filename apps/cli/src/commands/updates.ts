@@ -7,9 +7,9 @@ import {
 import type { HostProviderCliStatusResponse } from "@bb/server-contract";
 import { action } from "../action.js";
 import { createCliBbSdk } from "../client.js";
-import { renderBorderlessTable } from "../table.js";
+import { columnWidths, printBorderlessTable } from "../table.js";
 import { outputJson } from "./helpers.js";
-import { resolveMachineId } from "./machine.js";
+import { resolveMachineId, selectMachines } from "./machine.js";
 
 type ProviderCliKey = string;
 type ProviderCliStatus = HostProviderCliStatusResponse[string];
@@ -32,13 +32,14 @@ interface MachineUpdatesEntry {
   statusError: string | null;
 }
 
-function providerState(status: ProviderCliStatus): UpdateState {
+export function providerState(status: ProviderCliStatus): UpdateState {
   if (!status.installed) return "not-installed";
   if (status.needsUpdate || status.versionUnsupported) {
     return status.installAction === null
       ? "update-manually"
       : "update-available";
   }
+  if (status.latestVersion === null) return "latest-unknown";
   return "up-to-date";
 }
 
@@ -60,6 +61,15 @@ function isActionableProviderStatus(status: ProviderCliStatus): boolean {
     status.installAction !== null &&
     (!status.installed || status.needsUpdate || status.versionUnsupported)
   );
+}
+
+function selectUpdateHosts(
+  hosts: readonly Host[],
+  machine: string | undefined,
+): Host[] {
+  return machine === undefined
+    ? selectMachines(hosts, "persistent")
+    : hosts.filter((host) => host.id === resolveMachineId(hosts, machine));
 }
 
 async function collectMachineUpdates(
@@ -127,23 +137,14 @@ function printUpdatesTable(args: {
       ]);
     }
   }
-  const widths = [
-    Math.max(6, ...rows.map((row) => row[0].length)),
-    Math.max(7, ...rows.map((row) => row[1].length)),
-    Math.max(5, ...rows.map((row) => row[2].length)),
-  ];
-  console.log("");
-  console.log(
-    renderBorderlessTable(
-      {
-        head: ["Target", "Version", "State"],
-        colWidths: widths,
-        trimTrailingWhitespace: true,
-      },
-      rows,
-    ),
+  printBorderlessTable(
+    {
+      head: ["Target", "Version", "State"],
+      colWidths: columnWidths(rows, [6, 7, 5]),
+      trimTrailingWhitespace: true,
+    },
+    rows,
   );
-  console.log("");
 }
 
 export function registerUpdatesCommands(
@@ -166,13 +167,10 @@ export function registerUpdatesCommands(
           sdk.system.version(),
           sdk.hosts.list(),
         ]);
-        const selectedHosts =
-          opts.machine === undefined
-            ? hosts
-            : hosts.filter(
-                (host) => host.id === resolveMachineId(hosts, opts.machine!),
-              );
-        const entries = await collectMachineUpdates(sdk, selectedHosts);
+        const entries = await collectMachineUpdates(
+          sdk,
+          selectUpdateHosts(hosts, opts.machine),
+        );
         if (
           outputJson(opts, {
             app: version,
@@ -212,13 +210,10 @@ export function registerUpdatesCommands(
       action(async (opts: UpdatesCommandOptions) => {
         const sdk = createCliBbSdk(getUrl());
         const hosts = await sdk.hosts.list();
-        const selectedHosts =
-          opts.machine === undefined
-            ? hosts
-            : hosts.filter(
-                (host) => host.id === resolveMachineId(hosts, opts.machine!),
-              );
-        const entries = await collectMachineUpdates(sdk, selectedHosts);
+        const entries = await collectMachineUpdates(
+          sdk,
+          selectUpdateHosts(hosts, opts.machine),
+        );
         const targets = actionableTargets(entries);
         if (targets.length === 0) {
           if (outputJson(opts, { results: [] })) return;

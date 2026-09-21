@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { omitNpmScriptPolicyEnv } from "@bb/process-utils";
+import { resolveBundledNpmCli } from "./npm-cli.js";
 
 const run = promisify(execFile);
 
@@ -160,8 +161,9 @@ export async function resolvePluginBuildToolchain(
       `${JSON.stringify({ name: "bb-plugin-toolchain", private: true, version: "0.0.0" }, null, 2)}\n`,
     );
     await run(
-      "npm",
+      process.execPath,
       [
+        resolveBundledNpmCli(),
         "install",
         "--prefix",
         staging,

@@ -62,46 +62,30 @@ import type {
   FamilyQuota,
   LimitWindow,
   ModelFamily,
+  PoolAvailability,
   PoolProvider,
   PoolStatus,
 } from "./src/contracts.js";
 import type { accountPoolRpcContract } from "./src/rpc.js";
-import { statusSchema } from "./src/contracts.js";
+import type { OAuthLoginStart } from "./src/oauth-login.js";
+import type { CodexDeviceLoginStart } from "./src/codex-device-login.js";
+import {
+  DEFAULT_ACCOUNT_POOL_CONFIG,
+  modelFamilySchema,
+  statusSchema,
+} from "./src/contracts.js";
 import { blockingResetAt } from "./src/quota.js";
 import {
   ACCOUNT_POOL_ACCOUNTS_CHANGED,
   ACCOUNT_POOL_CONFIG_CHANGED,
 } from "./src/realtime.js";
 
-interface LoginStep {
-  sessionId: string;
-  authorizeUrl: string;
-}
-interface CodexLoginStep {
-  sessionId: string;
-  verificationUri: string;
-  userCode: string;
-  expiresAt: number;
-  intervalMs: number;
-}
 type DialogState =
   | { kind: "account" | "priority" | "remove"; accountId: string }
   | { kind: "claude-login" | "codex-login" | "api-key" }
   | null;
 
-type ConfigField = keyof AccountPoolConfig;
-
-interface ConfigDrafts {
-  anthropicUpstreamBaseUrl: string;
-  codexUpstreamBaseUrl: string;
-  switchThreshold: string;
-}
-
-interface ConfigErrors {
-  anthropicUpstreamBaseUrl: string | null;
-  codexUpstreamBaseUrl: string | null;
-  switchThreshold: string | null;
-}
+type ConfigField = Exclude<keyof AccountPoolConfig, "parentMode">;
 
 const PROVIDERS: Array<{
   id: PoolProvider;
@@ -127,13 +111,6 @@ const FAMILY_LABELS: Record<ModelFamily, string> = {
   haiku: "Haiku 7 day",
   other: "Other 7 day",
 };
-const MODEL_FAMILIES: ModelFamily[] = [
-  "fable",
-  "sonnet",
-  "opus",
-  "haiku",
-  "other",
-];
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -150,12 +127,39 @@ function httpUrlError(value: string): string | null {
   }
 }
 
-function configDrafts(config: AccountPoolConfig): ConfigDrafts {
+function configDrafts(config: AccountPoolConfig): Record<ConfigField, string> {
   return {
     anthropicUpstreamBaseUrl: config.anthropicUpstreamBaseUrl,
     codexUpstreamBaseUrl: config.codexUpstreamBaseUrl,
     switchThreshold: String(config.switchThreshold),
   };
+}
+function parentHost(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl;
+  }
+}
+
+function parentBannerBody(parent: NonNullable<PoolStatus["parent"]>): string {
+  const host = parentHost(parent.baseUrl);
+  if (parent.mode !== "proxy") {
+    return `This server was started from a thread on ${host}. Turn this on to send Claude and Codex requests to its pool instead of using the accounts below.`;
+  }
+  const served = PROVIDERS.filter(
+    (provider) => parent.availability[provider.id],
+  ).map((provider) => provider.title);
+  if (served.length === 0) {
+    return `${host} has no accounts available right now, so nothing is being sent there. Requests fall back to each provider's own credentials.`;
+  }
+  const missing = PROVIDERS.filter(
+    (provider) => !parent.availability[provider.id],
+  ).map((provider) => provider.title);
+  const routed = `${served.join(" and ")} requests are sent to the pool on ${host}.`;
+  return missing.length === 0
+    ? `${routed} Accounts on this server are not used while this is on.`
+    : `${routed} ${missing.join(" and ")} has no accounts there, so those requests fall back to their own credentials.`;
 }
 function percent(value: number | null): string {
   return value === null ? "—" : `${Math.round(value * 100)}%`;
@@ -243,6 +247,11 @@ function tier(account: AccountSummary): string {
     account.subscriptionType ??
     (account.kind === "api-key" ? "API key" : "OAuth")
   );
+}
+function secondaryEmail(account: AccountSummary): string | null {
+  return account.email === null || account.email === account.label
+    ? null
+    : account.email;
 }
 function SettingsBadge({ children }: { children: ReactNode }) {
   return (
@@ -387,6 +396,7 @@ function AccountRow({
 }) {
   const status = statusPresentation(account, threshold);
   const slots = quotaSlots(account);
+  const email = secondaryEmail(account);
   const {
     attributes,
     isDragging,
@@ -435,6 +445,11 @@ function AccountRow({
               <span className="truncate text-sm font-medium text-foreground">
                 {account.label}
               </span>
+              {email === null ? null : (
+                <span className="min-w-0 truncate text-xs text-subtle-foreground/75">
+                  {email}
+                </span>
+              )}
               <SettingsBadge>{tier(account)}</SettingsBadge>
             </div>
             <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-subtle-foreground/75">
@@ -637,6 +652,132 @@ function QuotaDetail({
     </div>
   );
 }
+
+type CopyState = "idle" | "copied" | "manual";
+
+function useCopyToClipboard(text: string, selectFallback: () => void) {
+  const [copyState, setCopyState] = useState<CopyState>("idle");
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+    },
+    [],
+  );
+  useEffect(() => {
+    if (timerRef.current !== null) clearTimeout(timerRef.current);
+    setCopyState("idle");
+  }, [text]);
+
+  const copy = useCallback(() => {
+    navigator.clipboard.writeText(text).then(
+      () => {
+        setCopyState("copied");
+        if (timerRef.current !== null) clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(() => setCopyState("idle"), 1500);
+      },
+      () => {
+        selectFallback();
+        setCopyState("manual");
+      },
+    );
+  }, [text, selectFallback]);
+
+  return { copyState, copy };
+}
+
+function UserCodeBlock({ userCode }: { userCode: string }) {
+  const codeRef = useRef<HTMLSpanElement>(null);
+  const selectCode = useCallback(() => {
+    const element = codeRef.current;
+    if (element === null) return;
+    const selection = window.getSelection();
+    if (selection === null) return;
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }, []);
+  const { copyState, copy } = useCopyToClipboard(userCode, selectCode);
+
+  return (
+    <div className="rounded-lg border border-border bg-surface-recessed px-4 py-4">
+      <div className="grid grid-cols-[1fr_auto_1fr] items-center">
+        <span
+          ref={codeRef}
+          className="col-start-2 select-all text-center font-mono text-2xl font-semibold tracking-widest"
+          aria-label="Codex user code"
+        >
+          {userCode}
+        </span>
+        <Button
+          type="button"
+          variant="ghost"
+          aria-label="Copy Codex sign-in code"
+          className="col-start-3 size-11 justify-self-start text-muted-foreground hover:text-foreground sm:size-9"
+          onClick={copy}
+        >
+          <Icon name={copyState === "copied" ? "Check" : "Copy"} />
+        </Button>
+      </div>
+      <span aria-live="polite" className="sr-only">
+        {copyState === "copied"
+          ? "Sign-in code copied"
+          : copyState === "manual"
+            ? "Your browser blocked copying. The code is selected; copy it manually."
+            : ""}
+      </span>
+    </div>
+  );
+}
+
+function AuthorizationUrlRow({
+  name,
+  url,
+  openUrl,
+}: {
+  name: string;
+  url: string;
+  openUrl: (url: string) => boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const selectUrl = useCallback(() => {
+    inputRef.current?.select();
+  }, []);
+  const { copyState, copy } = useCopyToClipboard(url, selectUrl);
+
+  return (
+    <div>
+      <div className="flex gap-2">
+        <Input
+          ref={inputRef}
+          readOnly
+          value={url}
+          aria-label={`${name} authorization URL`}
+        />
+        <Button
+          variant="outline"
+          className="shrink-0"
+          aria-label={`Copy ${name} authorization URL`}
+          onClick={copy}
+        >
+          {copyState === "copied" ? "Copied" : "Copy"}
+        </Button>
+        <Button className="shrink-0" onClick={() => openUrl(url)}>
+          Open
+        </Button>
+      </div>
+      <span aria-live="polite" className="sr-only">
+        {copyState === "copied"
+          ? "Authorization URL copied"
+          : copyState === "manual"
+            ? "Your browser blocked copying. The URL is selected; copy it manually."
+            : ""}
+      </span>
+    </div>
+  );
+}
+
 function DialogFrame({
   title,
   children,
@@ -710,12 +851,14 @@ function AccountPoolSettings() {
   const [status, setStatus] = useState<PoolStatus | null>(readCachedStatus);
   const [statusIsCached, setStatusIsCached] = useState(status !== null);
   const [config, setConfig] = useState<AccountPoolConfig | null>(null);
-  const [drafts, setDrafts] = useState<ConfigDrafts>({
+  const [drafts, setDrafts] = useState<Record<ConfigField, string>>({
     anthropicUpstreamBaseUrl: "",
     codexUpstreamBaseUrl: "",
     switchThreshold: "",
   });
-  const [configErrors, setConfigErrors] = useState<ConfigErrors>({
+  const [configErrors, setConfigErrors] = useState<
+    Record<ConfigField, string | null>
+  >({
     anthropicUpstreamBaseUrl: null,
     codexUpstreamBaseUrl: null,
     switchThreshold: null,
@@ -733,15 +876,18 @@ function AccountPoolSettings() {
       coordinateGetter: sortableKeyboardCoordinates,
     }),
   );
-  const [loginStep, setLoginStep] = useState<LoginStep | null>(null);
-  const [codexStep, setCodexStep] = useState<CodexLoginStep | null>(null);
+  const [loginStep, setLoginStep] = useState<OAuthLoginStart | null>(null);
+  const [codexStep, setCodexStep] = useState<CodexDeviceLoginStart | null>(
+    null,
+  );
   const [loginDone, setLoginDone] = useState<string | null>(null);
   const [pastedCode, setPastedCode] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [priority, setPriority] = useState("100");
   const [countdown, setCountdown] = useState(0);
   const mounted = useRef(true);
-  const threshold = config?.switchThreshold ?? 0.98;
+  const threshold =
+    config?.switchThreshold ?? DEFAULT_ACCOUNT_POOL_CONFIG.switchThreshold;
   const applyConfig = useCallback((next: AccountPoolConfig) => {
     setConfig(next);
     setDrafts(configDrafts(next));
@@ -983,242 +1129,290 @@ function AccountPoolSettings() {
   const hubHosts =
     status?.hosts.map((host) => host.hostName ?? host.hostId).join(", ") ||
     "no machines";
+  const parent = status?.parent ?? null;
+  const proxying = parent !== null && parent.mode === "proxy";
   return (
     <div className="w-full space-y-6">
-      <p className="text-xs text-subtle-foreground/75">
-        Hub {status?.accepting ? "accepting" : "not accepting"} ·{" "}
-        {status?.inFlight ?? 0} in flight · used by {hubHosts}
-        {statusIsCached ? " · refreshing…" : null}
-      </p>
-      {error === null ? null : (
-        <div
-          role="alert"
-          className="rounded-md border border-destructive/40 bg-surface-destructive px-3 py-2 text-sm text-destructive-text"
-        >
-          {error}
+      {parent === null ? null : (
+        <div className="rounded-lg border border-border px-4 py-3">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold text-foreground">
+                {proxying
+                  ? "Using the parent Account Pooler"
+                  : "Parent Account Pooler available"}
+              </h2>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                {parentBannerBody(parent)}
+              </p>
+            </div>
+            <Switch
+              checked={proxying}
+              disabled={pending !== null}
+              aria-label="Use the parent Account Pooler"
+              onCheckedChange={(enabled) =>
+                void run("parent-mode", async () => {
+                  await rpc.call("config.set", {
+                    parentMode: enabled ? "proxy" : "isolate",
+                  });
+                })
+              }
+            />
+          </div>
         </div>
       )}
-      {status !== null && !statusIsCached && accounts.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border px-5 py-6 text-center">
-          <h2 className="text-sm font-semibold text-foreground">
-            No accounts in the pool
-          </h2>
-          <p className="mx-auto mt-1 max-w-lg text-xs leading-relaxed text-muted-foreground">
-            Add a Claude or Codex account and threads on every machine will
-            route through it. Your machine&apos;s own login keeps working until
-            then.
-          </p>
-          <div className="mt-4 flex flex-wrap justify-center gap-2">
-            <Button size="sm" onClick={() => void startClaude()}>
-              Sign in to Claude
-            </Button>
-            <Button size="sm" onClick={() => void startCodex()}>
-              Sign in to Codex
-            </Button>
-          </div>
-          <p className="mt-3 text-xs text-muted-foreground">
-            or use either provider&apos;s Add account menu to import this
-            machine&apos;s login
-          </p>
-        </div>
-      ) : null}
-      {PROVIDERS.map((provider) => {
-        const serverAccounts = accounts.filter(
-          (account) => account.provider === provider.id,
-        );
-        const order =
-          optimisticOrder?.provider === provider.id
-            ? optimisticOrder.ids
-            : null;
-        const providerAccounts =
-          order !== null &&
-          order.length === serverAccounts.length &&
-          serverAccounts.every((account) => order.includes(account.id))
-            ? order.flatMap((id) =>
-                serverAccounts.filter((account) => account.id === id),
-              )
-            : serverAccounts;
-        return (
-          <SettingsSection
-            key={provider.id}
-            title={provider.title}
-            description={provider.description}
-            action={
-              <div className="flex items-center gap-2">
-                <Switch
-                  checked={status?.routing[provider.id] ?? true}
-                  disabled={pending !== null}
-                  aria-label={`Route ${provider.title} threads`}
-                  onCheckedChange={(enabled) =>
-                    void run(`routing-${provider.id}`, async () => {
-                      await rpc.call("routing.set", {
-                        provider: provider.id,
-                        enabled,
-                      });
-                    })
-                  }
-                />
-                <AddAccountMenu
-                  provider={provider.id}
-                  onChoose={(choice) => void chooseAdd(provider.id, choice)}
-                />
-              </div>
-            }
+      <div
+        className={proxying ? "space-y-6 opacity-50" : "space-y-6"}
+        inert={proxying ? true : undefined}
+      >
+        <p className="text-xs text-subtle-foreground/75">
+          Hub {status?.accepting ? "accepting" : "not accepting"} ·{" "}
+          {status?.inFlight ?? 0} in flight · used by {hubHosts}
+          {statusIsCached ? " · refreshing…" : null}
+        </p>
+        {error === null ? null : (
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-surface-destructive px-3 py-2 text-sm text-destructive-text"
           >
-            {status === null ? (
-              <p className="py-2.5 text-sm text-muted-foreground">Loading…</p>
-            ) : providerAccounts.length === 0 ? (
-              <p className="py-2.5 text-sm text-subtle-foreground">
-                No accounts yet.
-              </p>
-            ) : (
-              <DndContext
-                sensors={sensors}
-                collisionDetection={closestCenter}
-                modifiers={accountDragModifiers}
-                onDragEnd={(event) => void reorderAccounts(provider.id, event)}
-              >
-                <SortableContext
-                  items={providerAccounts.map((account) => account.id)}
-                  strategy={verticalListSortingStrategy}
-                >
-                  <div className="divide-y divide-border">
-                    {providerAccounts.map((account) => (
-                      <AccountRow
-                        key={account.id}
-                        account={account}
-                        threshold={threshold}
-                        pending={pending !== null}
-                        refreshing={
-                          statusIsCached || pending === `refresh-${account.id}`
-                        }
-                        reorderDisabled={providerAccounts.length < 2}
-                        onAction={(action) =>
-                          void accountAction(account, action)
-                        }
-                        onOpen={() =>
-                          setDialog({ kind: "account", accountId: account.id })
-                        }
-                      />
-                    ))}
-                  </div>
-                </SortableContext>
-              </DndContext>
-            )}
-          </SettingsSection>
-        );
-      })}
-      <Collapsible className="rounded-lg border border-border px-4">
-        <CollapsibleTrigger className="flex w-full items-center gap-2 py-2.5 text-sm font-medium text-foreground">
-          <Icon
-            name="ChevronRight"
-            className="size-4 transition-transform [[data-state=open]>&]:rotate-90"
-          />
-          Advanced
-        </CollapsibleTrigger>
-        <CollapsibleContent>
-          <div className="divide-y divide-border border-t border-border">
-            <ConfigFieldRow
-              label="Anthropic upstream base URL"
-              description="QA override for Anthropic traffic."
-              error={configErrors.anthropicUpstreamBaseUrl}
-            >
-              <Input
-                aria-label="Anthropic upstream base URL"
-                aria-invalid={
-                  configErrors.anthropicUpstreamBaseUrl === null
-                    ? undefined
-                    : true
-                }
-                disabled={config === null || pending !== null}
-                value={drafts.anthropicUpstreamBaseUrl}
-                onChange={(event) =>
-                  updateConfigDraft(
-                    "anthropicUpstreamBaseUrl",
-                    event.target.value,
-                  )
-                }
-                onBlur={() => void saveConfigField("anthropicUpstreamBaseUrl")}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") event.currentTarget.blur();
-                }}
-              />
-            </ConfigFieldRow>
-            <ConfigFieldRow
-              label="Codex upstream base URL"
-              description="QA override for ChatGPT Codex traffic."
-              error={configErrors.codexUpstreamBaseUrl}
-            >
-              <Input
-                aria-label="Codex upstream base URL"
-                aria-invalid={
-                  configErrors.codexUpstreamBaseUrl === null ? undefined : true
-                }
-                disabled={config === null || pending !== null}
-                value={drafts.codexUpstreamBaseUrl}
-                onChange={(event) =>
-                  updateConfigDraft("codexUpstreamBaseUrl", event.target.value)
-                }
-                onBlur={() => void saveConfigField("codexUpstreamBaseUrl")}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") event.currentTarget.blur();
-                }}
-              />
-            </ConfigFieldRow>
-            <ConfigFieldRow
-              label="Quota switch threshold"
-              description="Stop selecting an account at this quota fraction."
-              error={configErrors.switchThreshold}
-            >
-              <Input
-                type="number"
-                min="0.01"
-                max="1"
-                step="0.01"
-                aria-label="Quota switch threshold"
-                aria-invalid={
-                  configErrors.switchThreshold === null ? undefined : true
-                }
-                disabled={config === null || pending !== null}
-                value={drafts.switchThreshold}
-                onChange={(event) =>
-                  updateConfigDraft("switchThreshold", event.target.value)
-                }
-                onBlur={() => void saveConfigField("switchThreshold")}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") event.currentTarget.blur();
-                }}
-              />
-            </ConfigFieldRow>
-            <div className="flex items-start justify-between gap-4">
-              <div className="py-2.5">
-                <div className="text-sm text-foreground">Machine tokens</div>
-                <div className="mt-0.5 text-xs text-muted-foreground">
-                  {hubHosts}
-                </div>
-              </div>
-              <div className="flex flex-wrap justify-end gap-2 py-2.5">
-                {status?.hosts.map((host) => (
-                  <Button
-                    key={host.hostId}
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      void run(`rotate-${host.hostId}`, async () => {
-                        await rpc.call("token.rotate", {
-                          machine: host.hostId,
+            {error}
+          </div>
+        )}
+        {status !== null && !statusIsCached && accounts.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border px-5 py-6 text-center">
+            <h2 className="text-sm font-semibold text-foreground">
+              No accounts in the pool
+            </h2>
+            <p className="mx-auto mt-1 max-w-lg text-xs leading-relaxed text-muted-foreground">
+              Add a Claude or Codex account and threads on every machine will
+              route through it. Your machine&apos;s own login keeps working
+              until then.
+            </p>
+            <div className="mt-4 flex flex-wrap justify-center gap-2">
+              <Button size="sm" onClick={() => void startClaude()}>
+                Sign in to Claude
+              </Button>
+              <Button size="sm" onClick={() => void startCodex()}>
+                Sign in to Codex
+              </Button>
+            </div>
+            <p className="mt-3 text-xs text-muted-foreground">
+              or use either provider&apos;s Add account menu to import this
+              machine&apos;s login
+            </p>
+          </div>
+        ) : null}
+        {PROVIDERS.map((provider) => {
+          const serverAccounts = accounts.filter(
+            (account) => account.provider === provider.id,
+          );
+          const order =
+            optimisticOrder?.provider === provider.id
+              ? optimisticOrder.ids
+              : null;
+          const providerAccounts =
+            order !== null &&
+            order.length === serverAccounts.length &&
+            serverAccounts.every((account) => order.includes(account.id))
+              ? order.flatMap((id) =>
+                  serverAccounts.filter((account) => account.id === id),
+                )
+              : serverAccounts;
+          return (
+            <SettingsSection
+              key={provider.id}
+              title={provider.title}
+              description={provider.description}
+              action={
+                <div className="flex items-center gap-2">
+                  <Switch
+                    checked={status?.routing[provider.id] ?? true}
+                    disabled={pending !== null}
+                    aria-label={`Route ${provider.title} threads`}
+                    onCheckedChange={(enabled) =>
+                      void run(`routing-${provider.id}`, async () => {
+                        await rpc.call("routing.set", {
+                          provider: provider.id,
+                          enabled,
                         });
                       })
                     }
+                  />
+                  <AddAccountMenu
+                    provider={provider.id}
+                    onChoose={(choice) => void chooseAdd(provider.id, choice)}
+                  />
+                </div>
+              }
+            >
+              {status === null ? (
+                <p className="py-2.5 text-sm text-muted-foreground">Loading…</p>
+              ) : providerAccounts.length === 0 ? (
+                <p className="py-2.5 text-sm text-subtle-foreground">
+                  No accounts yet.
+                </p>
+              ) : (
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCenter}
+                  modifiers={accountDragModifiers}
+                  onDragEnd={(event) =>
+                    void reorderAccounts(provider.id, event)
+                  }
+                >
+                  <SortableContext
+                    items={providerAccounts.map((account) => account.id)}
+                    strategy={verticalListSortingStrategy}
                   >
-                    Rotate {host.hostName ?? host.hostId}
-                  </Button>
-                ))}
+                    <div className="divide-y divide-border">
+                      {providerAccounts.map((account) => (
+                        <AccountRow
+                          key={account.id}
+                          account={account}
+                          threshold={threshold}
+                          pending={pending !== null}
+                          refreshing={
+                            statusIsCached ||
+                            pending === `refresh-${account.id}`
+                          }
+                          reorderDisabled={providerAccounts.length < 2}
+                          onAction={(action) =>
+                            void accountAction(account, action)
+                          }
+                          onOpen={() =>
+                            setDialog({
+                              kind: "account",
+                              accountId: account.id,
+                            })
+                          }
+                        />
+                      ))}
+                    </div>
+                  </SortableContext>
+                </DndContext>
+              )}
+            </SettingsSection>
+          );
+        })}
+        <Collapsible className="rounded-lg border border-border px-4">
+          <CollapsibleTrigger className="flex w-full items-center gap-2 py-2.5 text-sm font-medium text-foreground">
+            <Icon
+              name="ChevronRight"
+              className="size-4 transition-transform [[data-state=open]>&]:rotate-90"
+            />
+            Advanced
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="divide-y divide-border border-t border-border">
+              <ConfigFieldRow
+                label="Anthropic upstream base URL"
+                description="QA override for Anthropic traffic."
+                error={configErrors.anthropicUpstreamBaseUrl}
+              >
+                <Input
+                  aria-label="Anthropic upstream base URL"
+                  aria-invalid={
+                    configErrors.anthropicUpstreamBaseUrl === null
+                      ? undefined
+                      : true
+                  }
+                  disabled={config === null || pending !== null}
+                  value={drafts.anthropicUpstreamBaseUrl}
+                  onChange={(event) =>
+                    updateConfigDraft(
+                      "anthropicUpstreamBaseUrl",
+                      event.target.value,
+                    )
+                  }
+                  onBlur={() =>
+                    void saveConfigField("anthropicUpstreamBaseUrl")
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                  }}
+                />
+              </ConfigFieldRow>
+              <ConfigFieldRow
+                label="Codex upstream base URL"
+                description="QA override for ChatGPT Codex traffic."
+                error={configErrors.codexUpstreamBaseUrl}
+              >
+                <Input
+                  aria-label="Codex upstream base URL"
+                  aria-invalid={
+                    configErrors.codexUpstreamBaseUrl === null
+                      ? undefined
+                      : true
+                  }
+                  disabled={config === null || pending !== null}
+                  value={drafts.codexUpstreamBaseUrl}
+                  onChange={(event) =>
+                    updateConfigDraft(
+                      "codexUpstreamBaseUrl",
+                      event.target.value,
+                    )
+                  }
+                  onBlur={() => void saveConfigField("codexUpstreamBaseUrl")}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                  }}
+                />
+              </ConfigFieldRow>
+              <ConfigFieldRow
+                label="Quota switch threshold"
+                description="Stop selecting an account at this quota fraction."
+                error={configErrors.switchThreshold}
+              >
+                <Input
+                  type="number"
+                  min="0.01"
+                  max="1"
+                  step="0.01"
+                  aria-label="Quota switch threshold"
+                  aria-invalid={
+                    configErrors.switchThreshold === null ? undefined : true
+                  }
+                  disabled={config === null || pending !== null}
+                  value={drafts.switchThreshold}
+                  onChange={(event) =>
+                    updateConfigDraft("switchThreshold", event.target.value)
+                  }
+                  onBlur={() => void saveConfigField("switchThreshold")}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                  }}
+                />
+              </ConfigFieldRow>
+              <div className="flex items-start justify-between gap-4">
+                <div className="py-2.5">
+                  <div className="text-sm text-foreground">Machine tokens</div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">
+                    {hubHosts}
+                  </div>
+                </div>
+                <div className="flex flex-wrap justify-end gap-2 py-2.5">
+                  {status?.hosts.map((host) => (
+                    <Button
+                      key={host.hostId}
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        void run(`rotate-${host.hostId}`, async () => {
+                          await rpc.call("token.rotate", {
+                            machine: host.hostId,
+                          });
+                        })
+                      }
+                    >
+                      Rotate {host.hostName ?? host.hostId}
+                    </Button>
+                  ))}
+                </div>
               </div>
             </div>
-          </div>
-        </CollapsibleContent>
-      </Collapsible>
+          </CollapsibleContent>
+        </Collapsible>
+      </div>
       <Dialog
         open={dialog !== null}
         onOpenChange={(open) => {
@@ -1372,8 +1566,7 @@ function AccountPoolSettings() {
                 setLoginStep(null);
               })
             }
-            addAnother={() => void startClaude()}
-            retry={() => void startClaude()}
+            restart={() => void startClaude()}
           />
         ) : null}
         {dialog?.kind === "codex-login" ? (
@@ -1390,8 +1583,7 @@ function AccountPoolSettings() {
             openUrl={navigate.openUrl}
             setPastedCode={() => {}}
             complete={() => {}}
-            addAnother={() => void startCodex()}
-            retry={() => void startCodex()}
+            restart={() => void startCodex()}
           />
         ) : null}
       </Dialog>
@@ -1491,7 +1683,7 @@ function AccountDialog({
               )}
               threshold={threshold}
             />
-            {MODEL_FAMILIES.flatMap((family) =>
+            {modelFamilySchema.options.flatMap((family) =>
               account.familyWeekly[family] === null
                 ? []
                 : [
@@ -1507,6 +1699,12 @@ function AccountDialog({
         )}
       </div>
       <dl className="grid grid-cols-[7rem_1fr] gap-x-3 gap-y-2 border-t border-border pt-4 text-sm">
+        {account.email === null ? null : (
+          <>
+            <dt className="text-muted-foreground">Email</dt>
+            <dd className="break-all">{account.email}</dd>
+          </>
+        )}
         <dt className="text-muted-foreground">Kind</dt>
         <dd>
           {account.kind === "oauth"
@@ -1549,12 +1747,11 @@ function LoginDialog({
   openUrl,
   setPastedCode,
   complete,
-  addAnother,
-  retry,
+  restart,
 }: {
   provider: PoolProvider;
-  loginStep: LoginStep | null;
-  codexStep: CodexLoginStep | null;
+  loginStep: OAuthLoginStart | null;
+  codexStep: CodexDeviceLoginStart | null;
   loginDone: string | null;
   pending: boolean;
   pastedCode: string;
@@ -1564,8 +1761,7 @@ function LoginDialog({
   openUrl: (url: string) => boolean;
   setPastedCode: (value: string) => void;
   complete: () => void;
-  addAnother: () => void;
-  retry: () => void;
+  restart: () => void;
 }) {
   const name = provider === "claude" ? "Claude" : "Codex";
   const url =
@@ -1580,7 +1776,7 @@ function LoginDialog({
         loginDone !== null ? (
           <>
             <span className="flex-1" />
-            <Button variant="outline" onClick={addAnother}>
+            <Button variant="outline" onClick={restart}>
               Add another
             </Button>
             <Button onClick={close}>Done</Button>
@@ -1613,7 +1809,7 @@ function LoginDialog({
         provider === "codex" && error !== null ? (
           <div className="space-y-3">
             <p className="text-sm text-destructive-text">{error}</p>
-            <Button variant="outline" onClick={retry}>
+            <Button variant="outline" onClick={restart}>
               Try again
             </Button>
           </div>
@@ -1628,27 +1824,9 @@ function LoginDialog({
               : "Open the verification page, sign in to ChatGPT, and enter this code."}
           </p>
           {codexStep === null ? null : (
-            <div
-              className="rounded-lg border border-border bg-surface-recessed px-5 py-5 text-center font-mono text-2xl font-semibold tracking-widest"
-              aria-label="Codex user code"
-            >
-              {codexStep.userCode}
-            </div>
+            <UserCodeBlock userCode={codexStep.userCode} />
           )}
-          <div className="flex gap-2">
-            <Input
-              readOnly
-              value={url}
-              aria-label={`${name} authorization URL`}
-            />
-            <Button
-              variant="outline"
-              onClick={() => void navigator.clipboard.writeText(url)}
-            >
-              Copy
-            </Button>
-            <Button onClick={() => openUrl(url)}>Open</Button>
-          </div>
+          <AuthorizationUrlRow name={name} url={url} openUrl={openUrl} />
           {provider === "claude" ? (
             <Input
               aria-label="Claude authorization code"

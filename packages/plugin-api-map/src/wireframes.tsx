@@ -6,38 +6,11 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type MouseEvent,
   type ReactNode,
 } from "react";
-import { HugeiconsIcon } from "@hugeicons/react";
-import type { IconSvgElement } from "@hugeicons/react";
-import {
-  ArrowLeft01Icon,
-  ArrowMoveDownLeftIcon,
-  ArrowUp01Icon,
-  ArrowRight01Icon,
-  Bug01Icon,
-  Copy01Icon,
-  File01Icon,
-  Folder01Icon,
-  GitBranchIcon,
-  InformationCircleIcon,
-  MessageAdd01Icon,
-  Mic01Icon,
-  Plug02Icon,
-  ZapIcon,
-  MoreHorizontalIcon,
-  PencilEdit01Icon,
-  PlusSignIcon,
-  ElectricPlugsIcon,
-  Search01Icon,
-  Settings02Icon,
-  SparklesIcon,
-  PlusMinusSquare01Icon,
-  SidebarLeftIcon,
-  SidebarRightIcon,
-  ToolboxIcon,
-  TerminalIcon,
-} from "@hugeicons/core-free-icons";
+import { Icon, type IconName } from "@bb/shared-ui/icon";
+import { Switch } from "@bb/shared-ui/switch";
 
 import { cn } from "./cn";
 import {
@@ -53,9 +26,9 @@ export interface SurfaceMapState {
   activeId: string | null;
   setActiveId: (id: string | null) => void;
   expandedId?: string | null;
-  spotlightId?: string | null;
   numberOf: (id: string) => number | null;
   pluginPageHref?: (displayName: string) => string | null;
+  renderPluginIcon?: (displayName: string) => ReactNode;
   onSelect?: (id: string) => void;
   currentGroupId?: string;
   onGoToSurface?: (id: string) => void;
@@ -78,6 +51,7 @@ export const APP_SHELL_MARKS = [
   "thread-list",
   "sidebar-footer",
   "thread-header",
+  "browser-toolbar",
   "timeline-renderers",
   "message-directives",
   "message-actions",
@@ -111,15 +85,58 @@ export const SETTINGS_MARKS = [
 ] as const;
 
 function useEngagement(id: string) {
-  const { activeId, expandedId, spotlightId } = useSurfaceMap();
+  const { activeId, expandedId } = useSurfaceMap();
   return {
-    active: activeId === id || expandedId === id || spotlightId === id,
-    outlined:
-      activeId !== null
-        ? activeId === id
-        : expandedId === id || spotlightId === id,
-    dimmed: Boolean(spotlightId) && spotlightId !== id,
+    active: activeId === id || expandedId === id,
+    outlined: activeId !== null ? activeId === id : expandedId === id,
   };
+}
+
+function useAnnotationHover(id: string) {
+  const { setActiveId } = useSurfaceMap();
+  return {
+    onMouseEnter: () => setActiveId(id),
+    onMouseLeave: () => setActiveId(null),
+    onFocus: () => setActiveId(id),
+    onBlur: () => setActiveId(null),
+  };
+}
+
+function selectAnnotation(
+  event: MouseEvent<HTMLAnchorElement>,
+  id: string,
+  onSelect: ((id: string) => void) | undefined,
+  onActivate: (() => void) | undefined,
+) {
+  onActivate?.();
+  if (!onSelect) return;
+  event.preventDefault();
+  event.stopPropagation();
+  onSelect(id);
+}
+
+function PlacedChip({
+  id,
+  active,
+  chip,
+}: {
+  id: string;
+  active: boolean;
+  chip: AnnotationChipPlacement;
+}) {
+  const { numberOf } = useSurfaceMap();
+  return (
+    <span
+      aria-hidden
+      data-guide-badge={id}
+      className={annotationChipClass(
+        active,
+        cn("absolute z-50 ring-2 ring-card", CHIP_PLACEMENT_CLASS[chip]),
+      )}
+    >
+      {numberOf(id)}
+    </span>
+  );
 }
 
 function engagedRingClass(outlined: boolean) {
@@ -145,47 +162,26 @@ function Mark({
   onActivate?: () => void;
   children?: ReactNode;
 }) {
-  const { setActiveId, numberOf, onSelect } = useSurfaceMap();
-  const { active, outlined, dimmed } = useEngagement(id);
+  const { onSelect } = useSurfaceMap();
+  const { active, outlined } = useEngagement(id);
+  const hover = useAnnotationHover(id);
   return (
     <a
       data-guide-region={id}
       href={`#surface-${id}`}
       aria-label={`${label} — jump to details`}
-      onClick={(event) => {
-        onActivate?.();
-        if (!onSelect) return;
-        event.preventDefault();
-        event.stopPropagation();
-        onSelect(id);
-      }}
-      onMouseEnter={() => setActiveId(id)}
-      onMouseLeave={() => setActiveId(null)}
-      onFocus={() => setActiveId(id)}
-      onBlur={() => setActiveId(null)}
+      onClick={(event) => selectAnnotation(event, id, onSelect, onActivate)}
+      {...hover}
       className={cn(
         "relative rounded-md ring-1 ring-inset transition-all",
         FOCUS_RING_CLASS,
         outlined
           ? "bg-surface-selected ring-surface-selected-border"
           : "ring-transparent hover:bg-state-hover",
-        dimmed && "opacity-25",
         className,
       )}
     >
-      {}
-      {showChip ? (
-        <span
-          aria-hidden
-          data-guide-badge={id}
-          className={annotationChipClass(
-            active,
-            cn("absolute z-50 ring-2 ring-card", CHIP_PLACEMENT_CLASS[chip]),
-          )}
-        >
-          {numberOf(id)}
-        </span>
-      ) : null}
+      {showChip ? <PlacedChip id={id} active={active} chip={chip} /> : null}
       {children}
     </a>
   );
@@ -195,8 +191,8 @@ const RELEASE_DEMO_MS = 2400;
 
 function CommandPaletteActionMark({ onRun }: { onRun: () => void }) {
   const id = "command-palette-actions";
-  const { setActiveId } = useSurfaceMap();
-  const { outlined, dimmed } = useEngagement(id);
+  const { outlined } = useEngagement(id);
+  const hover = useAnnotationHover(id);
 
   return (
     <button
@@ -205,15 +201,11 @@ function CommandPaletteActionMark({ onRun }: { onRun: () => void }) {
       role="option"
       aria-selected="true"
       onClick={onRun}
-      onMouseEnter={() => setActiveId(id)}
-      onMouseLeave={() => setActiveId(null)}
-      onFocus={() => setActiveId(id)}
-      onBlur={() => setActiveId(null)}
+      {...hover}
       data-guide-fixture="command-palette-action"
       className={cn(
         "flex w-full cursor-pointer items-center gap-1.5 rounded bg-state-hover px-2 py-1.5 text-left text-foreground ring-1 ring-inset transition-all",
         outlined ? "ring-surface-selected-border" : "ring-transparent",
-        dimmed && "opacity-25",
       )}
     >
       <span>Run release checklist</span>
@@ -237,14 +229,12 @@ function RegionMark({
   showChip?: boolean;
   children: ReactNode;
 }) {
-  const { setActiveId, numberOf, onSelect } = useSurfaceMap();
-  const { active, outlined, dimmed } = useEngagement(id);
+  const { onSelect } = useSurfaceMap();
+  const { active, outlined } = useEngagement(id);
+  const hover = useAnnotationHover(id);
 
   return (
-    <div
-      data-guide-region={id}
-      className={cn("relative", dimmed && "opacity-25", className)}
-    >
+    <div data-guide-region={id} className={cn("relative", className)}>
       <a
         href={`#surface-${id}`}
         aria-label={`${label} — jump to details`}
@@ -256,10 +246,7 @@ function RegionMark({
               }
             : undefined
         }
-        onMouseEnter={() => setActiveId(id)}
-        onMouseLeave={() => setActiveId(null)}
-        onFocus={() => setActiveId(id)}
-        onBlur={() => setActiveId(null)}
+        {...hover}
         className={cn(
           "absolute inset-0 z-[1] rounded-md ring-1 ring-inset transition-all",
           FOCUS_RING_CLASS,
@@ -268,25 +255,14 @@ function RegionMark({
             : "ring-transparent hover:bg-state-hover",
         )}
       >
-        {showChip ? (
-          <span
-            aria-hidden
-            data-guide-badge={id}
-            className={annotationChipClass(
-              active,
-              cn("absolute z-50 ring-2 ring-card", CHIP_PLACEMENT_CLASS[chip]),
-            )}
-          >
-            {numberOf(id)}
-          </span>
-        ) : null}
+        {showChip ? <PlacedChip id={id} active={active} chip={chip} /> : null}
       </a>
       {children}
     </div>
   );
 }
 
-const useBrowserLayoutEffect =
+export const useBrowserLayoutEffect =
   typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 const CHIP_SIZE = 20;
@@ -309,8 +285,9 @@ function MeasuredBadge({
   flush?: boolean;
   onActivate?: () => void;
 }) {
-  const { setActiveId, numberOf, onSelect } = useSurfaceMap();
+  const { numberOf, onSelect } = useSurfaceMap();
   const { active } = useEngagement(id);
+  const hover = useAnnotationHover(id);
   const ref = useRef<HTMLAnchorElement>(null);
   const [position, setPosition] = useState<{
     left: number;
@@ -435,17 +412,8 @@ function MeasuredBadge({
       data-guide-badge-align={align}
       href={`#surface-${id}`}
       aria-label={`${label} — jump to details`}
-      onClick={(event) => {
-        onActivate?.();
-        if (!onSelect) return;
-        event.preventDefault();
-        event.stopPropagation();
-        onSelect(id);
-      }}
-      onMouseEnter={() => setActiveId(id)}
-      onMouseLeave={() => setActiveId(null)}
-      onFocus={() => setActiveId(id)}
-      onBlur={() => setActiveId(null)}
+      onClick={(event) => selectAnnotation(event, id, onSelect, onActivate)}
+      {...hover}
       className={cn("pointer-events-auto absolute z-50", FOCUS_RING_CLASS)}
       style={position ?? undefined}
     >
@@ -459,16 +427,10 @@ function MeasuredBadge({
   );
 }
 
-function MiniIcon({
-  icon,
-  className,
-}: {
-  icon: IconSvgElement;
-  className?: string;
-}) {
+function MiniIcon({ icon, className }: { icon: IconName; className?: string }) {
   return (
-    <HugeiconsIcon
-      icon={icon}
+    <Icon
+      name={icon}
       className={cn("size-4 shrink-0 text-muted-foreground", className)}
     />
   );
@@ -476,10 +438,19 @@ function MiniIcon({
 
 function PluginGlyph({ className }: { className?: string }) {
   return (
-    <HugeiconsIcon
-      icon={ElectricPlugsIcon}
+    <Icon
+      name="Plug02"
       className={cn("size-4 shrink-0 text-foreground", className)}
     />
+  );
+}
+
+function ProviderGlyph() {
+  const { renderPluginIcon } = useSurfaceMap();
+  return (
+    renderPluginIcon?.("Claude Code provider") ?? (
+      <Icon name="Code" className="size-3.5" />
+    )
   );
 }
 
@@ -520,7 +491,7 @@ const SIDEBAR_THREADS: readonly { title: string; glyph?: "spin" | "dot" }[] = [
 ];
 
 const FOOTER_ITEM_RENDERERS: Record<string, () => ReactNode> = {
-  settings: () => <MiniIcon icon={Settings02Icon} className="size-4" />,
+  settings: () => <MiniIcon icon="Settings" className="size-4" />,
   "plugin-footer-items": () => (
     <span className="flex items-center gap-1.5">
       <span className="flex size-5.5 items-center justify-center rounded-md">
@@ -531,7 +502,7 @@ const FOOTER_ITEM_RENDERERS: Record<string, () => ReactNode> = {
       </span>
     </span>
   ),
-  "bug-report": () => <MiniIcon icon={Bug01Icon} className="size-4" />,
+  "bug-report": () => <MiniIcon icon="Bug" className="size-4" />,
 };
 
 const SIDEBAR_SECTION_RENDERERS: Record<string, () => ReactNode> = {
@@ -540,8 +511,8 @@ const SIDEBAR_SECTION_RENDERERS: Record<string, () => ReactNode> = {
       data-guide-fixture="sidebar-top-reserve"
       className="flex h-12 items-center justify-end px-2"
     >
-      <MiniIcon icon={ArrowLeft01Icon} className="size-3.5" />
-      <MiniIcon icon={ArrowRight01Icon} className="ml-1.5 size-3.5" />
+      <MiniIcon icon="ChevronLeft" className="size-3.5" />
+      <MiniIcon icon="ChevronRight" className="ml-1.5 size-3.5" />
     </div>
   ),
   "sidebar-navigation": () => (
@@ -552,14 +523,24 @@ const SIDEBAR_SECTION_RENDERERS: Record<string, () => ReactNode> = {
     >
       <div
         data-guide-fixture="sidebar-navigation-primary-actions"
-        className="flex items-center gap-2 px-2 py-2"
+        className="space-y-0.5 px-2 py-2"
       >
-        <span className="flex h-6.5 flex-1 items-center gap-2 rounded-md px-2 text-foreground">
-          <MiniIcon icon={PlusSignIcon} className="text-foreground" />
+        <span className="flex h-6.5 items-center gap-2 rounded-md px-2 text-foreground">
+          <MiniIcon icon="MessageSquarePlus" className="text-foreground" />
           New thread
         </span>
-        <MiniIcon icon={Search01Icon} />
-        <span className="sr-only">Search threads</span>
+        <span className="flex h-6.5 items-center gap-2 rounded-md px-2">
+          <MiniIcon icon="Search" />
+          Search threads
+        </span>
+        <span className="flex h-6.5 items-center gap-2 rounded-md px-2">
+          <MiniIcon icon="Plug02" />
+          Plugins
+        </span>
+        <span className="flex h-6.5 items-center gap-2 rounded-md px-2">
+          <MiniIcon icon="Zap" />
+          Skills
+        </span>
       </div>
       <Mark
         id="nav-panel"
@@ -567,14 +548,6 @@ const SIDEBAR_SECTION_RENDERERS: Record<string, () => ReactNode> = {
         className="mx-1.5 z-[2] block space-y-0.5 px-2 pb-2"
         showChip={false}
       >
-        <span className="flex h-6.5 items-center gap-2 rounded-md px-2">
-          <MiniIcon icon={Plug02Icon} />
-          Plugins
-        </span>
-        <span className="flex h-6.5 items-center gap-2 rounded-md px-2">
-          <MiniIcon icon={ZapIcon} />
-          Skills
-        </span>
         <span className="flex h-6.5 items-center gap-2 rounded-md bg-sidebar-accent px-2 font-medium text-sidebar-foreground">
           <PluginGlyph />
           Your panel
@@ -623,7 +596,7 @@ const SIDEBAR_SECTION_RENDERERS: Record<string, () => ReactNode> = {
           className="flex h-6.5 items-center gap-1.5 rounded-md px-2"
         >
           <span className="min-w-0 truncate">{project}</span>
-          <MiniIcon icon={ArrowRight01Icon} className="size-3.5" />
+          <MiniIcon icon="ChevronRight" className="size-3.5" />
         </span>
       ))}
     </RegionMark>
@@ -664,13 +637,15 @@ const SIDEBAR_SECTION_RENDERERS: Record<string, () => ReactNode> = {
 };
 
 const MESSAGE_ACTION_RENDERERS: Record<string, () => ReactNode> = {
-  copy: () => <MiniIcon icon={Copy01Icon} className="size-3.5" />,
-  edit: () => <MiniIcon icon={PencilEdit01Icon} className="size-3.5" />,
-  "add-to-chat": () => <MiniIcon icon={PlusSignIcon} className="size-3.5" />,
-  "send-to-main-thread": () => (
-    <MiniIcon icon={ArrowLeft01Icon} className="size-3.5" />
+  copy: () => <MiniIcon icon="Copy" className="size-3.5" />,
+  edit: () => <MiniIcon icon="Edit" className="size-3.5" />,
+  "add-to-chat": () => (
+    <MiniIcon icon="MessageSquarePlus" className="size-3.5" />
   ),
-  fork: () => <MiniIcon icon={GitBranchIcon} className="size-3.5" />,
+  "send-to-main-thread": () => (
+    <MiniIcon icon="ArrowTurnBackward" className="size-3.5" />
+  ),
+  fork: () => <MiniIcon icon="Fork" className="size-3.5" />,
   "plugin-actions": () => <PluginGlyph className="size-3.5" />,
 };
 
@@ -681,6 +656,7 @@ export const ANATOMY_RENDERER_KEYS = {
 };
 
 export type AppShellRightPanelTab =
+  | "browser-toolbar"
   | "thread-panel"
   | "file-opener"
   | "code-renderers";
@@ -692,6 +668,13 @@ function RightPanelTabLaneBadges({
 }) {
   return (
     <>
+      <MeasuredBadge
+        id="browser-toolbar"
+        label="Plugin controls beside the Browser address bar"
+        anchor='[data-guide-region="browser-toolbar"]'
+        at="lane"
+        onActivate={() => onTabSelect("browser-toolbar")}
+      />
       <MeasuredBadge
         id="code-renderers"
         label="Plugin code and diff renderers on bb's Diff tab"
@@ -750,15 +733,15 @@ export function CommandPaletteWireframe() {
               <div className="flex items-center gap-1.5 px-1 text-foreground">
                 <TrafficLights />
                 <span className="ml-auto" />
-                <MiniIcon icon={SidebarLeftIcon} className="size-3.5" />
+                <MiniIcon icon="PanelLeft" className="size-3.5" />
               </div>
               <div className="mt-5 flex items-center gap-2 rounded-md px-2 py-1.5 text-foreground">
-                <MiniIcon icon={PlusSignIcon} className="size-3.5" />
+                <MiniIcon icon="MessageSquarePlus" className="size-3.5" />
                 New thread
               </div>
               <div className="flex items-center gap-2 rounded-md px-2 py-1.5">
-                <MiniIcon icon={Search01Icon} className="size-3.5" />
-                Search
+                <MiniIcon icon="Search" className="size-3.5" />
+                Search threads
               </div>
               <div className="mt-3 px-2 text-2xs font-medium uppercase tracking-wide text-subtle-foreground">
                 Threads
@@ -769,7 +752,7 @@ export function CommandPaletteWireframe() {
               <div className="px-2 py-2">Fix flaky checkout tests</div>
               <div className="px-2 py-2">Update onboarding copy</div>
               <div className="mt-auto flex items-center gap-2 border-t border-border-hairline px-2 pt-3">
-                <MiniIcon icon={Settings02Icon} className="size-3.5" />
+                <MiniIcon icon="Settings" className="size-3.5" />
                 Settings
               </div>
             </aside>
@@ -779,7 +762,7 @@ export function CommandPaletteWireframe() {
                 <span className="truncate text-foreground">
                   Ship release candidate
                 </span>
-                <MiniIcon icon={MoreHorizontalIcon} className="size-3.5" />
+                <MiniIcon icon="MoreHorizontal" className="size-3.5" />
                 <span className="flex-1" />
                 <button
                   type="button"
@@ -788,7 +771,7 @@ export function CommandPaletteWireframe() {
                   data-guide-fixture="command-palette-shortcut"
                   className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md border border-border-hairline px-2 text-subtle-foreground hover:bg-state-hover hover:text-foreground"
                 >
-                  <MiniIcon icon={Search01Icon} className="size-3.5" />
+                  <MiniIcon icon="Search" className="size-3.5" />
                   <span>Quick palette</span>
                   <kbd className="rounded bg-surface-recessed px-1.5 py-0.5 font-mono text-2xs text-foreground">
                     ⇧⌘P
@@ -809,7 +792,7 @@ export function CommandPaletteWireframe() {
                   </p>
                   <div className="space-y-2 rounded-lg border border-border-hairline bg-surface-raised-solid p-3">
                     <div className="flex items-center gap-2 text-foreground">
-                      <MiniIcon icon={GitBranchIcon} className="size-3.5" />
+                      <MiniIcon icon="GitBranch" className="size-3.5" />
                       release/2026-08-25
                     </div>
                     <div className="h-1.5 w-4/5 rounded-sm bg-muted/60" />
@@ -830,10 +813,7 @@ export function CommandPaletteWireframe() {
               >
                 <div className="flex h-12 items-center gap-1.5 border-b border-border-hairline px-3">
                   <span className="flex size-7 items-center justify-center rounded-md">
-                    <MiniIcon
-                      icon={InformationCircleIcon}
-                      className="size-3.5"
-                    />
+                    <MiniIcon icon="Info" className="size-3.5" />
                   </span>
                   <span
                     role="tab"
@@ -888,7 +868,7 @@ export function CommandPaletteWireframe() {
               >
                 <div className="flex items-center gap-2 border-b px-3 text-sm">
                   <MiniIcon
-                    icon={Search01Icon}
+                    icon="Search"
                     className="size-4 shrink-0 text-muted-foreground"
                   />
                   <input
@@ -917,7 +897,6 @@ export function CommandPaletteWireframe() {
                     </span>
                   </span>
                 </div>
-                {}
                 <MeasuredBadge
                   id="command-palette-actions"
                   label="Plugin actions in bb's quick command palette"
@@ -937,10 +916,11 @@ export function CommandPaletteWireframe() {
 export function AppShellWireframe() {
   const { expandedId } = useSurfaceMap();
   const [rightPanelTab, setRightPanelTab] =
-    useState<AppShellRightPanelTab>("thread-panel");
+    useState<AppShellRightPanelTab>("browser-toolbar");
 
   useEffect(() => {
     if (
+      expandedId === "browser-toolbar" ||
       expandedId === "thread-panel" ||
       expandedId === "file-opener" ||
       expandedId === "code-renderers"
@@ -951,7 +931,6 @@ export function AppShellWireframe() {
 
   return (
     <div className="relative w-full px-10 pb-0 pt-[26px]">
-      {}
       <MeasuredBadge
         id="nav-panel"
         label="Plugin nav panels, above the thread list"
@@ -977,7 +956,6 @@ export function AppShellWireframe() {
         anchor='[data-guide-region="thread-header"]'
         at="above"
       />
-      {}
       <MeasuredBadge
         id="content-scripts"
         label="App-wide plugin scripts, running in the whole window"
@@ -1010,7 +988,6 @@ function AppShellWireframeBody({
 
   return (
     <WindowFrame className="relative overflow-visible">
-      {}
       <span
         aria-hidden
         data-guide-target="content-scripts"
@@ -1019,31 +996,26 @@ function AppShellWireframeBody({
           engagedRingClass(contentScripts.outlined),
         )}
       />
-      {}
       <span
         aria-hidden
         data-guide-fixture="sidebar-trigger-overlay"
         className="absolute left-2 top-2.5 z-[4] flex size-7 items-center justify-center rounded-md"
       >
-        <MiniIcon icon={SidebarLeftIcon} className="size-4" />
+        <MiniIcon icon="PanelLeft" className="size-4" />
       </span>
-      {}
       <div className="flex min-h-[650px] items-stretch">
-        {}
         <div className="flex w-[300px] shrink-0 flex-col border-r border-border-seam bg-sidebar text-sidebar-foreground">
           {anatomy.appSidebar.map((key) => (
             <Fragment key={key}>{SIDEBAR_SECTION_RENDERERS[key]?.()}</Fragment>
           ))}
         </div>
 
-        {}
         <div className="flex min-w-0 flex-1 flex-col">
-          {}
           <div className="flex h-12 items-center gap-2 border-b border-border-hairline px-4">
             <span className="truncate text-foreground">
               Fix flaky checkout tests
             </span>
-            <MiniIcon icon={MoreHorizontalIcon} className="size-3.5" />
+            <MiniIcon icon="MoreHorizontal" className="size-3.5" />
             <span className="flex-1" />
             <Mark
               id="thread-header"
@@ -1055,19 +1027,16 @@ function AppShellWireframeBody({
             </Mark>
           </div>
 
-          {}
           <div
             data-guide-fixture="app-window-timeline"
             className="min-h-[510px] flex-1 space-y-7 overflow-hidden px-5 py-6"
           >
-            {}
             <div className="flex justify-end">
               <span className="max-w-[70%] rounded-xl border border-border-seam bg-surface-recessed px-2.5 py-2 leading-snug text-foreground">
                 Fix the flaky checkout tests
               </span>
             </div>
 
-            {}
             <div className="w-[78%] space-y-1">
               <span className="flex items-center gap-1.5 text-foreground">
                 <PluginGlyph className="size-3.5" />
@@ -1087,7 +1056,6 @@ function AppShellWireframeBody({
               </RegionMark>
             </div>
 
-            {}
             <div
               data-guide-fixture="assistant-message"
               onMouseEnter={() => setAssistantMessageHovered(true)}
@@ -1124,7 +1092,7 @@ function AppShellWireframeBody({
                     className="inline-flex items-center gap-0.5 rounded-md border border-border bg-popover p-0.5 text-2xs text-foreground shadow-md"
                   >
                     <span className="flex items-center gap-1 rounded px-1.5 py-0.5">
-                      <MiniIcon icon={MessageAdd01Icon} className="size-3.5" />
+                      <MiniIcon icon="MessageSquarePlus" className="size-3.5" />
                       Add to chat
                     </span>
                     <span className="mx-0.5 h-4 w-px bg-border" />
@@ -1149,7 +1117,6 @@ function AppShellWireframeBody({
                   per test.
                 </p>
               </div>
-              {}
               <div className="flex h-7 items-start">
                 <Mark
                   id="message-actions"
@@ -1174,7 +1141,6 @@ function AppShellWireframeBody({
             </div>
           </div>
 
-          {}
           <div className="space-y-2 border-t border-border-hairline p-4">
             <Mark
               id="pending-interaction"
@@ -1248,7 +1214,7 @@ export function AppShellRightPanel({
             data-guide-tab="info"
             className="flex h-6 items-center rounded-md px-1.5"
           >
-            <MiniIcon icon={InformationCircleIcon} className="size-3.5" />
+            <MiniIcon icon="Info" className="size-3.5" />
           </span>
           <Mark
             id="code-renderers"
@@ -1261,7 +1227,7 @@ export function AppShellRightPanel({
             onActivate={() => onTabSelect("code-renderers")}
           >
             <span data-guide-tab="code-renderers" className="contents">
-              <MiniIcon icon={PlusMinusSquare01Icon} className="size-3.5" />
+              <MiniIcon icon="FileDiff" className="size-3.5" />
               <span className="text-foreground">Diff</span>
             </span>
           </Mark>
@@ -1270,6 +1236,17 @@ export function AppShellRightPanel({
           data-guide-fixture="right-panel-content-tabs"
           className="flex min-w-0 items-center gap-1.5"
         >
+          <button
+            type="button"
+            data-guide-tab="browser-toolbar"
+            className={cn(
+              tabClass("browser-toolbar"),
+              "gap-1.5 whitespace-nowrap px-2 text-foreground",
+            )}
+            onClick={() => onTabSelect("browser-toolbar")}
+          >
+            Browser
+          </button>
           <Mark
             id="thread-panel"
             label="A plugin tab in the thread side panel"
@@ -1296,17 +1273,39 @@ export function AppShellRightPanel({
             onActivate={() => onTabSelect("file-opener")}
           >
             <span data-guide-tab="file-opener" className="contents">
-              <MiniIcon icon={File01Icon} className="size-3.5" />
+              <MiniIcon icon="FileText" className="size-3.5" />
               <span className="text-foreground">retry-notes.md</span>
             </span>
           </Mark>
         </span>
         <span className="flex-1" />
-        <MiniIcon icon={PlusSignIcon} className="size-3.5" />
-        <MiniIcon icon={SidebarRightIcon} className="size-3.5" />
+        <MiniIcon icon="Plus" className="size-3.5" />
+        <MiniIcon icon="PanelRight" className="size-3.5" />
       </div>
       <div data-guide-tab-body={activeTab} className="min-h-0 flex-1 p-4">
-        {activeTab === "thread-panel" ? (
+        {activeTab === "browser-toolbar" ? (
+          <div data-guide-fixture="browser-toolbar" className="space-y-4">
+            <div className="flex items-center gap-2 border-b border-border-hairline pb-3">
+              <MiniIcon icon="ChevronLeft" className="size-3.5" />
+              <div className="min-w-0 flex-1 truncate rounded-md bg-surface-recessed px-2 py-1.5 text-subtle-foreground">
+                https://example.com
+              </div>
+              <Mark
+                id="browser-toolbar"
+                label="Plugin controls beside the Browser address bar"
+                className="flex size-7 items-center justify-center"
+                showChip={false}
+              >
+                <PluginGlyph className="size-3.5" />
+              </Mark>
+            </div>
+            <div className="space-y-3 rounded-md border border-border-hairline bg-background p-4">
+              <span className="block h-2 w-2/5 rounded-sm bg-foreground/50" />
+              <span className="block h-2 w-4/5 rounded-sm bg-muted/60" />
+              <span className="block h-2 w-3/5 rounded-sm bg-muted/60" />
+            </div>
+          </div>
+        ) : activeTab === "thread-panel" ? (
           <div data-guide-fixture="thread-panel" className="space-y-2">
             <div className="flex items-center gap-1.5 text-foreground">
               <PluginGlyph className="size-3.5" />
@@ -1322,7 +1321,7 @@ export function AppShellRightPanel({
         ) : activeTab === "file-opener" ? (
           <div data-guide-fixture="file-viewer" className="space-y-3">
             <div className="flex items-center gap-1.5 text-xs text-subtle-foreground">
-              <MiniIcon icon={File01Icon} className="size-3.5" />
+              <MiniIcon icon="FileText" className="size-3.5" />
               <span>docs</span>
               <span>/</span>
               <span className="text-foreground">retry-notes.md</span>
@@ -1349,7 +1348,7 @@ export function AppShellRightPanel({
         ) : (
           <div data-guide-fixture="diff-renderer" className="space-y-3">
             <div className="flex items-center gap-1.5 text-foreground">
-              <MiniIcon icon={PlusMinusSquare01Icon} className="size-3.5" />
+              <MiniIcon icon="FileDiff" className="size-3.5" />
               <span className="font-medium">tests/checkout.test.ts</span>
               <span className="ml-auto flex items-center gap-1 rounded bg-surface-recessed px-1.5 py-1 text-2xs text-subtle-foreground">
                 <PluginGlyph className="size-3" />
@@ -1398,7 +1397,6 @@ export function RealComposerAnnotated() {
   const mention = useEngagement("mention-provider");
   return (
     <div className="relative px-7 pb-2 pt-4">
-      {}
       <div className="relative w-full select-none text-xs leading-none text-muted-foreground">
         <div
           data-guide-annotation-layer="composer-controls"
@@ -1437,8 +1435,6 @@ export function RealComposerAnnotated() {
         </div>
         <WindowFrame>
           <div className="flex min-h-[506px] flex-col">
-            {}
-            {}
             <div
               aria-hidden
               className="flex h-11 items-center gap-2 border-b border-border-hairline px-4 text-sm"
@@ -1446,7 +1442,7 @@ export function RealComposerAnnotated() {
               <span className="truncate text-foreground">
                 Ship the release notes
               </span>
-              <MiniIcon icon={MoreHorizontalIcon} className="size-3.5" />
+              <MiniIcon icon="MoreHorizontal" className="size-3.5" />
               <span className="flex-1" />
             </div>
             <div
@@ -1464,9 +1460,7 @@ export function RealComposerAnnotated() {
               </p>
             </div>
 
-            {}
             <div className="px-4 pb-4">
-              {}
               <div
                 data-guide-target="composer-banners"
                 className={cn(
@@ -1514,7 +1508,6 @@ function StaticEmbeddedComposer() {
   return (
     <div data-guide-fixture="embedded-composer" className="space-y-2">
       <div className="relative flex h-[126px] flex-col rounded-xl border border-border bg-background px-2 pb-2 pt-3 shadow-lift">
-        {}
         {plus.outlined ? (
           <div
             aria-hidden
@@ -1522,11 +1515,11 @@ function StaticEmbeddedComposer() {
             className="pointer-events-none absolute bottom-full left-2 z-20 mb-1 w-44 rounded-md border border-border bg-popover p-1 shadow-md"
           >
             <span className="flex h-6 items-center gap-1.5 px-1.5">
-              <MiniIcon icon={File01Icon} className="size-3.5" />
+              <MiniIcon icon="Paperclip" className="size-3.5" />
               Attach files
             </span>
             <span className="flex h-6 items-center gap-1.5 px-1.5">
-              <MiniIcon icon={ToolboxIcon} className="size-3.5" />
+              <MiniIcon icon="Zap" className="size-3.5" />
               Skills
             </span>
             <span className="flex h-6 items-center gap-1.5 rounded bg-state-hover px-1.5 text-foreground">
@@ -1536,7 +1529,6 @@ function StaticEmbeddedComposer() {
           </div>
         ) : null}
 
-        {}
         <div
           data-guide-target="composer-state"
           className={cn(
@@ -1575,7 +1567,6 @@ function StaticEmbeddedComposer() {
           </span>
         </div>
 
-        {}
         <div className="mt-auto flex h-10 items-center gap-1">
           <span
             data-guide-target="composer-plus-menu"
@@ -1584,7 +1575,7 @@ function StaticEmbeddedComposer() {
               engagedRingClass(plus.outlined),
             )}
           >
-            <MiniIcon icon={PlusSignIcon} className="size-4" />
+            <MiniIcon icon="Plus" className="size-4" />
           </span>
           <span
             data-guide-target="provider-picker"
@@ -1593,7 +1584,7 @@ function StaticEmbeddedComposer() {
               engagedRingClass(picker.outlined),
             )}
           >
-            <MiniIcon icon={SparklesIcon} className="size-3.5" />
+            <ProviderGlyph />
             Fable 5<span className="text-subtle-foreground">High</span>
           </span>
           <span className="flex-1" />
@@ -1608,14 +1599,14 @@ function StaticEmbeddedComposer() {
             <PluginGlyph className="size-3.5" />
           </span>
           <span className="flex size-9 items-center justify-center">
-            <MiniIcon icon={Mic01Icon} className="size-4" />
+            <MiniIcon icon="Mic" className="size-4" />
           </span>
           <span
             data-guide-icon="CornerDownLeft"
             className="flex size-9 items-center justify-center rounded-md bg-foreground"
           >
             <MiniIcon
-              icon={ArrowMoveDownLeftIcon}
+              icon="CornerDownLeft"
               className="size-3.5 text-background"
             />
           </span>
@@ -1623,7 +1614,7 @@ function StaticEmbeddedComposer() {
       </div>
       <div className="flex items-center justify-between px-2.5" aria-hidden>
         <span className="flex items-center gap-1.5">
-          <MiniIcon icon={Folder01Icon} className="size-3.5" />
+          <MiniIcon icon="Folder" className="size-3.5" />
           acme-app · worktree
         </span>
         <span>Full Access</span>
@@ -1632,11 +1623,7 @@ function StaticEmbeddedComposer() {
   );
 }
 
-export function ComposeScreenWireframe({
-  composer,
-}: {
-  composer?: ReactNode;
-} = {}) {
+export function ComposeScreenWireframe() {
   return (
     <div className="relative px-7 pb-2 pt-4">
       <MeasuredBadge
@@ -1646,96 +1633,83 @@ export function ComposeScreenWireframe({
         at="end"
       />
       <div>
-        <ComposeScreenWireframeBody composer={composer} />
+        <WindowFrame>
+          <div className="flex items-center gap-2 border-b border-border-hairline px-3 py-2">
+            <TrafficLights />
+          </div>
+          <div className="flex min-h-[485px] items-stretch">
+            <div className="min-w-0 flex-1 px-6 pb-6 pt-4">
+              <div className="mx-auto w-full max-w-[560px] space-y-2.5">
+                <MockHomeComposer />
+
+                <Mark
+                  id="homepage-section"
+                  label="A plugin homepage section, below the composer"
+                  className="mt-4 block px-3 py-2.5"
+                >
+                  <span className="flex items-center gap-1.5 pb-2 font-medium text-foreground">
+                    <PluginGlyph className="size-3.5" />
+                    Your section
+                  </span>
+                  <span className="grid grid-cols-3 gap-2" aria-hidden>
+                    {["Release 1.4", "Bug triage", "Design QA"].map((card) => (
+                      <span
+                        key={card}
+                        className="space-y-1.5 rounded-md border border-border-hairline bg-surface-raised p-2.5"
+                      >
+                        <span className="block text-foreground">{card}</span>
+                        <span className="block h-1.5 w-4/5 rounded-sm bg-muted/60" />
+                        <span className="block h-1.5 w-3/5 rounded-sm bg-muted/60" />
+                      </span>
+                    ))}
+                  </span>
+                </Mark>
+              </div>
+            </div>
+
+            <div className="w-[210px] shrink-0 border-l border-border-seam bg-sidebar p-2">
+              <span className="block px-1.5 pb-1.5 pt-1 text-xs text-subtle-foreground/75">
+                Actions
+              </span>
+              <span className="flex h-6.5 items-center gap-2 rounded-md px-2">
+                <MiniIcon icon="Globe" className="size-3.5" />
+                Open browser
+              </span>
+              <span className="flex h-6.5 items-center gap-2 rounded-md px-2">
+                <MiniIcon icon="Terminal" className="size-3.5" />
+                Start terminal
+              </span>
+              <Mark
+                id="new-thread-panel"
+                label="A plugin action in the new-thread panel launcher"
+                className="flex h-6.5 items-center gap-2 px-2.5"
+                showChip={false}
+              >
+                <PluginGlyph className="size-3.5" />
+                <span className="text-foreground">Your action</span>
+              </Mark>
+            </div>
+          </div>
+        </WindowFrame>
       </div>
     </div>
-  );
-}
-
-function ComposeScreenWireframeBody({ composer }: { composer?: ReactNode }) {
-  return (
-    <WindowFrame>
-      <div className="flex items-center gap-2 border-b border-border-hairline px-3 py-2">
-        <TrafficLights />
-      </div>
-      {}
-      <div className="flex min-h-[485px] items-stretch">
-        <div className="min-w-0 flex-1 px-6 pb-6 pt-4">
-          <div className="mx-auto w-full max-w-[560px] space-y-2.5">
-            {}
-            {composer ? <div inert>{composer}</div> : <MockHomeComposer />}
-
-            {}
-            <Mark
-              id="homepage-section"
-              label="A plugin homepage section, below the composer"
-              className="mt-4 block px-3 py-2.5"
-            >
-              <span className="flex items-center gap-1.5 pb-2 font-medium text-foreground">
-                <PluginGlyph className="size-3.5" />
-                Your section
-              </span>
-              <span className="grid grid-cols-3 gap-2" aria-hidden>
-                {["Release 1.4", "Bug triage", "Design QA"].map((card) => (
-                  <span
-                    key={card}
-                    className="space-y-1.5 rounded-md border border-border-hairline bg-surface-raised p-2.5"
-                  >
-                    <span className="block text-foreground">{card}</span>
-                    <span className="block h-1.5 w-4/5 rounded-sm bg-muted/60" />
-                    <span className="block h-1.5 w-3/5 rounded-sm bg-muted/60" />
-                  </span>
-                ))}
-              </span>
-            </Mark>
-          </div>
-        </div>
-
-        {}
-        <div className="w-[210px] shrink-0 border-l border-border-seam bg-sidebar p-2">
-          <span className="block px-1.5 pb-1.5 pt-1 text-xs text-subtle-foreground/75">
-            Actions
-          </span>
-          <span className="flex h-6.5 items-center gap-2 rounded-md px-2">
-            <MiniIcon icon={Search01Icon} className="size-3.5" />
-            Open browser
-          </span>
-          <span className="flex h-6.5 items-center gap-2 rounded-md px-2">
-            <MiniIcon icon={TerminalIcon} className="size-3.5" />
-            Start terminal
-          </span>
-          {}
-          <Mark
-            id="new-thread-panel"
-            label="A plugin action in the new-thread panel launcher"
-            className="flex h-6.5 items-center gap-2 px-2.5"
-            showChip={false}
-          >
-            <PluginGlyph className="size-3.5" />
-            <span className="text-foreground">Your action</span>
-          </Mark>
-        </div>
-      </div>
-    </WindowFrame>
   );
 }
 
 export function SettingsWireframe() {
   return (
     <WindowFrame>
-      {}
       <div className="flex items-center gap-2 border-b border-border-hairline px-3 py-2.5">
         <TrafficLights />
         <span className="pl-1 font-medium text-foreground">Settings</span>
       </div>
 
       <div className="mx-auto min-h-[470px] w-full max-w-[520px] space-y-4 px-4 pb-5 pt-4">
-        {}
         <div className="flex items-center gap-3">
           <span className="flex size-9 shrink-0 items-center justify-center">
             <PluginGlyph className="size-5" />
           </span>
-          <span className="min-w-0">
+          <span className="min-w-0 flex-1">
             <span className="block text-sm font-semibold text-foreground">
               Hello
             </span>
@@ -1743,9 +1717,14 @@ export function SettingsWireframe() {
               A friendly example plugin.
             </span>
           </span>
+          <Switch
+            checked
+            aria-hidden
+            tabIndex={-1}
+            className="pointer-events-none"
+          />
         </div>
 
-        {}
         <div className="space-y-2">
           <span className="block text-subtle-foreground">Configuration</span>
           <Mark
@@ -1769,7 +1748,7 @@ export function SettingsWireframe() {
                 aria-hidden
                 className="flex h-6 w-32 shrink-0 items-center rounded-md border border-border bg-card px-2 text-xs text-subtle-foreground"
               >
-                ••••••••
+                [set]
               </span>
             </span>
             <span className="flex items-start justify-between gap-3 py-1.5">
@@ -1781,12 +1760,12 @@ export function SettingsWireframe() {
                   Match capitalisation when looking things up.
                 </span>
               </span>
-              <span
+              <Switch
+                checked
                 aria-hidden
-                className="mt-0.5 flex h-4.5 w-8 shrink-0 items-center rounded-full bg-foreground/60 p-0.5"
-              >
-                <span className="ml-auto size-3.5 rounded-full bg-background" />
-              </span>
+                tabIndex={-1}
+                className="pointer-events-none mt-0.5"
+              />
             </span>
             <span className="flex items-start justify-between gap-3 py-1.5">
               <span className="min-w-0">
@@ -1816,7 +1795,6 @@ export function SettingsWireframe() {
             </span>
           </Mark>
 
-          {}
           <Mark
             id="settings-section"
             label="A React component you write, under the generated form"
@@ -1841,7 +1819,6 @@ export function SettingsWireframe() {
           </Mark>
         </div>
 
-        {}
         <div className="space-y-2 border-t border-border-hairline pt-4">
           <span className="block text-subtle-foreground">Plugin details</span>
           <span className="flex items-center gap-1 leading-relaxed">
@@ -1849,7 +1826,7 @@ export function SettingsWireframe() {
             <span className="text-foreground underline underline-offset-2">
               its plugin page
             </span>
-            <MiniIcon icon={ArrowRight01Icon} className="size-3.5" />
+            <MiniIcon icon="ChevronRight" className="size-3.5" />
           </span>
         </div>
       </div>
@@ -1865,32 +1842,32 @@ export function ExtensionsPluginPageWireframe() {
         <span className="text-foreground">Plugins</span>
       </div>
       <div className="flex min-h-[470px] flex-col">
-        {}
         <Mark
           id="plugin-status"
           label="The needs-configuration banner bb shows for a plugin that reports it"
           className="flex items-start gap-2 border-b border-border bg-surface-recessed/55 px-5 py-2.5 text-sm"
           chip="corner-inset"
         >
-          <MiniIcon
-            icon={Settings02Icon}
-            className="mt-0.5 size-4 text-warning"
-          />
+          <MiniIcon icon="Settings" className="mt-0.5 size-4 text-warning" />
           <span className="min-w-0 flex-1">
             <span className="block font-medium text-foreground">
               Needs configuration
             </span>
             <span className="block pt-0.5 text-xs leading-relaxed text-muted-foreground">
-              Set an API key in Settings. Reloads when you save.
+              Set an API key. Complete the Configuration section; bb reloads the
+              plugin after you save.
             </span>
           </span>
-          <span className="flex h-7 items-center rounded-md border border-border bg-background px-2.5 text-xs text-foreground">
-            Reload
+          <span className="flex h-7 shrink-0 items-center gap-0.5 rounded-md bg-foreground px-2.5 text-xs text-background">
+            Open settings
+            <MiniIcon
+              icon="ChevronRight"
+              className="size-3.5 text-background"
+            />
           </span>
         </Mark>
 
         <div className="mx-auto w-full max-w-[560px] space-y-4 px-4 pb-5 pt-4">
-          {}
           <div className="flex items-center gap-2.5">
             <PluginGlyph className="size-4" />
             <span className="text-sm font-semibold text-foreground">Hello</span>
@@ -1898,20 +1875,19 @@ export function ExtensionsPluginPageWireframe() {
               BB Official
             </span>
             <span className="flex-1" />
-            <span
+            <Switch
+              checked
               aria-hidden
-              className="flex h-4.5 w-8 items-center rounded-full bg-foreground/60 p-0.5"
-            >
-              <span className="ml-auto size-3.5 rounded-full bg-background" />
-            </span>
-            <MiniIcon icon={MoreHorizontalIcon} className="size-3.5" />
+              tabIndex={-1}
+              className="pointer-events-none"
+            />
+            <MiniIcon icon="MoreHorizontal" className="size-3.5" />
           </div>
           <span className="block font-mono text-xs text-subtle-foreground">
             ~/.bb/plugins/hello
           </span>
 
           <div className="space-y-1.5 border-t border-border-hairline pt-3">
-            <span className="block text-subtle-foreground">About</span>
             <span className="block text-foreground">
               A friendly example plugin.
             </span>
@@ -1920,11 +1896,29 @@ export function ExtensionsPluginPageWireframe() {
           <div className="space-y-1.5 border-t border-border-hairline pt-3">
             <span className="block text-subtle-foreground">Configuration</span>
             <span className="flex items-center gap-1 leading-relaxed">
-              Configure it on
+              This plugin is configured from
               <span className="text-foreground underline underline-offset-2">
                 its Settings page
               </span>
-              <MiniIcon icon={ArrowRight01Icon} className="size-3.5" />
+              <MiniIcon icon="ChevronRight" className="size-3.5" />
+            </span>
+          </div>
+
+          <div className="space-y-1.5 border-t border-border-hairline pt-3">
+            <span className="block text-subtle-foreground">Release</span>
+            <span className="block divide-y divide-border-hairline rounded-md border border-border-hairline">
+              {[
+                ["Delivery", "Updates with bb"],
+                ["Version", "0.1.0"],
+              ].map(([label, value]) => (
+                <span
+                  key={label}
+                  className="flex items-center gap-3 px-2.5 py-1.5"
+                >
+                  <span className="w-24 shrink-0 text-foreground">{label}</span>
+                  <span>{value}</span>
+                </span>
+              ))}
             </span>
           </div>
 
@@ -1964,22 +1958,25 @@ function MockHomeComposer() {
         <div aria-hidden className="h-10" />
         <div className="flex items-center gap-2 px-0.5" aria-hidden>
           <span className="flex size-6 items-center justify-center rounded-md border border-border">
-            <MiniIcon icon={PlusSignIcon} className="size-3.5" />
+            <MiniIcon icon="Plus" className="size-3.5" />
           </span>
           <span className="flex h-6 items-center gap-1.5 rounded-md px-1.5 text-foreground">
-            <MiniIcon icon={SparklesIcon} className="size-3.5" />
+            <ProviderGlyph />
             Fable 5 · High
           </span>
           <span className="flex-1" />
-          <MiniIcon icon={Mic01Icon} className="size-3.5" />
+          <MiniIcon icon="Mic" className="size-3.5" />
           <span className="flex size-6 items-center justify-center rounded-md bg-foreground">
-            <MiniIcon icon={ArrowUp01Icon} className="size-3 text-background" />
+            <MiniIcon
+              icon="CornerDownLeft"
+              className="size-3.5 text-background"
+            />
           </span>
         </div>
       </div>
       <div className="flex items-center justify-between px-2.5" aria-hidden>
         <span className="flex items-center gap-1.5">
-          <MiniIcon icon={Folder01Icon} className="size-3.5" />
+          <MiniIcon icon="Folder" className="size-3.5" />
           acme-app
           <span className="text-subtle-foreground">· worktree</span>
         </span>

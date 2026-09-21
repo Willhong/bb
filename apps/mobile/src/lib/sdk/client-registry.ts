@@ -10,6 +10,7 @@ import {
   type CreateMobileSdkOptions,
   type MobileSdk,
 } from "./create-mobile-sdk";
+import type { ServerMovedResponse } from "./mobile-fetch";
 
 export type ProfileAuthFailure =
   | { source: "fetch"; status: number }
@@ -24,15 +25,14 @@ export interface ProfileClient extends MobileSdk {
 }
 
 export interface CreateProfileClientRegistryOptions {
-  sdk?: Omit<CreateMobileSdkOptions, "onAuthFailure">;
-  createQueryClient?: () => QueryClient;
+  onServerMoved?: (profileId: string, moved: ServerMovedResponse) => void;
+  sdk?: Omit<CreateMobileSdkOptions, "onAuthFailure" | "onServerMoved">;
 }
 
 export interface ProfileClientRegistry {
   getClientForProfile(
     profile: Pick<ServerProfile, "id" | "serverUrl">,
   ): ProfileClient;
-  peekClient(profileId: string): ProfileClient | null;
   disposeClient(profileId: string): void;
   disposeAll(): void;
 }
@@ -41,8 +41,6 @@ export function createProfileClientRegistry(
   options: CreateProfileClientRegistryOptions = {},
 ): ProfileClientRegistry {
   const clients = new Map<string, ProfileClient>();
-  const createQueryClient =
-    options.createQueryClient ?? (() => createProfileQueryClient());
 
   function build(
     profile: Pick<ServerProfile, "id" | "serverUrl">,
@@ -53,18 +51,24 @@ export function createProfileClientRegistry(
     const emitAuthFailure = (failure: ProfileAuthFailure): void => {
       for (const listener of authFailureListeners) listener(failure);
     };
+    const onServerMoved = options.onServerMoved;
     const { sdk, realtime, fetch } = createMobileSdk(profile, {
       ...options.sdk,
       onAuthFailure: (status) => {
         emitAuthFailure({ source: "fetch", status });
       },
+      onServerMoved: onServerMoved
+        ? (moved) => {
+            onServerMoved(profile.id, moved);
+          }
+        : undefined,
     });
     const unsubscribeConnectFailed = realtime.onConnectFailed((event) => {
       if (event.authRejected) {
         emitAuthFailure({ source: "realtime", message: event.message });
       }
     });
-    const queryClient = createQueryClient();
+    const queryClient = createProfileQueryClient();
     const invalidation: RealtimeInvalidationHandle =
       installRealtimeInvalidation(queryClient, realtime);
     return {
@@ -106,7 +110,6 @@ export function createProfileClientRegistry(
       clients.set(profile.id, client);
       return client;
     },
-    peekClient: (profileId) => clients.get(profileId) ?? null,
     disposeClient,
     disposeAll() {
       for (const id of Array.from(clients.keys())) disposeClient(id);

@@ -22,15 +22,22 @@ export function formatQueuedMessageCountdown(
   return `in ${Math.floor(remainingMs / DAY_MS)}d`;
 }
 
-export function isQueuedMessageSendNowAllowed(
-  waitingOn: QueuedMessageWaitingOn | null,
-): boolean {
+export function isQueuedMessageSendNowAllowed({
+  waitingOn,
+  failureReason,
+}: {
+  waitingOn: QueuedMessageWaitingOn | null;
+  failureReason: string | null;
+}): boolean {
+  if (failureReason !== null) return true;
   if (waitingOn === null) return true;
   switch (waitingOn.kind) {
     case "provisioning":
     case "host-offline":
     case "interaction":
     case "turn-starting":
+      return false;
+    case "stopping":
       return false;
     case "time":
     case "plugin":
@@ -61,6 +68,7 @@ export function queuedMessageWaitIcon(args: {
   switch (args.waitingOn.kind) {
     case "thread-busy":
       return null;
+    case "stopping":
     case "turn-starting":
       return "TimeSchedule";
     case "time":
@@ -72,7 +80,7 @@ export function queuedMessageWaitIcon(args: {
     case "interaction":
       return "CircleQuestion";
     case "plugin":
-      return "Limitation";
+      return null;
   }
 }
 
@@ -125,6 +133,8 @@ export function describeQueuedMessageWait(
       return null;
     case "turn-starting":
       return "Waiting for turn to start";
+    case "stopping":
+      return "Sending when the thread stops";
     case "time":
       return args.sendAt === null
         ? "Scheduled"
@@ -132,7 +142,7 @@ export function describeQueuedMessageWait(
     case "provisioning":
       return "Waiting for workspace";
     case "host-offline":
-      return `Waiting for ${args.waitingOn.hostName} to reconnect`;
+      return `Waiting for ${args.waitingOn.hostName} to be ready`;
     case "interaction":
       return "Waiting for your reply";
     case "plugin":

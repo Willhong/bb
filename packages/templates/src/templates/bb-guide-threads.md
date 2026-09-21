@@ -12,12 +12,17 @@ Every command supports --json for machine-readable output.
 Spawning:
 
   bb thread spawn --project <id> --prompt "..." [options]
+  bb thread spawn --project <id> --prompt-file <path> [options]
 
-    --prompt <prompt>              Initial prompt (required)
+    --prompt <prompt>              Initial prompt (one of --prompt or --prompt-file is required)
+    --prompt-file <path>           Read the prompt from a file; `-` reads stdin. Use this for
+                                   multi-line or Markdown prompts: inside double quotes the shell
+                                   runs `backticks` and $(...) before bb sees them
     --title <title>                Thread title
-    --project <id>                 Project (required)
+    --project <id>                 Project (required; when omitted the error prints this thread's project ID to add)
     --parent-thread <id>           Parent thread (may be in another project)
     --parent-self                  Parent to the current thread (BB_THREAD_ID)
+    --lifecycle-owner-thread <id>  Archive/delete with this owner
     --provider <id>                Provider override
     --model <model>                Model override
     --reasoning-level <level>      Reasoning level: low, medium, high, xhigh, max (provider-dependent)
@@ -46,8 +51,8 @@ Spawning:
     --section <id>                 Create the thread in a section
     --visibility <visibility>      visible or hidden; a child inherits its parent by default
     --send-at <when>               Dispatch the first message at an ISO 8601 timestamp or a duration from now (30s, 10m, 2h, 7d)
-    --file <path>                  Host-readable absolute or uploaded file path
-    --image <path>                 Host-readable absolute or uploaded image path
+    --file <path>                  CLI-local absolute path, file: URL, or uploaded file path
+    --image <path>                 CLI-local absolute path, file: URL, or uploaded image path
     --origin-kind <kind>           Create a fork thread
     --source-thread <id>           Source thread for a fork
     --source-seq-end <seq>         Fork after the source turn containing this event sequence
@@ -73,7 +78,7 @@ Spawning:
   A machine selector accepts an exact ID or an unambiguous name. It works with
   an unmanaged --environment path, --new-environment worktree, or the personal
   workspace. It cannot be combined with an existing environment ID because that
-  environment already selects its machine. Without the flag, local/primary
+  environment already selects its machine. Without the flag, local/server
   machine resolution is unchanged.
   Omit --base-branch for bb's default. Explicit values are exact; use
   origin/<branch> for a remote ref.
@@ -82,11 +87,23 @@ Spawning:
   unavailable and why. The first-party providers are Project checkout,
   Worktree, and Personal workspace.
 
+Handoff:
+  In the follow-up model picker, Handoff to new thread starts a new-thread
+  draft with a reference to the source thread. Choose any model, including
+  one from the current provider. Exit handoff restores the original execution
+  settings and keeps draft edits, removing the automatic source reference.
+  Closing the picker keeps handoff active; the composer also has Exit handoff.
+  CLI callers can use bb thread spawn with --provider, --model, --environment
+  and --prompt 'Continue from @thread:THREAD_ID ...'. SDK callers use
+  threads.spawn with the corresponding execution, environment and input fields.
+
 Forking:
 
   bb thread fork <source-thread-id> [options]
 
     --prompt <prompt>              Optional first prompt; omit for an idle fork
+    --prompt-file <path>           Read the first prompt from a file; `-` reads stdin
+    --lifecycle-owner-thread <id>  Archive/delete with this owner
     --source-seq-end <seq>         Fork after the source turn containing this event sequence (tip by default)
     --environment <id-or-path>     Existing environment ID or unmanaged workspace path
     --new-environment <kind>       Create a fresh personal workspace or managed worktree
@@ -95,8 +112,8 @@ Forking:
     --permission-mode <mode>       Inherit source by default; accepts accept-edits, auto, full
     --visibility <visibility>      visible (default) or hidden
     --agent-context-seed <text>    Persist agent-only context without a first run
-    --file <path>                  Host-readable absolute or uploaded file path
-    --image <path>                 Host-readable absolute or uploaded image path
+    --file <path>                  CLI-local absolute path, file: URL, or uploaded file path
+    --image <path>                 CLI-local absolute path, file: URL, or uploaded image path
 
   Forks clone the source provider session on the same machine and inherit the
   source conversation in their timeline. --source-seq-end anchors the fork on
@@ -126,6 +143,9 @@ Editing a sent message:
   replaces the selected turn and every later turn while retaining workspace
   changes. From an agent thread, the command carries `BB_THREAD_ID` so the
   replacement runs under agent permission policy.
+  An edit is refused if removing its history would erase ownership evidence
+  shared with another thread. Use bb thread clear <id> to start a new session
+  while keeping the history and its ownership evidence.
 
 Listing:
 
@@ -170,6 +190,7 @@ Sections:
 
 Inspecting:
 
+  bb thread context [id]                   Show recorded context usage and available breakdown (--self, --json)
   bb thread show [id]                      Show thread details and pull request status
     --self                                 Target current thread
     --work-status                          Include git working-tree status
@@ -199,10 +220,13 @@ Inspecting:
   bb thread wait <id>                      Wait for a thread status or event (defaults to --status idle)
     --status <status>                      Wait for this status
     --event <type>                         Wait for this event type
-    --timeout <seconds>                    Timeout in seconds (default: 1200 / 20 min)
-    --poll-interval <ms>                   Polling interval in milliseconds
+    --timeout <duration>                   Seconds, or a duration with a unit: 90s, 20m, 4h (default: 1200s / 20 min)
+    --poll-interval <duration>             Milliseconds, or a duration with a unit
 
 Opening threads and files in the app:
+
+  In chat, reference a thread as @thread:thr_abc123, substituting its actual ID.
+  BB renders the correct project-aware link; do not construct thread URLs manually.
 
   bb thread open <path>                    Open a file in the current BB thread panel
   bb thread open <thread-id> [path]        Open a thread, optionally with a panel file
@@ -227,13 +251,17 @@ Opening threads and files in the app:
 Messaging:
 
   bb thread tell <id> <message>            Send a follow-up message
+  bb thread tell <id> --message-file <path>
+                                           Read the message from a file; `-` reads stdin. Use this for
+                                           multi-line or Markdown messages: inside double quotes the
+                                           shell runs `backticks` and $(...) before bb sees them
     --mode <mode>                          Message mode: steer (default), queue, or auto
     --model <model>                        Model override for this turn
     --reasoning-level <level>              Reasoning level override
     --plan                                 Send the message as the provider's /plan action
     --send-at <when>                       Dispatch at an ISO 8601 timestamp or a duration from now (30s, 10m, 2h, 7d)
-    --file <path>                          Host-readable absolute or uploaded file path
-    --image <path>                         Host-readable absolute or uploaded image path
+    --file <path>                          CLI-local absolute path, file: URL, or uploaded file path
+    --image <path>                         CLI-local absolute path, file: URL, or uploaded image path
 
   Tell steers by default, delivering the message immediately into the active
   turn. Use --mode queue for non-urgent follow-ups that can wait until the agent
@@ -283,6 +311,10 @@ Ownership:
     --model <model>                        Set the sticky model for the next and later turns
     --reasoning-level <level>              Set the sticky reasoning level (provider-dependent)
     --visibility <visibility>              Set visible or hidden
+
+  Clearing a parent inherits the former parent's section unless --section or
+  --clear-section is also supplied. Children released by environment archiving
+  also inherit their former parent's section.
 
   Model and reasoning updates stay within the thread's current provider. BB
   validates them against that provider's current model catalog, applies them on
@@ -334,6 +366,11 @@ Queued messages:
   queued row in the workspace; `--wait-holder plugin:<plugin-id>` narrows it to
   the rows one plugin is holding.
 
+  Failed rows show their failure reason instead of their previous wait, followed
+  by a recovery command: `bb thread queue send <thread-id> <message-id>`.
+  Use it to retry immediately, including after automatic retries are exhausted.
+  Editing the message does not clear its failure or trigger a retry.
+
   `queue send` dispatches a row now, bypassing every plugin wait and its own
   schedule — the invariants (a running turn, an unfinished workspace, an
   unanswered interaction) still apply, and a message that hits one simply queues
@@ -379,7 +416,12 @@ Lifecycle:
   The command succeeds when no runtime is loaded. Archive a finished hidden
   worker first, then stop it to release memory promptly. A stop that only
   releases an idle runtime adds no interruption: it leaves the timeline and any
-  pending interaction of that thread untouched.
+  pending interaction of that thread untouched. An explicit stop wins over work
+  that is still running: when the machine still runs a turn for a thread the app
+  shows as idle or failed, or a turn starts while the stop is being delivered,
+  the stop interrupts that turn and waits for the attempt. If the interrupt
+  fails, the thread remains stopping; check `bb thread show <id> --json` before
+  treating the stop as confirmed.
 
   bb thread unarchive [id]                 Unarchive a thread
     --self                                 Unarchive current thread
@@ -393,3 +435,19 @@ Lifecycle:
 
 Read-only commands require a thread ID or --self where supported.
 Mutating thread lifecycle and messaging commands require an explicit ID or --self.
+
+`bb thread context [id]` reads the latest stored context measurement without
+starting a provider request. Use `--self` for the current thread and `--json` for
+`{ usage: ... }` (`null` when unavailable). Claude Code refreshes the estimated
+breakdown after turns and compaction when its SDK supports context inspection.
+A later aggregate-only measurement replaces any older breakdown. Other providers
+continue to expose their available totals.
+
+Lifecycle ownership:
+  spawn and fork accept --lifecycle-owner-thread <id>. SDK arguments use
+  lifecycleOwnerThreadId, also returned in thread responses (null if independent).
+  The owner must be live; projects, hosts and environments may differ.
+  Ownership is immutable. Archive recursively archives/stops dependents; delete
+  recursively deletes them after runtime/storage cleanup. Failed cleanup retries
+  durably. Unarchive the owner before explicitly restoring a dependent. Stop does
+  not cascade. Sidebar parents and ordinary forks retain their existing policies.

@@ -47,10 +47,6 @@ export type TimelineQuestionViewWorkRow = Extract<
   TimelineViewWorkRow,
   { workKind: "question" }
 >;
-export type TimelineImageViewViewWorkRow = Extract<
-  TimelineViewWorkRow,
-  { workKind: "image-view" }
->;
 export type TimelineViewWorkflowWorkRow = Extract<
   TimelineViewWorkRow,
   { workKind: "workflow" }
@@ -88,8 +84,6 @@ export interface TimelineBundleSummaryRow extends TimelineRowBase {
 export type TimelineWorkSummaryRow =
   | TimelineStepSummaryRow
   | TimelineBundleSummaryRow;
-
-export type TimelineWorkSummaryKind = TimelineWorkSummaryRow["kind"];
 
 export interface TimelineViewTurnRow extends Omit<TimelineTurnRow, "children"> {
   children: ThreadTimelineViewRow[] | null;
@@ -300,6 +294,7 @@ function summarizeTimelineWork(
         counts.delegations += 1;
         break;
       case "question":
+      case "form":
       case "approval":
       case "workflow":
         break;
@@ -375,6 +370,7 @@ function approvalStatusSummaryLabel(
         break;
       case "approval":
       case "question":
+      case "form":
       case "delegation":
       case "extension":
       case "file-read":
@@ -441,6 +437,7 @@ function getTimelineWorkSummaryCategory(
       return "delegations";
     case "approval":
     case "question":
+    case "form":
     case "workflow":
       return null;
     default:
@@ -785,6 +782,7 @@ function rowConcept(row: TimelineViewWorkRow): TimelineWorkSummaryCategory {
       return "imageViews";
     case "approval":
     case "question":
+    case "form":
     case "workflow":
       return "tools";
     default:

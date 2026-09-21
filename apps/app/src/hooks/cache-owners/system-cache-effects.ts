@@ -1,4 +1,6 @@
 import type { QueryKey } from "@tanstack/react-query";
+import type { Environment, Host } from "@bb/domain";
+import type { SystemConfigResponse } from "@bb/server-contract";
 import {
   allEnvironmentDiffFilesQueryKeyPrefix,
   allEnvironmentDiffPatchQueryKeyPrefix,
@@ -7,8 +9,10 @@ import {
   allEnvironmentQueryKeyPrefix,
   allEnvironmentWorkStatusQueryKeyPrefix,
   allHostQueryKeyPrefix,
+  allMachineEnvironmentQueryKeyPrefix,
   allProjectPathsQueryKeyPrefix,
   allSystemExecutionOptionsQueryKeyPrefix,
+  allSystemMachineProvidersQueryKeyPrefix,
   allSystemProvidersQueryKeyPrefix,
   allSystemThemesQueryKeyPrefix,
   allTerminalsQueryKeyPrefix,
@@ -24,9 +28,11 @@ import {
   allThreadStoragePathsQueryKeyPrefix,
   allThreadTimelineQueryKeyPrefix,
   allThreadTimelineTurnSummaryDetailsQueryKeyPrefix,
+  environmentQueryKey,
   hostPathExistenceQueryKeyPrefix,
   hostsQueryKey,
   projectsQueryKey,
+  serverMoveStatusQueryKey,
   sidebarNavigationQueryKey,
   systemConfigQueryKey,
   threadPromptHistoryQueryKeyPrefix,
@@ -105,6 +111,15 @@ export function invalidateSystemConfig({ queryClient }: QueryClientArg): void {
   });
 }
 
+export function invalidateMachineEnvironment({
+  queryClient,
+}: QueryClientArg): void {
+  invalidateQueryKeys({
+    queryClient,
+    queryKeys: [allMachineEnvironmentQueryKeyPrefix()],
+  });
+}
+
 export function invalidateSystemProviders({
   queryClient,
 }: QueryClientArg): Promise<void> {
@@ -113,14 +128,34 @@ export function invalidateSystemProviders({
   });
 }
 
+export function invalidateMachineProviders({
+  queryClient,
+}: QueryClientArg): Promise<void> {
+  return queryClient.invalidateQueries({
+    queryKey: allSystemMachineProvidersQueryKeyPrefix(),
+  });
+}
+
 export function invalidateSystemExecutionOptions({
   hostId,
   queryClient,
 }: SystemExecutionOptionsInvalidationArgs): Promise<void> {
+  const primaryHostId =
+    queryClient.getQueryData<SystemConfigResponse>(systemConfigQueryKey())
+      ?.primaryHostId ?? null;
   return queryClient.invalidateQueries({
     queryKey: allSystemExecutionOptionsQueryKeyPrefix(),
-    predicate: (query) =>
-      query.queryKey[2] === hostId || query.queryKey[2] === null,
+    predicate: (query) => {
+      const [, environmentId, routedHostId] = query.queryKey;
+      if (typeof routedHostId === "string") return routedHostId === hostId;
+      if (typeof environmentId === "string") {
+        const environment = queryClient.getQueryData<Environment>(
+          environmentQueryKey(environmentId),
+        );
+        return environment === undefined || environment.hostId === hostId;
+      }
+      return primaryHostId === null || primaryHostId === hostId;
+    },
   });
 }
 
@@ -178,5 +213,15 @@ function getServerReconnectInvalidationQueryKeys(): QueryKey[] {
     hostPathExistenceQueryKeyPrefix(),
     allSystemProvidersQueryKeyPrefix(),
     allSystemExecutionOptionsQueryKeyPrefix(),
+    serverMoveStatusQueryKey(),
   ];
+}
+
+export function applyHostRenameResult({
+  host,
+  queryClient,
+}: QueryClientArg & { host: Host }): void {
+  queryClient.setQueryData<Host[]>(hostsQueryKey(), (hosts) =>
+    hosts?.map((current) => (current.id === host.id ? host : current)),
+  );
 }

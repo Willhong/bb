@@ -9,6 +9,9 @@ Read the installed declarations for exact current signatures.
 - `PLUGIN_CLI_OUTPUT_MAX_BYTES`
 - `defineRpcContract`
 - `experimental_defineHostEntry`
+- `defineCli`
+- `cliCommand`
+- `PluginCliError`
 - `BbContext`
 - `BbNavigate`
 - `BbPluginApi`
@@ -62,6 +65,7 @@ Read the installed declarations for exact current signatures.
 - `ExperimentalProviderModelPickerRouting`
 - `ExperimentalProviderModelPickerValue`
 - `JsonValue`
+- `ReadonlyJsonValue` — deep-readonly JSON, e.g. `context.pluginMetadata` values
 - `MarkdownProps`
 - `NewThreadComposerProps`
 - `NewThreadRequest`
@@ -73,6 +77,17 @@ Read the installed declarations for exact current signatures.
 - `PluginDispatchExecutionSources`
 - `PluginEnvironments` — `bb.experimental_environments`: `register` +
   `recheck` (see backend-events.md, environment providers)
+- `PluginServerAccess` — `bb.experimental_serverAccess.register`
+- `ServerAccessProviderDeclaration`
+- `ServerAccessGrant`
+- `PluginMachineProviderResource` — non-null JSON persisted by machine checkpoints and lifecycle results
+- `PluginMachines` — `bb.experimental_machines.register` and bootstrap helper (see backend-machines.md)
+- `MachineExecutorRequest` — argv, timeout, signal, optional private stdin
+- `MachineExecutor` — transport exec
+- `MachineBootstrapRequest` — durable key, optional executor and access selection, report, signal
+- `MachineBootstrapApi` — bootstrap
+- `PluginMachineProviderDeclaration`
+- `PluginMachineValidateDecision`
 - `PluginEnvironmentProviderDeclaration`
 - `PluginEnvironmentProviderRequirements` — `requires`, e.g.
   `{ gitCheckout: true }`; also `projectCheckout`, `gitRemote` and `projectless`.
@@ -86,12 +101,11 @@ Read the installed declarations for exact current signatures.
 - `PluginHooks`
 - `PluginTurnFailedEvent`
 - `ExperimentalComposerSubmitOptions`
+- `ExperimentalComposerSelection`
 - `PluginAgentConfiguration`
 - `PluginAgentConfigurationContext`
 - `PluginAgentToolContentPart`
 - `PluginAgentToolContext`
-- `PluginAgentToolLabels`
-- `PluginAgentToolPresentation`
 - `PluginAgentToolRegistrationBase`
 - `PluginAgentToolResult`
 - `PluginAgentToolSelection`
@@ -106,18 +120,37 @@ Read the installed declarations for exact current signatures.
 - `PluginAppSetup`
 - `PluginAppSlots`
 - `PluginBackground`
+- `PluginBbSdk` — `bb.sdk`; thread plugin metadata calls default `pluginId`
+  (see backend-sdk.md)
 - `PluginCli`
+- `PluginCliBooleanOption`
+- `PluginCliCommand`
 - `PluginCliCommandInfo`
+- `PluginCliConstraint`
 - `PluginCliContext`
+- `PluginCliDurationOption`
+- `PluginCliDurationUnit`
+- `PluginCliEnumOption`
+- `PluginCliErrorCode`
 - `PluginCliExecutionResult`
+- `PluginCliIntegerOption`
+- `PluginCliOption`
+- `PluginCliOptionValues`
 - `PluginCliOutputLimitError`
+- `PluginCliPositional`
+- `PluginCliPositionalValues`
 - `PluginCliRegistration`
 - `PluginCliResult`
+- `PluginCliRunInput`
+- `PluginCliSpec`
+- `PluginCliStringOption`
 - `PluginCodeThemeData`
 - `PluginCodeThemeState`
 - `PluginCodeThemeTokenRule`
-- `PluginCommandPaletteActionContext`
-- `PluginCommandPaletteActionRegistration`
+- `PluginAppCommands`
+- `PluginCommandContext`
+- `PluginCommandShortcut`
+- `PluginCommandRegistration`
 - `PluginComposerApi`
 - `PluginComposerMention`
 - `PluginComposerScope`
@@ -141,11 +174,13 @@ Read the installed declarations for exact current signatures.
 - `PluginHttpAuthMode`
 - `PluginHttpHandler`
 - `PluginInteractionCancelReason`
+- `PluginInteractionDescription`
 - `PluginInteractionRequest`
 - `PluginInteractionResult`
 - `PluginKvStorage`
 - `PluginLogger`
 - `PluginMentionItem`
+- `ExperimentalPluginMentionImage`
 - `PluginMentionProviderRegistration`
 - `PluginMentionSearchContext`
 - `PluginMentionTrigger`
@@ -165,6 +200,7 @@ Read the installed declarations for exact current signatures.
 - `PluginPendingInteractionRegistration`
 - `PluginPendingInteractionView`
 - `PluginProviderCapabilities`
+- `PluginProviderCompletedTurnDisplay`
 - `PluginProviderComposerAction`
 - `PluginProviderDeclaration`
 - `ExperimentalPluginProviderEnvContext`
@@ -187,6 +223,8 @@ Read the installed declarations for exact current signatures.
 - `PluginProvidersState`
 - `PluginRealtime`
 - `PluginRealtimeConnectionState`
+- `PluginRowLabels`
+- `PluginRowPresentation`
 - `PluginRpc`
 - `PluginRpcCallArgs`
 - `PluginRpcClient`
@@ -278,6 +316,23 @@ Read the installed declarations for exact current signatures.
 - `PluginEnvironmentProviderRemoveContext` — includes the private
   `resource` returned by the launch that made the environment
 - `PluginEnvironmentProviderRemoveResult`
+
+## `@get-bb/plugin-sdk/machine-provider`
+
+- `PluginMachineProviderDefinition` — id, display, description, icon, inputs,
+  availability, validation, create, optional paired suspend/resume,
+  `ephemeral` automatic retirement policy, and remove
+- `PluginMachineProviderInputsSchema`
+- `PluginMachineProviderAvailability`
+- `PluginMachineProviderValidateContext`
+- `PluginMachineProviderCreateContext` — async `checkpoint(resource)` after
+  preparing enrollment and allocating, before bootstrap; never bundle credentials
+- `PluginMachineProviderCreateResult`
+- `PluginMachineProviderLifecycleContext` — shared create, suspend and resume
+  context with a durable `checkpoint` resource callback
+- `PluginMachineProviderProgress`
+- `PluginMachineProviderResourceResult`
+- `PluginMachineProviderRemoveResult`
 
 ## `@get-bb/plugin-sdk/ai-services`
 

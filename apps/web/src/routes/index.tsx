@@ -1,31 +1,29 @@
-import {
-  ArrowDown01Icon,
-  ArrowExpand01Icon,
-  ArrowLeft01Icon,
-  ArrowMoveDownLeftIcon,
-  ArrowRight01Icon,
-  AttachmentIcon,
-  BubbleChatAddIcon,
-  CheckmarkCircle02Icon,
-  Clock01Icon,
-  FolderGitTwoIcon,
-  FolderIcon as HiFolderIcon,
-  GitBranchIcon as HiGitBranchIcon,
-  GitMergeIcon as HiGitMergeIcon,
-  LaptopIcon as HiLaptopIcon,
-  Loading03Icon,
-  MessageQuestionIcon,
-  Mic02Icon,
-  MoreHorizontalIcon,
-  PauseIcon,
-  PlayIcon,
-  PlusMinusSquare01Icon,
-  SentIcon,
-  Settings01Icon,
-  SidebarLeftIcon,
-  SidebarRightIcon,
-  Tick02Icon,
-} from "@hugeicons/core-free-icons";
+import ArrowDown01Icon from "@hugeicons/core-free-icons/ArrowDown01Icon";
+import ArrowExpand01Icon from "@hugeicons/core-free-icons/ArrowExpand01Icon";
+import ArrowLeft01Icon from "@hugeicons/core-free-icons/ArrowLeft01Icon";
+import ArrowMoveDownLeftIcon from "@hugeicons/core-free-icons/ArrowMoveDownLeftIcon";
+import ArrowRight01Icon from "@hugeicons/core-free-icons/ArrowRight01Icon";
+import AttachmentIcon from "@hugeicons/core-free-icons/AttachmentIcon";
+import BubbleChatAddIcon from "@hugeicons/core-free-icons/BubbleChatAddIcon";
+import CheckmarkCircle02Icon from "@hugeicons/core-free-icons/CheckmarkCircle02Icon";
+import Clock01Icon from "@hugeicons/core-free-icons/Clock01Icon";
+import FolderGitTwoIcon from "@hugeicons/core-free-icons/FolderGit2Icon";
+import HiFolderIcon from "@hugeicons/core-free-icons/Folder01Icon";
+import HiGitBranchIcon from "@hugeicons/core-free-icons/GitBranchIcon";
+import HiGitMergeIcon from "@hugeicons/core-free-icons/GitMergeIcon";
+import HiLaptopIcon from "@hugeicons/core-free-icons/LaptopIcon";
+import Loading03Icon from "@hugeicons/core-free-icons/Loading03Icon";
+import MessageQuestionIcon from "@hugeicons/core-free-icons/MessageQuestionIcon";
+import Mic02Icon from "@hugeicons/core-free-icons/Mic02Icon";
+import MoreHorizontalIcon from "@hugeicons/core-free-icons/MoreHorizontalIcon";
+import PauseIcon from "@hugeicons/core-free-icons/PauseIcon";
+import PlayIcon from "@hugeicons/core-free-icons/PlayIcon";
+import PlusMinusSquare01Icon from "@hugeicons/core-free-icons/PlusMinusSquare01Icon";
+import SentIcon from "@hugeicons/core-free-icons/SentIcon";
+import Settings01Icon from "@hugeicons/core-free-icons/Settings01Icon";
+import SidebarLeftIcon from "@hugeicons/core-free-icons/SidebarLeftIcon";
+import SidebarRightIcon from "@hugeicons/core-free-icons/SidebarRightIcon";
+import Tick02Icon from "@hugeicons/core-free-icons/Tick02Icon";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -33,7 +31,7 @@ import type { CSSProperties, ReactNode } from "react";
 
 import changelogMd from "../../../../CHANGELOG.md?raw";
 import { RELEASE_META } from "../../../../changelog-metadata";
-import { initAnalytics, trackLandingEvent } from "../landing/analytics";
+import { trackLandingEvent, useInitAnalytics } from "../landing/analytics";
 import blackstoneLogo from "../assets/company-logos/blackstone.png";
 import datadogLogo from "../assets/company-logos/datadog.svg";
 import figmaLogo from "../assets/company-logos/figma.svg";
@@ -47,14 +45,15 @@ import shortcutLogo from "../assets/company-logos/shortcut.svg";
 import simileLogo from "../assets/company-logos/simile.svg";
 import hermesAvatar from "../assets/hermes-avatar.jpg";
 import vscodeIcon from "../assets/vscode.png";
-import { parseChangelog } from "../landing/changelog";
+import { parseChangelog } from "../../../../changelog-parser";
 import { CommandButton } from "../landing/command-button";
 import {
   DiscordLink,
   DownloadLink,
-  EmailSignup,
   GitHubLink,
+  SubscribeSection,
 } from "../landing/cta";
+import { siteHeadLinks } from "../landing/page-head";
 import { SiteFooter, SiteNav } from "../landing/site-chrome";
 import { useDesktopPlatform } from "../landing/desktop-platform";
 import {
@@ -77,8 +76,6 @@ import {
   SITE_TITLE,
   unfurlMeta,
 } from "../landing/site";
-import interWoff2 from "@fontsource-variable/inter/files/inter-latin-wght-normal.woff2?url";
-import landingCss from "../landing/landing.css?url";
 
 const COMPANY_PROOF = [
   ["Meta", metaLogo, "glyph"],
@@ -132,24 +129,13 @@ export const Route = createFileRoute("/")({
       { name: "description", content: SITE_DESCRIPTION },
       ...unfurlMeta("bb", OG_DESCRIPTION, "/"),
     ],
-    links: [
-      {
-        rel: "preload",
-        href: interWoff2,
-        as: "font",
-        type: "font/woff2",
-        crossOrigin: "anonymous",
-      },
-      { rel: "stylesheet", href: landingCss },
-    ],
+    links: siteHeadLinks(),
   }),
   component: LandingRoute,
 });
 
 function LandingRoute() {
-  useEffect(() => {
-    initAnalytics();
-  }, []);
+  useInitAnalytics();
   return <LandingPage />;
 }
 
@@ -1782,11 +1768,12 @@ function LandingPage() {
         </div>
       </section>
 
-      <section className="subscribe" data-reveal>
-        <h2 className="subscribe-title">Stay in the loop.</h2>
-        <p>Product updates and what we&rsquo;re building next. No spam.</p>
-        <EmailSignup placement="footer" />
-      </section>
+      <SubscribeSection
+        reveal
+        blurb={
+          <>Product updates and what we&rsquo;re building next. No spam.</>
+        }
+      />
 
       <SiteFooter />
     </div>

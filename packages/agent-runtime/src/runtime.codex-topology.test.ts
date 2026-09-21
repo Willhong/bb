@@ -11,6 +11,7 @@ import {
   fullRuntimeOptions,
   waitForRuntimeState,
   waitForThreadAgentMessageText,
+  waitForThreadTurnCompleted,
   withBridgeLaunch,
   type LaunchBoundAgentRuntime,
 } from "./test/runtime-test-harness.js";
@@ -149,6 +150,41 @@ describe("codex process topology", () => {
     });
     return providerThreadId;
   }
+
+  it("keeps a fork checkpoint paired with its session after another thread starts", async () => {
+    const { runtime, events } = createCodexTopologyRuntime();
+    const source = await runtime.startThread({
+      environmentId: "env-1",
+      providerId: "codex",
+      threadId: "source",
+      projectId: "p1",
+      options: fullRuntimeOptions,
+      fork: { sourceProviderThreadId: "historical-session" },
+    });
+    const sibling = await startCodexThread(runtime, "sibling");
+    await runtime.runTurn({
+      clientRequestId: "creq_cdxtpgy328",
+      threadId: "source",
+      input: [promptTextInput({ text: "continue source" })],
+      options: fullRuntimeOptions,
+    });
+    await waitForThreadTurnCompleted({
+      events,
+      providerId: "codex",
+      runtime,
+      threadId: "source",
+    });
+    expect(source.providerThreadId).not.toBe(sibling);
+    expect(
+      events.find((event) => event.type === "turn/completed"),
+    ).toMatchObject({
+      providerThreadId: source.providerThreadId,
+      providerCheckpointId: "turn-fx-1",
+    });
+    expect(runtime.getProviderSession("source")?.providerThreadId).toBe(
+      source.providerThreadId,
+    );
+  });
 
   it("runs N codex threads on one bridge process with one app-server child each, and reaps the children on stop, archive, and bridge retirement", async () => {
     const topology = createCodexTopologyRuntime();
@@ -372,93 +408,6 @@ describe("codex process topology", () => {
     });
     expect(runtime.hasThread("t1")).toBe(false);
     expect(runtime.hasThread("t2")).toBe(false);
-  }, 30_000);
-  it("refuses to resume a provider thread that another hosted thread already owns", async () => {
-    const topology = createCodexTopologyRuntime();
-    const { runtime } = topology;
-
-    const providerThreadId1 = await startCodexThread(runtime, "t1");
-
-    await expect(
-      runtime.resumeThread({
-        environmentId: "env-1",
-        projectId: "p1",
-        providerId: "codex",
-        providerThreadId: providerThreadId1,
-        threadId: "t2",
-        options: fullRuntimeOptions,
-      }),
-    ).rejects.toThrow(
-      `provider thread "${providerThreadId1}" is already hosted by thread "t1"`,
-    );
-    expect(runtime.hasThread("t2")).toBe(false);
-    expect(runtime.getProviderSession("t1")?.providerThreadId).toBe(
-      providerThreadId1,
-    );
-    expect(topology.spawned()).toBe(1);
-  }, 30_000);
-
-  it("keeps a rewound thread's provider identity when another thread starts on the same bridge", async () => {
-    const topology = createCodexTopologyRuntime();
-    const { runtime, events } = topology;
-
-    const originalProviderThreadId1 = await startCodexThread(runtime, "t1");
-    const staged = await runtime.prepareThreadRewind({
-      environmentId: "env-1",
-      threadId: "t1",
-      leaseId: "lease-1",
-      projectId: "p1",
-      providerId: "codex",
-      sourceProviderThreadId: originalProviderThreadId1,
-      retainThroughProviderCheckpoint: "turn-1",
-      options: fullRuntimeOptions,
-      instructionMode: "append",
-    });
-    const { providerThreadId: providerThreadId1 } = await runtime.startThread({
-      environmentId: "env-1",
-      projectId: "p1",
-      providerId: "codex",
-      threadId: "t1",
-      options: fullRuntimeOptions,
-      fork: { sourceProviderThreadId: staged.providerThreadId },
-    });
-    await runtime.discardThreadRewind({ leaseId: "lease-1" });
-    expect(providerThreadId1).not.toBe(originalProviderThreadId1);
-    const eventsBeforeSecondStart = events.length;
-
-    const providerThreadId2 = await startCodexThread(runtime, "t2");
-    expect(providerThreadId2).not.toBe(providerThreadId1);
-    expect(runtime.getProviderSession("t1")?.providerThreadId).toBe(
-      providerThreadId1,
-    );
-    expect(runtime.getProviderSession("t2")?.providerThreadId).toBe(
-      providerThreadId2,
-    );
-
-    await runtime.runTurn({
-      clientRequestId: "creq_cdxidnty22",
-      threadId: "t1",
-      input: [promptTextInput({ text: "hello" })],
-      options: fullRuntimeOptions,
-    });
-    await waitForThreadAgentMessageText({
-      events,
-      providerId: "codex",
-      runtime,
-      text: "hello from codex turn",
-      threadId: "t1",
-    });
-    const stampedProviderThreadIds = new Set(
-      events
-        .slice(eventsBeforeSecondStart)
-        .filter((event) => event.threadId === "t1")
-        .flatMap((event) =>
-          "providerThreadId" in event && event.providerThreadId
-            ? [event.providerThreadId]
-            : [],
-        ),
-    );
-    expect([...stampedProviderThreadIds]).toEqual([providerThreadId1]);
   }, 30_000);
 });
 

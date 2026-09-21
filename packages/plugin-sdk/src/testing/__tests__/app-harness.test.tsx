@@ -326,6 +326,9 @@ let capturedComposerVisualSetters: Pick<
   PluginComposerApi,
   "setTextEffect" | "setInputLock"
 > | null = null;
+let capturedComposerSetSelection:
+  | PluginComposerApi["experimental_setSelection"]
+  | null = null;
 
 function InlineVis({
   attributes,
@@ -348,6 +351,7 @@ function ComposerProbe() {
     setTextEffect: composer.setTextEffect,
     setInputLock: composer.setInputLock,
   };
+  capturedComposerSetSelection = composer.experimental_setSelection;
   return (
     <div>
       <span data-testid="composer-scope">{composer.scope.kind}</span>
@@ -1233,10 +1237,56 @@ describe("loadPluginApp", () => {
     ).rejects.toThrow('slots.messageAction: duplicate id "dup"');
   });
 
+  it("collects separate provider kinds and the legacy all-kinds registration", async () => {
+    const captured = await loadPluginApp(
+      definePluginApp((builder) => {
+        for (const providerKind of [
+          "agent",
+          "machine",
+          "environment",
+        ] as const) {
+          builder.slots.experimental_providerIcon({
+            providerKind,
+            providerId: "shared",
+            icon: () => null,
+          });
+        }
+        // @ts-expect-error legacy plugin declaration
+        builder.slots.experimental_providerIcon({
+          providerId: "shared",
+          icon: () => null,
+        });
+      }),
+    );
+    expect(
+      captured.providerIcons.map(({ providerKind }) => providerKind),
+    ).toEqual(["agent", "machine", "environment", "all"]);
+  });
+
+  it.each([null, "all", "unknown", 7])(
+    "rejects an explicit invalid provider kind %j",
+    async (providerKind) => {
+      await expect(
+        loadPluginApp(
+          definePluginApp((builder) => {
+            const registration = {
+              providerKind: "agent" as const,
+              providerId: "shared",
+              icon: () => null,
+            };
+            Reflect.set(registration, "providerKind", providerKind);
+            builder.slots.experimental_providerIcon(registration);
+          }),
+        ),
+      ).rejects.toThrow("providerKind");
+    },
+  );
+
   it("validates experimental_providerIcon registrations like the host", async () => {
     const captured = await loadPluginApp(
       definePluginApp((builder) => {
         builder.slots.experimental_providerIcon({
+          providerKind: "agent",
           providerId: "acp-cursor",
           icon: () => null,
         });
@@ -1248,6 +1298,7 @@ describe("loadPluginApp", () => {
       loadPluginApp(
         definePluginApp((builder) => {
           builder.slots.experimental_providerIcon({
+            providerKind: "agent",
             providerId: "bb-plugin-x/codex",
             icon: () => null,
           });
@@ -1260,16 +1311,20 @@ describe("loadPluginApp", () => {
       loadPluginApp(
         definePluginApp((builder) => {
           builder.slots.experimental_providerIcon({
+            providerKind: "agent",
             providerId: "codex",
             icon: () => null,
           });
           builder.slots.experimental_providerIcon({
+            providerKind: "agent",
             providerId: "codex",
             icon: () => null,
           });
         }),
       ),
-    ).rejects.toThrow('slots.experimental_providerIcon: duplicate id "codex"');
+    ).rejects.toThrow(
+      'slots.experimental_providerIcon: duplicate id "agent:codex"',
+    );
   });
 
   it("invokes a captured messageAction run with a plugin-authored context", () => {
@@ -1693,6 +1748,68 @@ describe("renderSlot", () => {
       { provider: "notes", id: "ideas", label: "Ideas" },
     ]);
     expect(slot.composer.focusCount).toBe(3);
+  });
+
+  it("records accepted selections and echoes back what the scope has pickers for", async () => {
+    const threadSlot = renderSlot(
+      app.composerCustomizations[0]!.actions![0]!,
+      {},
+      { context: { projectId: "proj_1", threadId: "thr_1" } },
+    );
+    const setSelection = capturedComposerSetSelection;
+    if (setSelection === null) throw new Error("setSelection not captured");
+
+    await expect(
+      setSelection({
+        projectId: "proj_2",
+        environment: { type: "project-default" },
+        providerId: "codex",
+        model: "gpt-5",
+        reasoningLevel: "high",
+      }),
+    ).resolves.toEqual({
+      providerId: "codex",
+      model: "gpt-5",
+      reasoningLevel: "high",
+    });
+    expect(threadSlot.composer.selections).toEqual([
+      { providerId: "codex", model: "gpt-5", reasoningLevel: "high" },
+    ]);
+    threadSlot.unmount();
+
+    const newThreadSlot = renderSlot(
+      app.composerCustomizations[0]!.actions![0]!,
+      {},
+      { context: { projectId: "proj_1" } },
+    );
+    await expect(
+      capturedComposerSetSelection!({ projectId: "proj_2", model: "gpt-5" }),
+    ).resolves.toEqual({ projectId: "proj_2", model: "gpt-5" });
+    expect(newThreadSlot.composer.selections).toEqual([
+      { projectId: "proj_2", model: "gpt-5" },
+    ]);
+    newThreadSlot.unmount();
+
+    const sideChatSlot = renderSlot(
+      app.composerCustomizations[0]!.actions![0]!,
+      {},
+      {
+        composer: {
+          scope: {
+            kind: "side-chat",
+            projectId: "proj_1",
+            parentThreadId: "thr_1",
+            tabId: "tab_1",
+            childThreadId: null,
+          },
+        },
+      },
+    );
+    await expect(
+      capturedComposerSetSelection!({ model: "gpt-5" }),
+    ).rejects.toThrow(/no pickers/);
+    expect(sideChatSlot.composer.selections).toEqual([]);
+    sideChatSlot.unmount();
   });
 
   it("invalidates visual-state setters through both unmount controls", () => {

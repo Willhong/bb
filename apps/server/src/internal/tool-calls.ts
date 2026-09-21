@@ -12,6 +12,8 @@ import {
   findPluginAgentTool,
   invokePluginAgentTool,
 } from "../services/plugins/plugin-agent-contributions.js";
+import { deliverDetachedToolResult } from "../services/plugins/detached-tool-result-delivery.js";
+import { requirePluginToolCallRegistry } from "../services/plugins/plugin-tool-calls.js";
 import {
   handleUpdateEnvironmentDirectoryToolCall,
   UPDATE_ENVIRONMENT_DIRECTORY_TOOL_NAME,
@@ -20,8 +22,14 @@ import { requireAuthenticatedDaemonSession } from "./session-state.js";
 
 const textEncoder = new TextEncoder();
 
-function streamToolCallResponse(result: Promise<ToolCallResponse>): Response {
+function streamToolCallResponse(
+  result: Promise<ToolCallResponse>,
+  abortController: AbortController,
+): Response {
   const body = new ReadableStream<Uint8Array>({
+    cancel() {
+      abortController.abort();
+    },
     start(controller) {
       void result.then(
         (response) => {
@@ -80,16 +88,34 @@ export function registerInternalToolCallRoutes(app: Hono, deps: AppDeps): void {
 
       const pluginTool = findPluginAgentTool(payload.tool);
       if (pluginTool) {
-        return streamToolCallResponse(
-          invokePluginAgentTool(pluginTool, {
-            input: payload.arguments,
-            ctx: {
+        const roundTrip = new AbortController();
+        const response = requirePluginToolCallRegistry().run({
+          pluginId: pluginTool.pluginId,
+          threadId: thread.id,
+          callId: payload.callId,
+          toolName: payload.tool,
+          roundTrip: AbortSignal.any([
+            context.req.raw.signal,
+            roundTrip.signal,
+          ]),
+          invoke: (signal) =>
+            invokePluginAgentTool(pluginTool, {
+              input: payload.arguments,
+              ctx: {
+                threadId: thread.id,
+                projectId: thread.projectId,
+                signal,
+              },
+            }),
+          onDetachedResult: (result) =>
+            deliverDetachedToolResult(deps, {
               threadId: thread.id,
-              projectId: thread.projectId,
-              signal: context.req.raw.signal,
-            },
-          }),
-        );
+              toolName: payload.tool,
+              presentation: pluginTool.record.presentation,
+              response: result,
+            }),
+        });
+        return streamToolCallResponse(response, roundTrip);
       }
 
       return context.json({

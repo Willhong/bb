@@ -3,7 +3,11 @@ import type {
   ProviderCliStatus,
   ProviderCliStatusResponse,
 } from "@bb/host-daemon-contract";
-import { buildUpdateInventoryProviderIssues } from "./useUpdateInventory";
+import { makeHost } from "@bb/test-helpers/domain-fixtures";
+import {
+  buildUpdateInventoryProviderIssues,
+  updateInventoryHosts,
+} from "./useUpdateInventory";
 
 function providerStatus(
   displayName: string,
@@ -43,6 +47,25 @@ describe("buildUpdateInventoryProviderIssues", () => {
         provider: "acp-cursor",
         title: "Cursor update available",
       },
+    ]);
+  });
+});
+
+describe("updateInventoryHosts", () => {
+  it("omits machines from ephemeral providers", () => {
+    const modal = makeHost({
+      id: "host_modal",
+      type: "ephemeral",
+      machineProviderId: "modal-sandbox",
+    });
+    const persistent = makeHost({
+      id: "host_persistent",
+      machineProviderId: "persistent-cloud",
+    });
+    const manual = makeHost({ id: "host_manual" });
+    expect(updateInventoryHosts([modal, persistent, manual])).toEqual([
+      persistent,
+      manual,
     ]);
   });
 });

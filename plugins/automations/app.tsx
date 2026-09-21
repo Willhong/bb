@@ -11,8 +11,9 @@ import {
 import type { automationRpcContract } from "./src/rpc.js";
 import { toast } from "sonner";
 import type {
+  AutomationDetailReadResult,
+  AutomationDetailResponse,
   AutomationResponse,
-  AutomationReadResult,
   AgentExecutionUpdate,
   AutomationRunListResponse,
   AutomationRunResponse,
@@ -25,6 +26,7 @@ import {
   CREATE_AUTOMATION_PROMPT,
   type AutomationCollectionMode,
 } from "./overview-view";
+import { PERSONAL_PROJECT_ID } from "./lib/format-schedule";
 import { Button } from "@bb/shared-ui/button";
 import { DelayedLoading } from "@bb/shared-ui/delayed-loading";
 import {
@@ -39,7 +41,6 @@ import { ResourceListState } from "@bb/shared-ui/resource-list";
 import { cn } from "@bb/shared-ui/lib/utils";
 
 const PANEL_PATH = "automations";
-const PERSONAL_PROJECT_ID = "proj_personal";
 type OverviewEntry = AutomationsOverviewResponse["automations"][number];
 
 function errorText(error: unknown): string {
@@ -49,6 +50,11 @@ function errorText(error: unknown): string {
 interface DetailRoute {
   projectId: string;
   automationId: string;
+}
+
+interface DeleteTarget {
+  route: DetailRoute;
+  name: string;
 }
 
 interface ParsedDetailRoute {
@@ -164,42 +170,35 @@ function useOverview(): {
 }
 
 function useAutomation(route: DetailRoute): {
-  automation: AutomationReadResult | null;
+  automation: AutomationDetailReadResult | null;
   error: string | null;
-  missing: boolean;
   refetch: () => void;
 } {
   const rpc = useRpc<typeof automationRpcContract>();
   const { projectId, automationId } = route;
   const [state, setState] = useState<{
-    automation: AutomationReadResult | null;
+    automation: AutomationDetailReadResult | null;
     error: string | null;
-    missing: boolean;
-  }>({ automation: null, error: null, missing: false });
+  }>({ automation: null, error: null });
   const requestRef = useRef(0);
 
   const refetch = useCallback(() => {
     const requestId = ++requestRef.current;
-    setState((current) => ({ ...current, error: null, missing: false }));
+    setState((current) => ({ ...current, error: null }));
     rpc.call("automations_get", { projectId, automationId }).then(
       (result) => {
         if (requestRef.current !== requestId) return;
-        const automation = result as AutomationReadResult | null;
-        setState({
-          automation: automation ?? null,
-          error: null,
-          missing: automation === null,
-        });
+        setState({ automation: result, error: null });
       },
       (error: unknown) => {
         if (requestRef.current !== requestId) return;
-        setState({ automation: null, error: errorText(error), missing: false });
+        setState({ automation: null, error: errorText(error) });
       },
     );
   }, [rpc, projectId, automationId]);
 
   useEffect(() => {
-    setState({ automation: null, error: null, missing: false });
+    setState({ automation: null, error: null });
     refetch();
     return () => {
       requestRef.current += 1;
@@ -400,6 +399,8 @@ function OverviewView({
   const navigate = useBbNavigate();
   const { entries, error, refetch } = useOverview();
   const mutations = useMutations();
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const changeEnabled = useCallback(
     async (enabled: boolean, route: DetailRoute) => {
@@ -413,6 +414,43 @@ function OverviewView({
     [mutations],
   );
 
+  const runNow = useCallback(
+    async (route: DetailRoute) => {
+      try {
+        await mutations.run(route);
+        toast.success("Run started");
+      } catch (rpcError: unknown) {
+        toast.error(`Failed to run automation: ${errorText(rpcError)}`);
+      }
+    },
+    [mutations],
+  );
+
+  const requestDelete = useCallback((route: DetailRoute, name: string) => {
+    setDeleteTarget({ route, name });
+  }, []);
+
+  const closeDelete = useCallback(() => {
+    if (!deleting) setDeleteTarget(null);
+  }, [deleting]);
+
+  const confirmDelete = useCallback(() => {
+    if (deleteTarget === null) return;
+    setDeleting(true);
+    mutations
+      .delete(deleteTarget.route)
+      .then(
+        () => {
+          toast.success("Automation deleted");
+          setDeleteTarget(null);
+          refetch();
+        },
+        (rpcError: unknown) =>
+          toast.error(`Failed to delete automation: ${errorText(rpcError)}`),
+      )
+      .finally(() => setDeleting(false));
+  }, [deleteTarget, mutations, refetch]);
+
   const createViaChat = useCallback(
     (prompt?: string) => {
       navigate.toCompose({
@@ -424,16 +462,30 @@ function OverviewView({
   );
 
   return (
-    <AutomationOverviewView
-      entries={entries}
-      error={error}
-      onRetry={refetch}
-      onOpenDetail={onOpenDetail}
-      onEnabledChange={changeEnabled}
-      onCreateViaChat={createViaChat}
-      activeMode={activeMode}
-      onModeChange={onModeChange}
-    />
+    <>
+      <AutomationOverviewView
+        entries={entries}
+        error={error}
+        onRetry={refetch}
+        onOpenDetail={onOpenDetail}
+        onEnabledChange={changeEnabled}
+        onRunNow={runNow}
+        onDelete={requestDelete}
+        onCreateViaChat={createViaChat}
+        activeMode={activeMode}
+        onModeChange={onModeChange}
+      />
+      <DeleteAutomationDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) closeDelete();
+        }}
+        name={deleteTarget?.name ?? ""}
+        pending={deleting}
+        onConfirm={confirmDelete}
+        onCancel={closeDelete}
+      />
+    </>
   );
 }
 
@@ -447,7 +499,7 @@ function DetailView({
   onBack: () => void;
 }) {
   const navigate = useBbNavigate();
-  const { automation, error, missing, refetch } = useAutomation(route);
+  const { automation, error, refetch } = useAutomation(route);
   const [editingRequested, setEditingRequested] = useState(initialEditing);
   const overviewState = useOverview();
   const runsState = useRuns(route);
@@ -536,15 +588,11 @@ function DetailView({
       .finally(() => setDeleting(false));
   }, [mutations, route, onBack]);
 
-  if (error !== null || missing) {
+  if (error !== null) {
     return (
       <ResourceListState
         state="error"
-        message={
-          missing
-            ? "Automation not found."
-            : `Couldn't load automation: ${error}`
-        }
+        message={`Couldn't load automation: ${error}`}
         layout="detail"
         onRetry={refetch}
       />
@@ -603,7 +651,7 @@ function DetailView({
 
   const requiresPrompt =
     automation.execution.mode === "agent" && automation.execution.prompt === "";
-  const readableAutomation: AutomationResponse = automation;
+  const readableAutomation: AutomationDetailResponse = automation;
 
   const overviewEntry = overviewState.entries?.find(
     (entry) =>
@@ -614,7 +662,7 @@ function DetailView({
     overviewEntry !== undefined
       ? automationProjectLabel(overviewEntry.project)
       : route.projectId === PERSONAL_PROJECT_ID
-        ? "Local"
+        ? "Personal"
         : route.projectId;
 
   return (

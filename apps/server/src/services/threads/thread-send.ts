@@ -12,7 +12,10 @@ import type {
   ThreadTurnInitiator,
   TurnRequestTarget,
 } from "@bb/domain";
-import { isStandaloneBuiltinClearCommand } from "@bb/domain";
+import {
+  flattenPromptInputGroups,
+  isStandaloneBuiltinClearCommand,
+} from "@bb/domain";
 import type { SendMessageRequest } from "@bb/server-contract";
 import { renderTemplate } from "@bb/templates";
 import type {
@@ -43,6 +46,7 @@ import {
   dispatchTurnDuringReprovision,
   requireReadyThreadEnvironment,
 } from "./thread-turn-dispatch.js";
+import { resolveDispatchAuthor } from "./dispatch-author.js";
 import { resolvePermissionEscalation } from "./thread-runtime-config.js";
 import {
   buildThreadStatusChangeMetadata,
@@ -55,7 +59,7 @@ import {
   startLiveHostCommand,
 } from "../hosts/live-command.js";
 import {
-  disconnectedHostUnavailableDetails,
+  inactiveHostUnavailableDetails,
   threadNotWritableReasonForStatus,
   throwHostUnavailable,
   throwSenderThreadInvalid,
@@ -69,7 +73,10 @@ import {
   prependDeferredFirstTurnContext,
   requireDeferredFirstTurnContextCurrent,
   resolveDeferredFirstTurnContext,
+  type GroupedPrompt,
+  type PromptWithGroups,
 } from "./deferred-first-turn-context.js";
+import type { TelemetryEvent } from "../system/telemetry.js";
 
 type SendThreadMessageMode = SendMessageRequest["mode"];
 type TextPromptInput = Extract<PromptInput, { type: "text" }>;
@@ -161,7 +168,7 @@ export function ensureThreadIsNotAwaitingUserInteraction(
   deps: Pick<AppDeps, "pendingInteractions">,
   threadId: string,
 ): void {
-  if (!deps.pendingInteractions.hasPendingThreadInteraction(threadId)) {
+  if (!deps.pendingInteractions.hasTurnBoundPendingThreadInteraction(threadId)) {
     return;
   }
 
@@ -172,16 +179,33 @@ export function ensureThreadIsNotAwaitingUserInteraction(
   );
 }
 
-export function ensureThreadIsWritable(thread: Thread): void {
+export function ensureThreadIsWritable(
+  thread: Thread,
+  allowStopping = false,
+): void {
   if (thread.archivedAt) {
     throwThreadNotWritable(thread, "archived", "Thread is archived");
   }
-  if (thread.status === "stopping") {
+  if (thread.status === "stopping" && !allowStopping) {
     throwThreadNotWritable(thread, "stopping", "Thread is stopping");
   }
   if (thread.deletedAt !== null) {
     throwThreadNotWritable(thread, "deleted", "Thread is deleted");
   }
+}
+
+/**
+ * The queue's own writability, which a requested stop does not revoke.
+ *
+ * Everything else a stopping thread rejects is work against the run that is
+ * being torn down. The queue is the opposite: it holds what the user wants to
+ * happen NEXT, and the seconds a stop takes to land are exactly when they
+ * reach for it. Rows still cannot dispatch mid-stop — the dispatch checkpoint
+ * queues them on a `stopping` wait — but composing, editing, reordering and
+ * asking for one to go first all stay available.
+ */
+export function ensureThreadQueueIsWritable(thread: Thread): void {
+  ensureThreadIsWritable(thread, true);
 }
 
 function resolveSendMode(
@@ -249,7 +273,7 @@ function ensureRuntimeCanAcceptActiveSend(
   throwHostUnavailable(
     502,
     "Host daemon is not connected",
-    disconnectedHostUnavailableDetails(),
+    inactiveHostUnavailableDetails(),
   );
 }
 
@@ -311,26 +335,60 @@ export function formatAgentThreadInput(
   });
 }
 
-export function groupedInputForRuntime(
-  inputGroups: readonly PromptInput[][],
-): PromptInput[] {
-  return inputGroups.flatMap((input, index) =>
-    index === 0
-      ? input
-      : [{ type: "text" as const, text: "\n\n", mentions: [] }, ...input],
+export function appendPluginMentionContext(
+  prompt: GroupedPrompt,
+): Promise<GroupedPrompt>;
+export function appendPluginMentionContext(
+  prompt: PromptWithGroups,
+): Promise<PromptWithGroups>;
+export async function appendPluginMentionContext(
+  prompt: PromptWithGroups,
+): Promise<PromptWithGroups> {
+  const pluginMentionContext = await resolvePluginMentionContextInputs(
+    prompt.input,
   );
+  if (pluginMentionContext.length === 0) {
+    return prompt;
+  }
+  const inputGroups = prompt.inputGroups;
+  return {
+    input: [...prompt.input, ...pluginMentionContext],
+    ...(inputGroups !== undefined
+      ? {
+          inputGroups:
+            inputGroups.length > 0
+              ? [
+                  ...inputGroups.slice(0, -1),
+                  [
+                    ...inputGroups[inputGroups.length - 1]!,
+                    ...pluginMentionContext,
+                  ],
+                ]
+              : inputGroups,
+        }
+      : {}),
+  };
 }
 
-function captureUserMessageSentTelemetry(
+type UserMessageSentProperties = Extract<
+  TelemetryEvent,
+  { name: "user_message_sent" }
+>["properties"];
+
+export function captureUserMessageSentTelemetry(
   deps: Pick<LoggedPendingInteractionWorkSessionDeps, "telemetry">,
-  thread: Thread,
+  args: {
+    isChildThread: boolean;
+    messageSource: UserMessageSentProperties["message_source"];
+    providerId: string;
+  },
 ): void {
   deps.telemetry.capture({
     name: "user_message_sent",
     properties: {
-      is_child_thread: thread.parentThreadId !== null,
-      message_source: "thread_send",
-      provider: thread.providerId,
+      is_child_thread: args.isChildThread,
+      message_source: args.messageSource,
+      provider: args.providerId,
     },
   });
 }
@@ -444,24 +502,17 @@ async function sendThreadMessageWithoutContextClear(
     : undefined;
   let input =
     inputGroups !== undefined
-      ? groupedInputForRuntime(inputGroups)
+      ? flattenPromptInputGroups(inputGroups)
       : senderThreadId
         ? formatAgentThreadInput({
             input: payload.input,
             senderThreadId,
           })
         : payload.input;
-  const pluginMentionContext = await resolvePluginMentionContextInputs(input);
-  if (pluginMentionContext.length > 0) {
-    input = [...input, ...pluginMentionContext];
-    if (inputGroups !== undefined && inputGroups.length > 0) {
-      const lastGroup = inputGroups[inputGroups.length - 1]!;
-      inputGroups = [
-        ...inputGroups.slice(0, -1),
-        [...lastGroup, ...pluginMentionContext],
-      ];
-    }
-  }
+  ({ input, inputGroups } = await appendPluginMentionContext({
+    input,
+    ...(inputGroups !== undefined ? { inputGroups } : {}),
+  }));
   const deferredFirstTurnContext = resolveDeferredFirstTurnContext(
     deps.db,
     thread.id,
@@ -482,6 +533,7 @@ async function sendThreadMessageWithoutContextClear(
     }
   };
   await validatePromptAttachmentReferences({
+    db: deps.db,
     dataDir: deps.config.dataDir,
     input,
     projectId: thread.projectId,
@@ -491,8 +543,11 @@ async function sendThreadMessageWithoutContextClear(
   // `system` whatever the original was: nobody asked for it a second time, and
   // counting it as a user message would inflate every "messages sent" figure by
   // however many times the provider happened to be rate limited.
-  const initiator: ThreadTurnInitiator =
-    args.retryOf !== undefined ? "system" : senderThreadId ? "agent" : "user";
+  const { initiator } = resolveDispatchAuthor({
+    retrying: args.retryOf !== undefined,
+    senderThreadId,
+    startedOnBehalfOf: null,
+  });
   const shouldCaptureUserMessageSent =
     args.trigger === "user" && initiator === "user" && input.length > 0;
   const expectedSteerTurnId =
@@ -543,7 +598,11 @@ async function sendThreadMessageWithoutContextClear(
     })
   ) {
     if (shouldCaptureUserMessageSent) {
-      captureUserMessageSentTelemetry(deps, thread);
+      captureUserMessageSentTelemetry(deps, {
+        isChildThread: thread.parentThreadId !== null,
+        messageSource: "thread_send",
+        providerId: thread.providerId,
+      });
     }
     return;
   }
@@ -665,7 +724,11 @@ async function sendThreadMessageWithoutContextClear(
       );
     }
     if (shouldCaptureUserMessageSent) {
-      captureUserMessageSentTelemetry(deps, thread);
+      captureUserMessageSentTelemetry(deps, {
+        isChildThread: thread.parentThreadId !== null,
+        messageSource: "thread_send",
+        providerId: thread.providerId,
+      });
     }
     return;
   }
@@ -728,6 +791,10 @@ async function sendThreadMessageWithoutContextClear(
     },
   });
   if (shouldCaptureUserMessageSent) {
-    captureUserMessageSentTelemetry(deps, thread);
+    captureUserMessageSentTelemetry(deps, {
+      isChildThread: thread.parentThreadId !== null,
+      messageSource: "thread_send",
+      providerId: thread.providerId,
+    });
   }
 }

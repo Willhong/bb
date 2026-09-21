@@ -1,4 +1,5 @@
-import { readThreadProvisioningStage } from "./thread-provisioning-context.js";
+import { getNonDestroyedHostByLaunchKey } from "@bb/db";
+import { sweepProviderMachine } from "../machines/provider-orchestration.js";
 import { cancelProviderEnvironmentCreation } from "../environments/environment-engine.js";
 import { getPreparingEnvironment } from "@bb/db";
 import { getThread, type DbTransaction, type EnvironmentRow } from "@bb/db";
@@ -12,7 +13,7 @@ import {
   type ThreadTurnInitiator,
   type TurnRequestTarget,
 } from "@bb/domain";
-import type { StartedOnBehalfOf } from "@bb/server-contract";
+import type { StartedOnBehalfOf } from "@bb/domain";
 import type { AppDeps } from "../../types.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 import {
@@ -25,6 +26,7 @@ import {
   hasLiveThreadStartInFlight,
   requestThreadStart,
 } from "./thread-lifecycle.js";
+import { resolveDispatchAuthor } from "./dispatch-author.js";
 import { resolvePermissionEscalation } from "./thread-runtime-config.js";
 import {
   createThreadStartup,
@@ -153,7 +155,6 @@ async function startThreadIfEnvironmentReady(
   }
 
   const workspaceReady = ensureWorkspaceReadyEvent(deps, {
-    context: args.context,
     threadId: args.thread.id,
     environmentId: args.environment.id,
     entries: buildCwdBranchEntries({
@@ -162,7 +163,7 @@ async function startThreadIfEnvironmentReady(
       headSha: null,
     }),
   });
-  if (!workspaceReady.reached) {
+  if (!workspaceReady) {
     throw new Error("Thread did not reach workspace-ready provisioning state");
   }
 
@@ -221,9 +222,11 @@ export function requestThreadProvision(
   args: RequestThreadProvisionArgs,
 ): ThreadProvisionContext {
   return deps.db.transaction(() => {
-    const initiator: ThreadTurnInitiator =
-      args.startedOnBehalfOf?.initiator ?? "user";
-    const senderThreadId = args.startedOnBehalfOf?.senderThreadId ?? null;
+    const { initiator, senderThreadId } = resolveDispatchAuthor({
+      retrying: false,
+      senderThreadId: null,
+      startedOnBehalfOf: args.startedOnBehalfOf,
+    });
     const target: TurnRequestTarget = { kind: "thread-start" };
     const request = appendClientTurnEvent(deps, {
       threadId: args.thread.id,
@@ -368,14 +371,17 @@ async function advanceThreadProvisioningOnce(
   args: AdvanceThreadProvisioningArgs,
 ): Promise<void> {
   const thread = getThread(deps.db, args.threadId);
-  if (!thread || thread.deletedAt !== null) {
+  if (
+    !thread ||
+    thread.deletedAt !== null ||
+    hasLiveThreadStartInFlight(thread.id)
+  ) {
     return;
   }
-  if (readThreadProvisioningStage(deps.db, thread.id) === "inactive") {
+  if (thread.status !== "starting") {
     clearThreadProvisionSchedule(thread.id);
     return;
   }
-  if (hasLiveThreadStartInFlight(thread.id)) return;
   let context = loadActiveThreadProvisionContext(deps, thread.id);
   if (!context) {
     failThreadProvisioning(deps, {
@@ -451,7 +457,7 @@ export function scheduleThreadProvisioningAdvance(
   });
 }
 
-export async function restoreFailedThreadStartupRequest(
+export async function restoreInterruptedThreadStartupRequest(
   deps: ThreadProvisioningDeps,
   threadId: string,
 ): Promise<ThreadProvisionContext["request"] | null> {
@@ -460,6 +466,10 @@ export async function restoreFailedThreadStartupRequest(
   const provisioning = getPreparingEnvironment(deps.db, threadId);
   if (provisioning !== null) {
     await cancelProviderEnvironmentCreation(deps, threadId);
+  }
+  const machine = getNonDestroyedHostByLaunchKey(deps.db, threadId);
+  if (machine?.phase === "removing") {
+    await sweepProviderMachine(deps, machine.id);
   }
   return context.request;
 }

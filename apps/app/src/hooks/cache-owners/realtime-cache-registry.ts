@@ -26,12 +26,14 @@ import {
   updateCachedThreadListStatusState,
 } from "./query-cache";
 import { bumpDiffPatchFreshnessGeneration } from "./environment-diff-patch-cache-owner";
+import { invalidateSystemExecutionOptions } from "./system-cache-effects";
 import {
   getCachedThreadLists,
   iterateThreadListCacheEntries,
 } from "./thread-list-cache-data";
 import {
   allHostQueryKeyPrefix,
+  allMachineEnvironmentQueryKeyPrefix,
   allPluginCatalogSearchQueryKeyPrefix,
   allPluginContributionsQueryKeyPrefix,
   allPluginListQueryKeyPrefix,
@@ -52,6 +54,7 @@ import {
   environmentPullRequestQueryKey,
   environmentWorkStatusQueryKeyPrefix,
   hostsQueryKey,
+  serverMoveStatusQueryKey,
   sidebarNavigationQueryKey,
   systemConfigQueryKey,
   uiPreferencesQueryKey,
@@ -347,7 +350,7 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
       dirtyThreadSearchQueriesForCompletedTurn,
       dirtyThreadTimelineQueries,
       dirtyThreadPullRequestQueryForCompletedTurn,
-      dirtyThreadPromptHistoryQueriesForTurnRequests,
+      dirtyThreadTurnRequestQueries,
     ],
   },
   "history-rewritten": {
@@ -501,15 +504,21 @@ const HOST_CONNECTION_DIRTY_HANDLERS = [
   dirtyHostAvailabilityQueries,
   getProjectListInvalidationQueryKeys,
   dirtySystemProviderQueries,
-  dirtySystemExecutionOptionQueries,
 ] satisfies readonly RealtimeDirtyHandler<HostRealtimeDirtyContext>[];
 
 export const REALTIME_HOST_CHANGE_REGISTRY = {
   "host-connected": {
-    dirty: HOST_CONNECTION_DIRTY_HANDLERS,
+    dirty: [
+      ...HOST_CONNECTION_DIRTY_HANDLERS,
+      dirtyHostSystemExecutionOptionQueries,
+      dirtyAllThreadStorageQueries,
+    ],
   },
   "host-disconnected": {
     dirty: HOST_CONNECTION_DIRTY_HANDLERS,
+  },
+  "provider-model-catalog-changed": {
+    dirty: [dirtyHostSystemExecutionOptionQueries],
   },
 } satisfies HostChangeRegistry;
 
@@ -517,6 +526,7 @@ export const REALTIME_SYSTEM_CHANGE_REGISTRY = {
   "config-changed": {
     dirty: [
       dirtySystemConfigQueries,
+      dirtyMachineEnvironmentQueries,
       dirtyAllThreadTimelineQueries,
       dirtySystemProviderQueries,
       dirtySystemExecutionOptionQueries,
@@ -525,6 +535,7 @@ export const REALTIME_SYSTEM_CHANGE_REGISTRY = {
   },
   "plugins-changed": {
     dirty: [
+      dirtySystemConfigQueries,
       dirtyPluginContributionQueries,
       dirtyProjectCommandCatalogQueries,
       dirtyPluginManagementQueries,
@@ -540,6 +551,9 @@ export const REALTIME_SYSTEM_CHANGE_REGISTRY = {
   },
   "ui-preferences-changed": {
     dirty: [dirtyUiPreferencesQueries],
+  },
+  "server-move-changed": {
+    dirty: [dirtyServerMoveStatusQueries],
   },
 } satisfies SystemChangeRegistry;
 
@@ -579,7 +593,9 @@ interface ProjectRealtimeDirtyContext extends RealtimeDirtyContext {
   projectId: string | undefined;
 }
 
-type HostRealtimeDirtyContext = RealtimeDirtyContext;
+interface HostRealtimeDirtyContext extends RealtimeDirtyContext {
+  hostId: string | undefined;
+}
 
 type RealtimeDirtyHandler<Context extends RealtimeDirtyContext> = (
   context: Context,
@@ -882,14 +898,18 @@ function dirtyThreadTimelineQueries({
   }
 }
 
-function dirtyThreadPromptHistoryQueriesForTurnRequests({
+function dirtyThreadTurnRequestQueries({
   eventTypes,
+  queryClient,
   threadId,
 }: ThreadRealtimeDirtyContext): QueryKey[] {
-  if (!eventTypes?.includes("client/turn/requested")) {
-    return [];
-  }
-  return getThreadPromptHistoryInvalidationQueryKeys({ threadId });
+  if (!threadId || !eventTypes?.includes("client/turn/requested")) return [];
+  const queryKey = threadDefaultExecutionOptionsQueryKey(threadId);
+  void queryClient.cancelQueries({ queryKey });
+  return [
+    queryKey,
+    ...getThreadPromptHistoryInvalidationQueryKeys({ threadId }),
+  ];
 }
 
 function dirtyThreadPullRequestQueryForCompletedTurn({
@@ -922,12 +942,7 @@ function dirtyThreadStorageQueriesForThread({
   threadId,
 }: ThreadRealtimeDirtyContext): QueryKey[] {
   if (!threadId) {
-    return [
-      allThreadStorageFilesQueryKeyPrefix(),
-      allThreadStorageLocationsQueryKeyPrefix(),
-      allThreadStoragePathsQueryKeyPrefix(),
-      allThreadStorageFilePreviewQueryKeyPrefix(),
-    ];
+    return dirtyAllThreadStorageQueries();
   }
   return [
     threadStorageFilesForThreadQueryKeyPrefix(threadId),
@@ -1118,6 +1133,15 @@ function dirtyThreadStorageQueriesForEnvironment({
   return queryKeys;
 }
 
+function dirtyAllThreadStorageQueries(): QueryKey[] {
+  return [
+    allThreadStorageFilesQueryKeyPrefix(),
+    allThreadStorageLocationsQueryKeyPrefix(),
+    allThreadStoragePathsQueryKeyPrefix(),
+    allThreadStorageFilePreviewQueryKeyPrefix(),
+  ];
+}
+
 function dirtyHostAvailabilityQueries(): QueryKey[] {
   return [hostsQueryKey(), allHostQueryKeyPrefix()];
 }
@@ -1126,6 +1150,15 @@ function dirtySystemConfigQueries({ queryClient }: RealtimeDirtyContext): void {
   invalidateQueryKeysWithoutCancelingActiveFetches({
     queryClient,
     queryKeys: [systemConfigQueryKey(), allSystemThemesQueryKeyPrefix()],
+  });
+}
+
+function dirtyMachineEnvironmentQueries({
+  queryClient,
+}: RealtimeDirtyContext): void {
+  invalidateQueryKeysWithoutCancelingActiveFetches({
+    queryClient,
+    queryKeys: [allMachineEnvironmentQueryKeyPrefix()],
   });
 }
 
@@ -1138,6 +1171,10 @@ function dirtyUiPreferencesQueries({
   });
 }
 
+function dirtyServerMoveStatusQueries(): QueryKey[] {
+  return [serverMoveStatusQueryKey()];
+}
+
 function dirtyAllThreadTimelineQueries(): QueryKey[] {
   return getThreadTimelineInvalidationQueryKeys({ threadId: undefined });
 }
@@ -1148,6 +1185,14 @@ function dirtySystemProviderQueries(): QueryKey[] {
 
 function dirtySystemExecutionOptionQueries(): QueryKey[] {
   return [allSystemExecutionOptionsQueryKeyPrefix()];
+}
+
+function dirtyHostSystemExecutionOptionQueries({
+  hostId,
+  queryClient,
+}: HostRealtimeDirtyContext): QueryKey[] | void {
+  if (hostId === undefined) return [allSystemExecutionOptionsQueryKeyPrefix()];
+  void invalidateSystemExecutionOptions({ hostId, queryClient });
 }
 
 function dirtyPluginContributionQueries(): QueryKey[] {

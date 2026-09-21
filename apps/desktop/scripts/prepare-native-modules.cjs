@@ -1,4 +1,4 @@
-const { spawn } = require("node:child_process");
+const { execFileSync, spawn } = require("node:child_process");
 const { chmod, readFile, readdir, writeFile } = require("node:fs/promises");
 const { createRequire } = require("node:module");
 const path = require("node:path");
@@ -13,15 +13,6 @@ const PACKAGED_NATIVE_PACKAGE_NAMES = [
   BETTER_SQLITE3_PACKAGE_NAME,
 ];
 
-// better-sqlite3 must match the runtime that loads it. The packaged app runs
-// the bb server through Electron's bundled Node, so the packaged copy has to
-// target Electron's ABI. electron-builder's `npmRebuild` would rebuild it for
-// us, but in this pnpm workspace better-sqlite3 resolves to the shared
-// content-addressed store, so an in-place rebuild clobbers the node-ABI binary
-// every other workspace package (and the server test suite) relies on. Instead
-// `npmRebuild` is disabled and we fetch the Electron prebuild into the packaged
-// copy here, leaving the shared store untouched. Desktop dev runs bb-app with
-// the host Node executable so it can use the workspace's normal Node-ABI binary.
 const NODE_PTY_PREBUILD_PLATFORMS = ["darwin-arm64", "darwin-x64"];
 const NODE_PTY_SPAWN_HELPER_RELATIVE_PATHS = [
   path.join("build", "Release", "spawn-helper"),
@@ -94,12 +85,6 @@ async function findPackageDirectories(rootPath, packageNames) {
   }
 
   return matches;
-}
-
-async function findNativePackageDirectories(rootPath, packageName) {
-  return (await findPackageDirectories(rootPath, [packageName])).get(
-    packageName,
-  );
 }
 
 async function chmodIfPresent(filePath, mode) {
@@ -194,10 +179,45 @@ async function runPrebuildInstall(packageDirectory, prebuildArguments) {
 }
 
 async function prepareBetterSqlite3PackageDirectory(packageDirectory, options) {
+  const packageJson = JSON.parse(
+    await readFile(path.join(packageDirectory, "package.json"), "utf8"),
+  );
+  const supportsLegacyPrebuild =
+    typeof packageJson.dependencies?.["prebuild-install"] === "string";
+  const canVerify =
+    options.platform === process.platform &&
+    options.arch === process.arch &&
+    options.electronVersion === resolveElectronVersion();
+  const electron = createRequire(path.join(desktopPackageRoot, "package.json"))(
+    "electron",
+  );
+  const verify = () =>
+    execFileSync(
+      electron,
+      [
+        "-e",
+        "const Database = require(process.argv[1]); const db = new Database(':memory:'); if (db.prepare('SELECT 1 AS value').get().value !== 1) throw new Error('SQLite verification failed'); db.close();",
+        packageDirectory,
+      ],
+      {
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        stdio: "pipe",
+        timeout: 30_000,
+      },
+    );
+  if (canVerify) {
+    try {
+      verify();
+      return;
+    } catch (error) {
+      if (!supportsLegacyPrebuild) throw error;
+    }
+  }
   await runPrebuildInstall(
     packageDirectory,
     resolveBetterSqlite3PrebuildArguments(options),
   );
+  if (canVerify) verify();
 }
 
 async function preparePackagedNativeModules(appOutDir, options = {}) {
@@ -266,11 +286,29 @@ function resolveArchName(context) {
 }
 
 async function afterPack(context) {
+  const arch = resolveArchName(context);
+  const platform = context.electronPlatformName ?? process.platform;
+  if (platform !== process.platform || arch !== process.arch) {
+    throw new Error("Packaged npm verification requires a native target host");
+  }
   await preparePackagedNativeModules(context.appOutDir, {
-    arch: resolveArchName(context),
+    arch,
     electronVersion: resolveElectronVersion(),
-    platform: context.electronPlatformName ?? process.platform,
+    platform,
   });
+  const { smokePackagedNpm } = await import("./smoke-packaged-npm.mjs");
+  const productName = context.packager.appInfo.productFilename;
+  const appBinary =
+    platform === "darwin"
+      ? path.join(
+          context.appOutDir,
+          `${productName}.app`,
+          "Contents",
+          "MacOS",
+          productName,
+        )
+      : path.join(context.appOutDir, context.packager.executableName);
+  await smokePackagedNpm(appBinary);
 }
 
 function parseStandaloneArguments(argv) {
@@ -321,11 +359,6 @@ async function main() {
 }
 
 module.exports = afterPack;
-module.exports.findNativePackageDirectories = findNativePackageDirectories;
-module.exports.prepareNodePtyPackageDirectory = prepareNodePtyPackageDirectory;
-module.exports.prepareBetterSqlite3PackageDirectory =
-  prepareBetterSqlite3PackageDirectory;
-module.exports.preparePackagedNativeModules = preparePackagedNativeModules;
 module.exports.parseStandaloneArguments = parseStandaloneArguments;
 module.exports.resolveBetterSqlite3PrebuildArguments =
   resolveBetterSqlite3PrebuildArguments;

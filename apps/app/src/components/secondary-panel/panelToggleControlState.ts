@@ -22,7 +22,6 @@ const PANEL_TOGGLE_ACTION_PRESENTATION = {
 } as const satisfies Record<PanelToggleAction, PanelToggleActionPresentation>;
 
 interface PanelToggleControlState {
-  action: PanelToggleAction;
   label: string;
   isFullScreen: boolean;
   iconName: PanelToggleIconName;
@@ -42,20 +41,9 @@ export function resolveConversationCollapseControl({
     ? "exit-full-screen"
     : "enter-full-screen";
   return {
-    action,
     ...PANEL_TOGGLE_ACTION_PRESENTATION[action],
     onClick: onToggleConversationCollapse,
   };
 }
 
 export const RIGHT_PANEL_TOGGLE_ICON_NAME = "PanelRight";
-
-export function getCompactPanelPresentation(
-  activeTabKind: string | undefined,
-  fallbackTabKind?: string,
-): "shelf" | "full" {
-  const resolvedTabKind = activeTabKind ?? fallbackTabKind;
-  return resolvedTabKind === undefined || resolvedTabKind === "thread-info"
-    ? "shelf"
-    : "full";
-}

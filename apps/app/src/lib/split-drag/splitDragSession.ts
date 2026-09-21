@@ -12,7 +12,14 @@ export interface SplitDragFallbackTarget {
   container: HTMLElement | null;
 }
 
+export interface AuxiliaryDropTarget {
+  element: HTMLElement;
+  label: string;
+  drop: () => void;
+}
+
 export interface SplitDragConfig {
+  resolveAuxiliaryTarget?: (x: number, y: number) => AuxiliaryDropTarget | null;
   ghostLabel: string;
   sourceEl?: HTMLElement | null;
   decide: (paneId: string, zone: SplitZone) => ZoneDecision | null;
@@ -23,6 +30,8 @@ export interface SplitDragConfig {
   fallback?: SplitDragFallbackTarget;
   targetBoundary?: HTMLElement;
   cancelSidebarReorderOnEngage?: boolean;
+  fadeSourceOnEngage?: boolean;
+  renderGhost?: boolean;
 }
 
 interface ResolvedTarget {
@@ -31,6 +40,7 @@ interface ResolvedTarget {
 }
 
 export function beginSplitDrag(config: SplitDragConfig): void {
+  let auxiliaryTarget: AuxiliaryDropTarget | null = null;
   let engaged = false;
   let target: SplitDropTarget | null = null;
   let ghostEl: HTMLElement | null = null;
@@ -52,11 +62,15 @@ export function beginSplitDrag(config: SplitDragConfig): void {
         }),
       );
     }
-    ghostEl = createGhost(config.ghostLabel);
+    ghostEl =
+      config.renderGhost === false ? null : createGhost(config.ghostLabel);
     overlayEl = createOverlay();
-    document.body.append(ghostEl, overlayEl);
+    if (ghostEl) {
+      document.body.append(ghostEl);
+    }
+    document.body.append(overlayEl);
     document.body.style.cursor = "grabbing";
-    if (config.sourceEl) {
+    if (config.sourceEl && config.fadeSourceOnEngage !== false) {
       config.sourceEl.style.opacity = "0.45";
     }
     config.onEngage?.();
@@ -109,6 +123,16 @@ export function beginSplitDrag(config: SplitDragConfig): void {
     }
 
     target = null;
+    auxiliaryTarget =
+      config.resolveAuxiliaryTarget?.(event.clientX, event.clientY) ?? null;
+    if (auxiliaryTarget && overlayEl) {
+      positionOverlay(
+        overlayEl,
+        auxiliaryTarget.element.getBoundingClientRect(),
+        auxiliaryTarget.label,
+      );
+      return;
+    }
     const resolved = resolveTarget(event.clientX, event.clientY);
     if (resolved && overlayEl) {
       const zone = pickZone(resolved.rect, event.clientX, event.clientY);
@@ -136,7 +160,7 @@ export function beginSplitDrag(config: SplitDragConfig): void {
     ghostEl?.remove();
     overlayEl?.remove();
     document.body.style.cursor = "";
-    if (config.sourceEl) {
+    if (config.sourceEl && config.fadeSourceOnEngage !== false) {
       config.sourceEl.style.opacity = "";
     }
   };
@@ -144,15 +168,19 @@ export function beginSplitDrag(config: SplitDragConfig): void {
   function handleUp(): void {
     const wasEngaged = engaged;
     const dropTarget = engaged ? target : null;
+    const auxiliaryDrop = engaged ? auxiliaryTarget : null;
     teardown();
     if (wasEngaged) {
       swallowNextClick();
     }
+    if (auxiliaryDrop) auxiliaryDrop.drop();
     if (dropTarget) {
       config.onDrop(dropTarget);
     }
     if (wasEngaged) {
-      config.onEnd?.({ dropped: dropTarget !== null });
+      config.onEnd?.({
+        dropped: dropTarget !== null || auxiliaryDrop !== null,
+      });
     }
   }
 
@@ -199,6 +227,7 @@ function paneElementAt(clientX: number, clientY: number): HTMLElement | null {
 function createGhost(label: string): HTMLElement {
   const ghost = document.createElement("div");
   ghost.textContent = label;
+  ghost.dataset.splitDragGhost = "";
   Object.assign(ghost.style, {
     position: "fixed",
     zIndex: "100",

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { UsageProvider } from "./usage-schema.js";
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk/app";
 import {
   loadPluginApp,
@@ -52,6 +53,39 @@ function threadOnMachine(
 
 describe("provider usage footer disclosure", () => {
   it("aggregates every machine and keeps machine and provider selection local to the card", async () => {
+    const pooledAccounts: UsageProvider[] = (
+      [
+        ["codex", "Codex", "team@example.com", 46],
+        ["codex", "Codex", "personal@example.com", 82],
+        ["claude-code", "Claude Code", "claude-team@example.com", 97],
+      ] as const
+    ).map(([providerId, displayName, email, usedPercent]) => ({
+      id: email,
+      providerId: providerId,
+      accountLabel: email,
+      displayName: displayName,
+      logoUrl: `/api/v1/system/providers/${providerId}/logo`,
+      icon: null,
+      strings: { iconTint: null },
+      signInHint: "Sign in.",
+      expiredHint: "Sign in again.",
+      usage: {
+        status: "ok",
+        accountEmail: email,
+        planLabel: "Pro",
+        windows: [
+          {
+            label: "Weekly limit",
+            usedPercent: usedPercent,
+            resetsAt:
+              email === "personal@example.com"
+                ? new Date(Date.now() + 51 * 60 * 60_000).toISOString()
+                : null,
+            cost: null,
+          },
+        ],
+      },
+    }));
     const fetchMock = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
         new Response(
@@ -67,11 +101,15 @@ describe("provider usage footer disclosure", () => {
                   providers: [
                     {
                       id: "claude-code",
+                      providerId: "claude-code",
+                      accountLabel: null,
                       displayName: "Claude Code",
                       logoUrl:
                         "/api/v1/system/providers/claude-code/logo?h=claude",
-                      iconGlyph: null,
-                      iconTint: { light: "#D97757", dark: "#E38A6E" },
+                      icon: null,
+                      strings: {
+                        iconTint: { light: "#D97757", dark: "#E38A6E" },
+                      },
                       signInHint: "Sign in to Claude Code.",
                       expiredHint: "Sign in to Claude Code again.",
                       usage: {
@@ -90,10 +128,12 @@ describe("provider usage footer disclosure", () => {
                     },
                     {
                       id: "codex",
+                      providerId: "codex",
+                      accountLabel: null,
                       displayName: "Codex",
                       logoUrl: "/api/v1/system/providers/codex/logo?h=codex",
-                      iconGlyph: null,
-                      iconTint: null,
+                      icon: null,
+                      strings: { iconTint: null },
                       signInHint: "Sign in to Codex.",
                       expiredHint: "Sign in to Codex again.",
                       usage: {
@@ -120,10 +160,12 @@ describe("provider usage footer disclosure", () => {
                   providers: [
                     {
                       id: "codex",
+                      providerId: "codex",
+                      accountLabel: null,
                       displayName: "Codex",
                       logoUrl: "/api/v1/system/providers/codex/logo?h=codex",
-                      iconGlyph: null,
-                      iconTint: null,
+                      icon: null,
+                      strings: { iconTint: null },
                       signInHint: "Sign in to Codex.",
                       expiredHint: "Sign in to Codex again.",
                       usage: {
@@ -141,6 +183,13 @@ describe("provider usage footer disclosure", () => {
                       },
                     },
                   ],
+                },
+                {
+                  id: "source:account-pool",
+                  displayName: "Account Pooler",
+                  status: "connected",
+                  error: null,
+                  providers: pooledAccounts,
                 },
                 {
                   id: "host-intel",
@@ -178,6 +227,7 @@ describe("provider usage footer disclosure", () => {
             force: false,
             machineIds: null,
             maxAgeMs: 30 * 60_000,
+            providerId: null,
           }),
         }),
       ),
@@ -193,12 +243,23 @@ describe("provider usage footer disclosure", () => {
         },
       },
     );
+    expect(
+      slot.getByRole("button", { name: "Usage machine: Account Pooler" }),
+    ).toBeTruthy();
+    expect(
+      slot.getByRole("heading", { name: "personal@example.com" }),
+    ).toBeTruthy();
+    fireEvent.pointerDown(
+      slot.getByRole("button", { name: "Usage machine: Account Pooler" }),
+      { button: 0 },
+    );
+    fireEvent.click(slot.getByRole("menuitemradio", { name: "M5" }));
     const machinePicker = slot.getByRole("button", {
       name: "Usage machine: M5",
     });
     expect(slot.getByRole("heading", { name: "Codex" })).toBeTruthy();
     expect(slot.getByText("codex@example.com")).toBeTruthy();
-    expect(slot.getByText("97% used")).toBeTruthy();
+    expect(slot.getByText("97%")).toBeTruthy();
 
     fireEvent.pointerDown(machinePicker, { button: 0 });
     fireEvent.click(slot.getByRole("menuitemradio", { name: "M4" }));
@@ -217,12 +278,12 @@ describe("provider usage footer disclosure", () => {
     ).not.toBeNull();
     expect(slot.getByRole("heading", { name: "Claude Code" })).toBeTruthy();
     expect(slot.getByText("claude@example.com")).toBeTruthy();
-    expect(slot.getByText("82% used")).toBeTruthy();
+    expect(slot.getByText("82%")).toBeTruthy();
 
     fireEvent.click(codexTab);
     expect(slot.getByRole("heading", { name: "Codex" })).toBeTruthy();
     expect(slot.getByText("codex@example.com")).toBeTruthy();
-    expect(slot.getByText("37% used")).toBeTruthy();
+    expect(slot.getByText("37%")).toBeTruthy();
     fireEvent.keyDown(codexTab, { key: "ArrowLeft" });
     expect(claudeTab.getAttribute("aria-selected")).toBe("true");
 
@@ -255,6 +316,7 @@ describe("provider usage footer disclosure", () => {
           force: true,
           machineIds: ["host-intel"],
           maxAgeMs: 0,
+          providerId: null,
         }),
       }),
     );
@@ -273,10 +335,168 @@ describe("provider usage footer disclosure", () => {
           force: false,
           machineIds: null,
           maxAgeMs: 5 * 60_000,
+          providerId: null,
         }),
       }),
     );
 
+    now.mockRestore();
+    fireEvent.pointerDown(
+      slot.getByRole("button", { name: "Usage machine: Intel" }),
+      { button: 0 },
+    );
+    fireEvent.click(
+      slot.getByRole("menuitemradio", { name: "Account Pooler" }),
+    );
+    expect(slot.getAllByRole("tab")).toHaveLength(2);
+    const poolCodexTab = slot.getByRole("tab", { name: "Codex" });
+    expect(
+      poolCodexTab.querySelector("[data-provider-logo*='/codex/']"),
+    ).not.toBeNull();
+    expect(
+      poolCodexTab.querySelector('[data-provider-usage-tone="warning"]'),
+    ).not.toBeNull();
+    expect(slot.getAllByText("team@example.com")).toHaveLength(1);
+    expect(slot.getAllByText("personal@example.com")).toHaveLength(1);
+    expect(slot.getByText("46%")).toBeTruthy();
+    expect(slot.getByText("2d 3h")).toBeTruthy();
+    expect(
+      slot.getAllByRole("heading").map((heading) => heading.textContent),
+    ).toEqual(["team@example.com", "personal@example.com"]);
+    const windowButton = slot.getByRole("button", {
+      name: "Weekly limit: 46% used. Reset time not reported",
+    });
+    fireEvent.click(windowButton);
+    expect(slot.getByText("Reset time not reported.")).toBeTruthy();
+    expect(slot.getByText("82%")).toBeTruthy();
+    fireEvent.click(slot.getByRole("tab", { name: "Claude Code" }));
+    expect(slot.getByText("claude-team@example.com")).toBeTruthy();
+    expect(slot.queryByText("personal@example.com")).toBeNull();
+    const diagnostics = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    for (const failure of [
+      () => new Response("bb connect temporarily unavailable", { status: 503 }),
+      () => new Response("bb connect is not JSON", { status: 200 }),
+      () => Response.json({ ok: true, result: { machines: "invalid" } }),
+    ]) {
+      await waitFor(() =>
+        expect(
+          slot
+            .getByRole("button", { name: "Reload provider usage" })
+            .hasAttribute("disabled"),
+        ).toBe(false),
+      );
+      fetchMock.mockResolvedValueOnce(failure());
+      fireEvent.click(
+        slot.getByRole("button", { name: "Reload provider usage" }),
+      );
+      await waitFor(() =>
+        expect(
+          slot.getByText(
+            "Couldn’t refresh usage. Showing the last available update.",
+          ),
+        ).toBeTruthy(),
+      );
+      expect(slot.getByText("claude-team@example.com")).toBeTruthy();
+      expect(
+        slot.queryByText(/Unexpected token|bb connect|invalid JSON/i),
+      ).toBeNull();
+      fireEvent.click(
+        slot.getByRole("button", { name: "Reload provider usage" }),
+      );
+      await waitFor(() =>
+        expect(
+          slot.queryByText(
+            "Couldn’t refresh usage. Showing the last available update.",
+          ),
+        ).toBeNull(),
+      );
+    }
+    expect(diagnostics).toHaveBeenCalledTimes(3);
     await mounted.lifecycle.dispose();
+  }, 15_000);
+});
+
+it.each([
+  ["empty", "No accounts report usage yet."],
+  ["expired", "Sign in again in the source plugin’s settings."],
+  [
+    "unauthenticated",
+    "Sign in to this account in the source plugin’s settings.",
+  ],
+  ["no-limits", "No usage limits reported for this plan."],
+  [
+    "source-error",
+    "Couldn’t refresh usage. Showing the last available update.",
+  ],
+] as const)("renders the %s shared-source state", async (state, expected) => {
+  const usage: UsageProvider["usage"] =
+    state === "expired" || state === "unauthenticated"
+      ? { status: state }
+      : {
+          status: "ok",
+          accountEmail: "review@example.com",
+          planLabel: null,
+          windows:
+            state === "no-limits"
+              ? []
+              : [
+                  {
+                    label: "Weekly limit",
+                    usedPercent: 42,
+                    resetsAt: null,
+                    cost: null,
+                  },
+                ],
+        };
+  const account: UsageProvider = {
+    id: "account",
+    providerId: "codex",
+    accountLabel: "review@example.com",
+    displayName: "Codex",
+    logoUrl: null,
+    icon: null,
+    strings: { iconTint: null },
+    signInHint: "Sign in to this account in the source plugin’s settings.",
+    expiredHint: "Sign in again in the source plugin’s settings.",
+    usage,
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      Response.json({
+        ok: true,
+        result: {
+          machines: [
+            {
+              id: "source:pool",
+              displayName: "Review pool",
+              status: "connected",
+              providers: state === "empty" ? [] : [account],
+              error: state === "source-error" ? "private backend error" : null,
+            },
+          ],
+        },
+      }),
+    ),
+  );
+  const app = await loadPluginApp(() => import("./app"));
+  const mounted = await mountPluginContentScripts(app, {
+    pluginId: "provider-usage",
   });
+  const item = app.experimentalSidebarFooterItems[0];
+  if (item?.kind !== "disclosure") throw new Error("missing disclosure");
+  const slot = renderSlot(item, { dismiss: vi.fn() });
+  await waitFor(() =>
+    expect(slot.getByText(expected, { exact: false })).toBeTruthy(),
+  );
+  if (state === "source-error") {
+    expect(slot.getByText("42%")).toBeTruthy();
+    expect(slot.queryByText("private backend error")).toBeNull();
+    expect(
+      slot.queryByRole("button", { name: "Retry usage refresh" }),
+    ).toBeNull();
+  }
+  await mounted.lifecycle.dispose();
 });

@@ -110,6 +110,7 @@ interface UseThreadCreationOptionsResult<TExecutionInputSources> {
   selectedProviderId: string;
   setSelectedProviderId: StringSelectionSetter;
   setProviderModelReasoning: ProviderModelReasoningSelectionSetter;
+  providers: readonly ProviderInfo[];
   providerOptions: ProviderPickerOption[];
   hasMultipleProviders: boolean;
   selectedProviderDisplayName: string;
@@ -132,6 +133,7 @@ interface UseThreadCreationOptionsResult<TExecutionInputSources> {
   modelLoadFailed: boolean;
   modelLoadError: SystemExecutionOptionsModelLoadError | null;
   modelCatalogIsVerified: boolean;
+  modelCatalogIsSettled: boolean;
   reasoningOptions: PickerOption<ReasoningLevel>[];
   permissionModeOptions: PickerOption<PermissionMode>[];
   supportsPermissionModeSelection: boolean;
@@ -402,6 +404,11 @@ export function useThreadCreationOptions(
     !executionOptionsQuery.isPlaceholderData &&
     !executionOptionsQuery.isError &&
     modelLoadError === null;
+  const modelCatalogIsSettled =
+    !executionOptionsQueryEnabled ||
+    executionOptionsQuery.isError ||
+    (executionOptionsQuery.data !== undefined &&
+      !executionOptionsQuery.isPlaceholderData);
   const permissionModeIsVerified =
     executionOptionsQuery.data !== undefined &&
     !executionOptionsQuery.isPlaceholderData &&
@@ -451,7 +458,7 @@ export function useThreadCreationOptions(
       providers.map((p) => ({
         value: p.id,
         label: p.displayName,
-        icon: getProviderIconInfo(p.id, p)?.icon,
+        icon: getProviderIconInfo("agent", p.id, p)?.icon,
         ...(p.strings?.brandPrefix === undefined
           ? {}
           : { brandPrefix: p.strings.brandPrefix }),
@@ -899,6 +906,7 @@ export function useThreadCreationOptions(
     selectedProviderId: effectiveProviderId,
     setSelectedProviderId,
     setProviderModelReasoning,
+    providers,
     providerOptions,
     hasMultipleProviders,
     selectedProviderDisplayName:
@@ -922,6 +930,7 @@ export function useThreadCreationOptions(
     modelLoadFailed,
     modelLoadError,
     modelCatalogIsVerified,
+    modelCatalogIsSettled,
     reasoningOptions,
     permissionModeOptions,
     supportsPermissionModeSelection,

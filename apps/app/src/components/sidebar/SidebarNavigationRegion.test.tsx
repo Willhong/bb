@@ -37,25 +37,18 @@ vi.mock("@/components/plugin/PluginNavSidebarItems", () => ({
   ResourceNavSidebarItem: () => <div />,
   PluginNavSidebarItems: ({
     builtInEntries = [],
-    entries = [],
   }: {
     builtInEntries?: Array<{
       id: string;
       title: string;
       onActivate: MouseEventHandler<HTMLButtonElement>;
     }>;
-    entries?: Array<{ chrome: { pluginId: string; title: string } }>;
   }) => (
     <div>
       {builtInEntries.map((entry) => (
         <button key={entry.id} type="button" onClick={entry.onActivate}>
           {entry.title}
         </button>
-      ))}
-      {entries.map(({ chrome }) => (
-        <div key={chrome.pluginId} data-testid="built-in-plugin-entry">
-          {chrome.title}
-        </div>
       ))}
     </div>
   ),
@@ -123,7 +116,6 @@ function Harness({ onOwnerMount }: { onOwnerMount: () => void }) {
         onNavigate={vi.fn()}
         onNewChat={vi.fn()}
         onSearchThreads={mocks.onSearchThreads}
-        toolsRoutePath="/plugins"
       />
       <RetainedOwner onMount={onOwnerMount} />
       <LocationProbe />
@@ -193,28 +185,6 @@ describe("SidebarNavigationRegion", () => {
     expect(mocks.openNewThreadInSplit).toHaveBeenCalledOnce();
   });
 
-  it("passes Automations through the plugin navigation row path", () => {
-    setPluginSlotRegistrations(
-      "automations",
-      registrationSet({
-        navPanels: [
-          {
-            id: "automations",
-            title: "Automations",
-            icon: "Calendar",
-            path: "automations",
-            component: () => null,
-          },
-        ],
-      }),
-    );
-    renderHarness();
-
-    expect(screen.getByTestId("built-in-plugin-entry").textContent).toBe(
-      "Automations",
-    );
-  });
-
   it("routes Search through the quick palette without inline search UI", () => {
     registerFixture();
     renderHarness();
@@ -256,9 +226,7 @@ describe("SidebarNavigationRegion", () => {
     ).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Plugins" }));
-    expect(screen.getByTestId("pathname").textContent).toBe(
-      "/plugins",
-    );
+    expect(screen.getByTestId("pathname").textContent).toBe("/plugins");
     expect(
       screen
         .getByRole("button", { name: "Plugins" })
@@ -266,9 +234,7 @@ describe("SidebarNavigationRegion", () => {
     ).toBe("page");
 
     fireEvent.click(screen.getByRole("button", { name: "Skills" }));
-    expect(screen.getByTestId("pathname").textContent).toBe(
-      "/skills",
-    );
+    expect(screen.getByTestId("pathname").textContent).toBe("/skills");
   });
 
   it("delegates and falls back after a crash without owner remounts", () => {

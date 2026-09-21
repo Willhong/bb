@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { PluginEnvironmentProviderProgress } from "@get-bb/plugin-sdk/environment-provider";
 import { reportHostProgress } from "bb-environment-provider-host/progress";
@@ -28,7 +29,6 @@ export const checkoutInputsSchema = z.object({
   path: z.string().min(1).optional(),
   branch: checkoutBranchSelectionSchema.optional(),
 });
-export type CheckoutInputs = z.infer<typeof checkoutInputsSchema>;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -141,6 +141,7 @@ export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
   bb.experimental_environments.register({
     id: PROJECT_CHECKOUT_ENVIRONMENT_PROVIDER_ID,
     displayName: "Project checkout",
+    description: "Work in a project checkout on this machine.",
     icon: "Laptop",
     requires: { projectCheckout: true },
     inputs: checkoutInputsSchema,
@@ -183,12 +184,16 @@ export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
       const hostId = context.host.id;
       const path = context.inputs.path ?? context.projectCheckout.path;
       const branchInput = context.inputs.branch;
-      if (!(await context.experimental_claimPath(path))) {
-        return {
-          status: "failed",
-
-          message: LIVE_THREAD_MESSAGE,
-        };
+      const claimDeadline = Date.now() + ATTACH_TIMEOUT_MS;
+      while (!(await context.experimental_claimPath(path))) {
+        context.signal.throwIfAborted();
+        if (branchInput !== undefined || Date.now() >= claimDeadline) {
+          return {
+            status: "failed",
+            message: "Workspace is being prepared by another thread",
+          };
+        }
+        await delay(50, undefined, { signal: context.signal });
       }
       if (
         branchInput !== undefined &&
@@ -232,7 +237,9 @@ export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
         return {
           status: "created",
           path: result.path,
-          ownsPath: false,
+          ownsPath:
+            result.path === context.projectCheckout.path &&
+            context.projectCheckout.experimental_ownsPath === true,
         };
       } catch (error) {
         if (context.signal.aborted) throw error;

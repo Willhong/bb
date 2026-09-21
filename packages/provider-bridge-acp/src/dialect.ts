@@ -6,9 +6,10 @@ import {
   type AcpMaintenanceDialect,
 } from "./bridge/provider-maintenance.js";
 import { delegationPresentation } from "./presentation.js";
-import type {
-  AcpClassifiedToolCall,
-  AcpCommandResult,
+import {
+  commandRawOutputSchema,
+  type AcpClassifiedToolCall,
+  type AcpCommandResult,
 } from "./tool-classification.js";
 import {
   acpToolKindSchema,
@@ -125,6 +126,85 @@ export const GROK_ACP_DIALECT: AcpDialect = {
   classifyToolCall: grokClassifyToolCall,
 };
 
+const grokModelMetaSchema = z
+  .object({
+    totalContextTokens: z.number().int().positive(),
+  })
+  .passthrough();
+
+const grokPromptMetaSchema = z
+  .object({
+    inputTokens: z.number().int().nonnegative().optional(),
+    totalTokens: z.number().int().nonnegative().optional(),
+    usage: z
+      .object({
+        inputTokens: z.number().int().nonnegative().optional(),
+        totalTokens: z.number().int().nonnegative().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+const grokPromptResultSchema = z
+  .object({
+    _meta: grokPromptMetaSchema.optional(),
+  })
+  .passthrough();
+
+const grokSessionModelSchema = z
+  .object({
+    modelId: z.string(),
+    _meta: grokModelMetaSchema.optional(),
+  })
+  .passthrough();
+
+const grokSessionModelsSchema = z
+  .object({
+    currentModelId: z.string().optional(),
+    availableModels: z.array(grokSessionModelSchema).optional(),
+  })
+  .passthrough();
+
+export function grokContextWindowSizeFromSessionModels(
+  models: unknown,
+): number | undefined {
+  const parsed = grokSessionModelsSchema.safeParse(models);
+  if (!parsed.success) {
+    return undefined;
+  }
+  const available = parsed.data.availableModels ?? [];
+  const currentId = parsed.data.currentModelId;
+  const ordered = [
+    ...(currentId === undefined
+      ? []
+      : available.filter((model) => model.modelId === currentId)),
+    ...available,
+  ];
+  for (const model of ordered) {
+    if (model._meta !== undefined) {
+      return model._meta.totalContextTokens;
+    }
+  }
+  return undefined;
+}
+
+export function grokContextUsageFromPromptResult(
+  result: unknown,
+): { used: number } | undefined {
+  const parsed = grokPromptResultSchema.safeParse(result);
+  if (!parsed.success) {
+    return undefined;
+  }
+  const meta = parsed.data._meta;
+  const used =
+    meta?.usage?.inputTokens ??
+    meta?.inputTokens ??
+    meta?.usage?.totalTokens ??
+    meta?.totalTokens;
+  return used === undefined ? undefined : { used };
+}
+
 const CURSOR_TASK_TOOL = "task";
 const cursorTaskRawInputSchema = z
   .object({ _toolName: z.string().optional() })
@@ -202,34 +282,25 @@ const ompBashRawInputSchema = z
   })
   .passthrough();
 
-const ompBashRawOutputSchema = z
-  .object({
-    content: z.array(
-      z
-        .object({
-          type: z.literal("text"),
-          text: z.string(),
-        })
-        .passthrough(),
-    ),
-    details: z
+const ompBashRawOutputSchema = commandRawOutputSchema.extend({
+  content: z.array(
+    z
       .object({
-        exitCode: z.number().int().optional(),
-        wallTimeMs: z.number().nonnegative().optional(),
-        timedOut: z.boolean().optional(),
-        signal: z.unknown().optional(),
-        async: z.unknown().optional(),
+        type: z.literal("text"),
+        text: z.string(),
       })
       .passthrough(),
-    exitCode: z.number().int().nullable().optional(),
-    exit_code: z.number().int().nullable().optional(),
-    stdout: z.string().optional(),
-    stderr: z.string().optional(),
-    output_for_prompt: z.string().optional(),
-    signal: z.string().nullable().optional(),
-    timed_out: z.boolean().optional(),
-  })
-  .passthrough();
+  ),
+  details: z
+    .object({
+      exitCode: z.number().int().optional(),
+      wallTimeMs: z.number().nonnegative().optional(),
+      timedOut: z.boolean().optional(),
+      signal: z.unknown().optional(),
+      async: z.unknown().optional(),
+    })
+    .passthrough(),
+});
 
 function stripOmpTrailingNotice(text: string, notice: string): string {
   const suffix = `\n\n${notice}`;

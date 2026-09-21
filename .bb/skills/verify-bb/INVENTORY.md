@@ -28,7 +28,6 @@ has been exercised or that every behavior has been understood.
 - `app-route: packages/client-core/src/routes/route-paths.ts: LEGACY_AUTOMATIONS_ROUTE_PATH "/automations"`
 - `app-route: packages/client-core/src/routes/route-paths.ts: LEGACY_AUTOMATION_DETAIL_ROUTE_PATH "/automations/:projectId/:automationId"`
 - `app-route: packages/client-core/src/routes/route-paths.ts: LEGACY_PROJECT_COMPOSE_ROUTE_PATH "/projects/:projectId"`
-- `app-route: packages/client-core/src/routes/route-paths.ts: LEGACY_SKILLS_ROUTE_PATH "/skills"`
 - `app-route: packages/client-core/src/routes/route-paths.ts: LEGACY_TOOLS_AUTOMATIONS_ROUTE_PATH "/tools/automations"`
 - `app-route: packages/client-core/src/routes/route-paths.ts: LEGACY_TOOLS_AUTOMATION_BROWSE_ROUTE_PATH "/tools/automations/browse"`
 - `app-route: packages/client-core/src/routes/route-paths.ts: LEGACY_TOOLS_AUTOMATION_DETAIL_ROUTE_PATH "/tools/automations/:projectId/:automationId"`
@@ -158,7 +157,6 @@ has been exercised or that every behavior has been understood.
 1 source files. Recipes: [hosts-updates](features/hosts-updates.md).
 
 - `cli-command: apps/cli/src/commands/machine.ts: install <id-or-name> <provider>`
-- `cli-command: apps/cli/src/commands/machine.ts: join-code`
 - `cli-command: apps/cli/src/commands/machine.ts: list`
 - `cli-command: apps/cli/src/commands/machine.ts: machine`
 - `cli-command: apps/cli/src/commands/machine.ts: provider-cli`
@@ -387,7 +385,7 @@ has been exercised or that every behavior has been understood.
 
 ## dev-harness
 
-4 source files. Recipes: [developer-fixtures](features/developer-fixtures.md).
+3 source files. Recipes: [developer-fixtures](features/developer-fixtures.md).
 
 ## domain-contracts
 

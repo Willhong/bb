@@ -15,6 +15,7 @@ import { createTestProviderRegistry } from "../helpers/provider-registry.js";
 import {
   buildAllRouteTimelinePages,
   buildRouteTimelinePage,
+  clearCrossBuildTimelineCaches,
   formatMarkdownTable,
   latestTimelinePage,
   loadCorpusThreadIntoDb,
@@ -38,13 +39,14 @@ const PER_THREAD_TIMEOUT_MS = 5 * 60_000;
 const CALIBRATION_KIND = "json-sort-v1";
 
 const SYNTHETIC_EVENT_COUNT = 10_000;
-const SYNTHETIC_CEILING_MS = 1_500;
+const SYNTHETIC_CEILING_RATIO = 4;
 
 type ThreadTimelineBuildProfileStage =
   ThreadTimelineBuildProfile["stageTimings"][number]["stage"];
 
 const STAGES: readonly ThreadTimelineBuildProfileStage[] = [
   "event-query",
+  "selection-memo-lookup",
   "group-context-query",
   "ordering-context-query",
   "accepted-client-request-context-query",
@@ -201,22 +203,25 @@ function measureCorpusThread(
   const corpusThread = loadCorpusThread(threadId);
   const loaded = loadCorpusThreadIntoDb(corpusThread);
   try {
-    const samples = sample((): InterleavedSample => ({
-      calibrationMs: runCalibrationWorkload(),
-      latest: buildRouteTimelinePage({
+    const samples = sample((): InterleavedSample => {
+      const calibrationMs = runCalibrationWorkload();
+      clearCrossBuildTimelineCaches(loaded.db);
+      const latest = buildRouteTimelinePage({
         db: loaded.db,
         page: latestTimelinePage(),
         registry,
         thread: loaded.thread,
         variant: "default",
-      }),
-      walk: buildAllRouteTimelinePages({
+      });
+      clearCrossBuildTimelineCaches(loaded.db);
+      const walk = buildAllRouteTimelinePages({
         db: loaded.db,
         registry,
         thread: loaded.thread,
         variant: "default",
-      }),
-    }));
+      });
+      return { calibrationMs, latest, walk };
+    });
     const latestSamples = samples.map((entry) => entry.latest);
     const walkSamples = samples.map((entry) => entry.walk);
     const latestStageP50Ms: Record<string, number> = {};
@@ -508,7 +513,7 @@ describe.skipIf(!available)("provider corpus timeline perf baseline", () => {
 });
 
 describe("timeline build micro-benchmark", () => {
-  it(`projects every page of a ${SYNTHETIC_EVENT_COUNT}-event thread under ${SYNTHETIC_CEILING_MS} ms`, async () => {
+  it(`projects every page of a ${SYNTHETIC_EVENT_COUNT}-event thread within ${SYNTHETIC_CEILING_RATIO}x the calibration workload`, async () => {
     const registry = await createTestProviderRegistry();
     const synthetic: SyntheticThread = createSyntheticThread(
       SYNTHETIC_EVENT_COUNT,
@@ -517,17 +522,29 @@ describe("timeline build micro-benchmark", () => {
       expect(synthetic.eventCount).toBeGreaterThanOrEqual(
         SYNTHETIC_EVENT_COUNT,
       );
-      const samples = sample(() =>
-        buildAllRouteTimelinePages({
-          db: synthetic.db,
-          registry,
-          thread: synthetic.thread,
-          variant: "default",
-        }),
+      const samples = sample(() => {
+        const calibrationMs = runCalibrationWorkload();
+        clearCrossBuildTimelineCaches(synthetic.db);
+        return {
+          calibrationMs,
+          pages: buildAllRouteTimelinePages({
+            db: synthetic.db,
+            registry,
+            thread: synthetic.thread,
+            variant: "default",
+          }),
+        };
+      });
+      const durations = samples.map((entry) =>
+        sumProfileDurations(entry.pages),
       );
-      const durations = samples.map((pages) => sumProfileDurations(pages));
       const minimum = Math.min(...durations);
-      const last = samples[samples.length - 1];
+      const minimumRatio = Math.min(
+        ...samples.map(
+          (entry) => sumProfileDurations(entry.pages) / entry.calibrationMs,
+        ),
+      );
+      const last = samples[samples.length - 1]?.pages;
       if (last === undefined) {
         throw new Error("no samples");
       }
@@ -537,11 +554,12 @@ describe("timeline build micro-benchmark", () => {
       );
       process.stdout.write(
         `Synthetic ${synthetic.eventCount}-event thread: ${last.length} pages, ${rowsProjected} rows projected, ` +
-          `full walk min ${round(minimum)} ms, p50 ${round(percentile(durations, 0.5))} ms ` +
+          `full walk min ${round(minimum)} ms, p50 ${round(percentile(durations, 0.5))} ms, ` +
+          `min calibration ratio ${round(minimumRatio, 4)} ` +
           `(samples ${durations.map((value) => round(value)).join(", ")})\n`,
       );
       expect(last.length).toBeGreaterThan(1);
-      expect(minimum).toBeLessThan(SYNTHETIC_CEILING_MS);
+      expect(minimumRatio).toBeLessThan(SYNTHETIC_CEILING_RATIO);
     } finally {
       synthetic.close();
     }

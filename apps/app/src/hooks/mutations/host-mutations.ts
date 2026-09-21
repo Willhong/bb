@@ -4,6 +4,7 @@ import { apiClient } from "@/lib/api-server";
 import { request } from "@/lib/api";
 import { sdk } from "@/lib/sdk";
 import { invalidateHostListQueries } from "../cache-owners/mutation-cache-effects";
+import { applyHostRenameResult } from "../cache-owners/system-cache-effects";
 
 interface RenameHostRequest {
   hostId: string;
@@ -19,7 +20,8 @@ export function useRenameHost() {
     },
     mutationFn: ({ hostId, name }: RenameHostRequest) =>
       sdk.hosts.update({ hostId, name }),
-    onSuccess: () => {
+    onSuccess: (host) => {
+      applyHostRenameResult({ host, queryClient });
       invalidateHostListQueries({ queryClient });
     },
   });
@@ -73,4 +75,34 @@ export function useRetryHostUpdate() {
   return useMutation({
     mutationFn: (hostId: string) => sdk.hosts.retryUpdate({ hostId }),
   });
+}
+
+function useHostLifecycleMutation<Result>(
+  mutationFn: (hostId: string) => Promise<Result>,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn,
+    onSuccess: () => {
+      invalidateHostListQueries({ queryClient });
+    },
+  });
+}
+
+export function useSuspendHost() {
+  return useHostLifecycleMutation((hostId) =>
+    sdk.hosts.experimental_suspend({ hostId }),
+  );
+}
+
+export function useResumeHost() {
+  return useHostLifecycleMutation((hostId) =>
+    sdk.hosts.experimental_resume({ hostId }),
+  );
+}
+
+export function useRetryHostCleanup() {
+  return useHostLifecycleMutation((hostId) =>
+    sdk.hosts.experimental_retryCleanup({ hostId }),
+  );
 }

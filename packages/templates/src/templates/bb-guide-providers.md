@@ -17,12 +17,16 @@ Providers are agent backends (e.g., codex, claude-code). Each supports different
 Use these before spawning threads if you are unsure which provider or model to use.
 `--host` is an alias for `--machine`. Machine and environment selectors are
 mutually exclusive because an environment already selects its machine. When no
-selector is supplied, both commands intentionally inspect the primary machine.
+selector is supplied, both commands intentionally inspect the server machine.
 When provider and model are omitted from bb thread spawn, the project's
 remembered defaults apply. If the project has no remembered choice, bb uses
 the explicitly requested provider or Codex, then resolves the model marked
 default by that provider on the target machine (falling back to the first
 catalog model when none is marked).
+
+Model lists answer from the machine's last stored list while a background
+refresh runs, so a list can be hours old. A provider whose refresh keeps
+failing or timing out keeps answering from its last stored list.
 
 Provider-native memory can be controlled on the separate Settings → Providers
 → Codex and Settings → Providers → Claude Code pages. Codex memory controls

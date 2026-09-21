@@ -48,7 +48,7 @@ export class ShareHostResolver {
     );
     if (config.primaryHostId !== null) return config.primaryHostId;
     throw new Error(
-      "this bb has no primary host yet — connect a machine before sharing ports",
+      "this bb has no server machine yet — connect a machine before sharing ports",
     );
   }
 
@@ -78,32 +78,24 @@ export class ShareHostResolver {
   ): Promise<ShareHost> {
     if (override !== undefined) return this.byNameOrId(override);
     if (ctx.threadId === undefined) return this.serverHost();
-
-    const thread = threadEnvironmentSchema.parse(
-      await this.getSdk().threads.get({
-        threadId: ctx.threadId,
-        include: "environment",
-      }),
-    );
-    if (!thread.environment) {
-      throw new Error(
-        `thread ${ctx.threadId} has no environment, so its share host cannot be resolved; pass --host <name-or-id>`,
-      );
-    }
-    return this.byId(thread.environment.hostId);
+    return this.byId(await this.threadHostId(ctx.threadId));
   }
 
   async resolveId(ctx: Pick<PluginCliContext, "threadId">): Promise<string> {
     if (ctx.threadId === undefined) return this.serverHostId();
+    return this.threadHostId(ctx.threadId);
+  }
+
+  private async threadHostId(threadId: string): Promise<string> {
     const thread = threadEnvironmentSchema.parse(
       await this.getSdk().threads.get({
-        threadId: ctx.threadId,
+        threadId,
         include: "environment",
       }),
     );
     if (!thread.environment) {
       throw new Error(
-        `thread ${ctx.threadId} has no environment, so its share host cannot be resolved; pass --host <name-or-id>`,
+        `thread ${threadId} has no environment, so its share host cannot be resolved; pass --host <name-or-id>`,
       );
     }
     return thread.environment.hostId;

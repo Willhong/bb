@@ -19,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { waitForProcessExit } from "@bb/config/child-process-exit";
 import { resolvePortFromEnv } from "@bb/config/runtime";
 import {
   assertBbAppArtifacts,
@@ -41,7 +42,6 @@ import {
   superviseFullStackProcesses,
   terminateManagedFullStackProcesses,
   waitForHostDaemonStatus,
-  waitForProcessExit,
 } from "../src/launcher.js";
 import type {
   BbAppStartContext,
@@ -53,6 +53,7 @@ import type {
   ManagedProcessRun,
   NamedProcessExitResult,
   ProcessExitResult,
+  ReadServerMovedFileFn,
 } from "../src/launcher.js";
 
 interface DelayArgs {
@@ -245,6 +246,12 @@ function delay(args: DelayArgs): Promise<DelayResult> {
 const immediateDelay: DelayMillisecondsFn = () => {
   return Promise.resolve();
 };
+
+const noServerMovedFile: ReadServerMovedFileFn = async () => null;
+
+async function unexpectedServerMove(): Promise<FullStackSupervisionResult> {
+  throw new Error("Unexpected server move");
+}
 
 function createTestStartContext(): BbAppStartContext {
   return {
@@ -746,8 +753,6 @@ describe("bb-app launcher", () => {
         "host_remote",
         "--host-daemon-port",
         "48887",
-        "--host-type",
-        "persistent",
         "--auto-update",
       ]),
     ).toEqual({
@@ -757,7 +762,6 @@ describe("bb-app launcher", () => {
         help: false,
         hostDaemonPort: "48887",
         hostId: "host_remote",
-        hostType: "persistent",
         joinCode: "bbde_supplied",
         json: false,
         serverUrl: "https://bb.example.test",
@@ -809,7 +813,11 @@ describe("bb-app launcher", () => {
     expect(runtime.serverEnv.BB_THREAD_STORAGE).toBeUndefined();
     expect(runtime.serverEnv.BB_PROJECT_ID).toBe("proj_parent");
 
-    const daemonEnv = createDaemonEnv(runtime.context, runtime.env);
+    const daemonEnv = createDaemonEnv({
+      context: runtime.context,
+      env: runtime.env,
+      serverUrl: runtime.context.serverUrl,
+    });
     expect(daemonEnv.BB_ENVIRONMENT_ID).toBeUndefined();
     expect(daemonEnv.BB_THREAD_ID).toBeUndefined();
     expect(daemonEnv.BB_THREAD_STORAGE).toBeUndefined();
@@ -1969,7 +1977,9 @@ describe("bb-app launcher", () => {
       delayMilliseconds: immediateDelay,
       isHealthyServerAnswering: async () => false,
       isShutdownRequested: supervisor.shutdownRequested,
+      onServerMoved: unexpectedServerMove,
       processes: supervisor.processes,
+      readServerMovedFile: noServerMovedFile,
       startDaemon: supervisor.daemonStart,
       startServer: supervisor.serverStart,
     });
@@ -2002,7 +2012,9 @@ describe("bb-app launcher", () => {
       delayMilliseconds: immediateDelay,
       isHealthyServerAnswering: async () => false,
       isShutdownRequested: supervisor.shutdownRequested,
+      onServerMoved: unexpectedServerMove,
       processes: supervisor.processes,
+      readServerMovedFile: noServerMovedFile,
       startDaemon: supervisor.daemonStart,
       startServer: supervisor.serverStart,
     });
@@ -2035,7 +2047,9 @@ describe("bb-app launcher", () => {
       delayMilliseconds: immediateDelay,
       isHealthyServerAnswering: async () => false,
       isShutdownRequested: supervisor.shutdownRequested,
+      onServerMoved: unexpectedServerMove,
       processes: supervisor.processes,
+      readServerMovedFile: noServerMovedFile,
       startDaemon: supervisor.daemonStart,
       startServer: supervisor.serverStart,
     });
@@ -2063,7 +2077,9 @@ describe("bb-app launcher", () => {
       delayMilliseconds: immediateDelay,
       isHealthyServerAnswering: async () => false,
       isShutdownRequested: supervisor.shutdownRequested,
+      onServerMoved: unexpectedServerMove,
       processes: supervisor.processes,
+      readServerMovedFile: noServerMovedFile,
       startDaemon: supervisor.daemonStart,
       startServer: supervisor.serverStart,
     });
@@ -2099,7 +2115,9 @@ describe("bb-app launcher", () => {
       delayMilliseconds: (args) => restartThrottle.delayMilliseconds(args),
       isHealthyServerAnswering: async () => false,
       isShutdownRequested: supervisor.shutdownRequested,
+      onServerMoved: unexpectedServerMove,
       processes: supervisor.processes,
+      readServerMovedFile: noServerMovedFile,
       startDaemon: supervisor.daemonStart,
       startServer: supervisor.serverStart,
     });
@@ -2247,4 +2265,34 @@ describe("bb-app launcher", () => {
     expect(webServerEnv.BB_APP_SURFACE).toBe("web");
     expect(invalidSurfaceServerEnv.BB_APP_SURFACE).toBe("web");
   });
+});
+
+it("preserves machine identity and access headers through real config set and unset", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "bb-app-config-machine-"));
+  const identity = {
+    serverUrl: "https://machine.example",
+    serverHeaders: { "x-bb-connect-machine": "private-machine-access" },
+    machineCredential: "legacy-private",
+    connectMachineId: "cloud-device",
+  };
+  try {
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify(identity));
+    await runBbApp([
+      "--data-dir",
+      dataDir,
+      "config",
+      "set",
+      "BB_APP_URL",
+      "https://other.example",
+    ]);
+    expect(
+      JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")),
+    ).toMatchObject(identity);
+    await runBbApp(["--data-dir", dataDir, "config", "unset", "BB_APP_URL"]);
+    expect(
+      JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")),
+    ).toEqual(identity);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });

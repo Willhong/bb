@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { listPublicHosts, type DbConnection } from "@bb/db";
+import { getHost } from "@bb/db";
 import { HOST_ID_FILE_NAME } from "@bb/host-daemon-contract";
 import { ApiError } from "../../errors.js";
 import type { AppDeps } from "../../types.js";
@@ -27,7 +27,7 @@ function primaryHostUnavailableError(): ApiError {
   );
 }
 
-function readPrimaryHostIdFromDataDir(
+export function readPrimaryHostIdFromDataDir(
   args: ReadPrimaryHostIdArgs,
 ): string | null {
   try {
@@ -41,34 +41,22 @@ function readPrimaryHostIdFromDataDir(
   }
 }
 
-function resolveSinglePublicHostId(db: DbConnection): string | null {
-  const hosts = listPublicHosts(db);
-  if (hosts.length !== 1) {
-    return null;
-  }
-  const host = hosts[0];
-  return host?.id ?? null;
-}
-
-function resolveSingleConnectedPublicHostId(
-  deps: PrimaryHostDeps,
-): string | null {
-  const hosts = listPublicHosts(deps.db).filter((host) =>
-    deps.hub.hasDaemonForHost(host.id),
+export function isServerMachineHost(
+  deps: Pick<AppDeps, "config">,
+  hostId: string,
+): boolean {
+  return (
+    readPrimaryHostIdFromDataDir({ dataDir: deps.config.dataDir }) === hostId
   );
-  if (hosts.length !== 1) {
-    return null;
-  }
-  const host = hosts[0];
-  return host?.id ?? null;
 }
 
 export function resolvePrimaryHostId(deps: PrimaryHostDeps): string | null {
-  return (
-    readPrimaryHostIdFromDataDir({ dataDir: deps.config.dataDir }) ??
-    resolveSingleConnectedPublicHostId(deps) ??
-    resolveSinglePublicHostId(deps.db)
-  );
+  const configured = readPrimaryHostIdFromDataDir({
+    dataDir: deps.config.dataDir,
+  });
+  const configuredHost =
+    configured === null ? null : getHost(deps.db, configured);
+  return configuredHost?.destroyedAt === null ? configuredHost.id : null;
 }
 
 export function requirePrimaryHostId(deps: PrimaryHostDeps): string {

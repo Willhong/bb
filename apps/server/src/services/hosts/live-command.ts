@@ -1,3 +1,5 @@
+import { getEnvironment } from "@bb/db";
+import { resolveHostEnvironment } from "./host-environment.js";
 import { randomUUID } from "node:crypto";
 import {
   type HostDaemonCommand,
@@ -18,7 +20,10 @@ import {
 } from "../../internal/command-result-side-effects.js";
 import { handleLiveCommandResultSideEffects } from "../../internal/command-results.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
-import { callHostOnlineRpc } from "./online-rpc.js";
+import {
+  callHostOnlineRpcForWork,
+  isHostUnavailableApiError,
+} from "./online-rpc.js";
 
 export const LIVE_DAEMON_COMMAND_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
@@ -26,6 +31,7 @@ interface RunLiveHostCommandArgs<TType extends HostDaemonSettledCommandType> {
   command: Extract<HostDaemonCommand, { type: TType }>;
   execution?: HostDaemonCommandExecutionRecord;
   hostId: string;
+  preserveOnHostUnavailable?: boolean;
   timeoutMs: number;
 }
 
@@ -46,7 +52,6 @@ interface StartLiveHostCommandArgs<
   TType extends HostDaemonSettledCommandType,
 > extends RunLiveHostCommandArgs<TType> {
   onError?: LiveHostCommandErrorHandler<TType>;
-  onExpectedError?: LiveHostCommandErrorHandler<TType>;
   onSettled?: () => void | Promise<void>;
 }
 
@@ -225,8 +230,26 @@ export async function runLiveHostCommand<
   const execution =
     args.execution ?? createLiveHostCommandExecution(args.hostId);
   try {
-    const result = await callHostOnlineRpc(deps, {
-      command: args.command,
+    const call = callHostOnlineRpcForWork;
+    const sourceCommand: HostDaemonCommand = args.command;
+    const command = {
+      ...args.command,
+      ...(sourceCommand.type === "environment.attach"
+        ? {
+            contributedEnv:
+              sourceCommand.setupScriptTimeoutMs === null
+                ? []
+                : await resolveHostEnvironment(deps, {
+                    hostId: args.hostId,
+                    projectId:
+                      getEnvironment(deps.db, sourceCommand.environmentId)
+                        ?.projectId ?? null,
+                  }),
+          }
+        : {}),
+    };
+    const result = await call(deps, {
+      command,
       hostId: args.hostId,
       timeoutMs: args.timeoutMs,
     });
@@ -244,6 +267,12 @@ export async function runLiveHostCommand<
   } catch (error) {
     const normalized =
       error instanceof Error ? error : new Error(String(error));
+    if (
+      args.preserveOnHostUnavailable === true &&
+      isHostUnavailableApiError(normalized)
+    ) {
+      throw normalized;
+    }
     const failureReport = buildLiveHostCommandFailureReport({
       command: args.command,
       completedAt: Date.now(),
@@ -298,7 +327,6 @@ export function startLiveHostCommand<
           },
           "Expected live host command failure",
         );
-        args.onExpectedError?.(handlerArgs);
         return;
       }
       args.onError?.(handlerArgs);

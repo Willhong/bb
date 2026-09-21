@@ -73,6 +73,7 @@ bb.providers.register({
   ],
   serviceTiers: undefined,       // optional; open list, model/list is precise
   composerActions: ["plan"],     // "plan" | "goal"
+  completedTurnDisplay: "flat",  // "collapse" (default) | "flat"; the user's per-provider setting wins
   extensionKinds: {},            // "<name>": { item?: Schema, state?: Schema }
   models: { fallback: [], scope: "host" }, // cold-cache placeholder; scope is
                                  // "host" | "workspace" (default): how far one
@@ -85,6 +86,13 @@ bb.providers.register({
 })
 // => { dispose(): void }
 ```
+
+bb keeps each machine's last successful `model/list` answer per
+`models.scope` across daemon reconnects and server restarts, serves it
+immediately, and refreshes it in the background once it is 10 minutes old. A
+stored answer is discarded when the bridge fingerprint changes (plugin bundle
+digest, bridge options, env passthrough). A list that depends on login state,
+CLI version, or environment values is corrected only by the next refresh.
 
 Still experimental on the declaration (see api_to_audit.md):
 `experimental_visibility` (`"installed"` hides the row until the bridge's
@@ -123,6 +131,12 @@ Rules:
   register conservatively while the host is offline, re-register on connect).
 - Picker order and the default provider are user settings; the initial default
   is plugin install order. First-party plugins install first at bootstrap.
+- `completedTurnDisplay` is the provider's default for finished turns in the
+  thread timeline. `"collapse"` folds a finished turn's work into one "Worked
+  for" row beside the final answer; `"flat"` keeps every row visible, as while
+  the turn ran. The user overrides it per provider in Settings → Providers or
+  with `bb settings completed-turns`, and the server applies the result to the
+  timeline, turn details, conversation outline, and `bb thread log`.
 - Third-party ACP agents (for example Amp) register the same way, with a
   bridge built from the published ACP kit.
 

@@ -13,12 +13,12 @@ import {
   finalizeOperationMessage,
   interruptOperationMessage,
 } from "./parse-operation-message.js";
+import { flushActiveToolCell } from "./tool-activity-cells.js";
 import {
-  flushActiveToolCell,
+  createToolActivityState,
   flushPendingToolActivityOutput,
   interruptPendingToolActivity,
 } from "./tool-activity-projection.js";
-import { createToolActivityState } from "./tool-activity-projection.js";
 import {
   createOperationProjectionState,
   flushPendingFileEditOutput,
@@ -275,6 +275,12 @@ function finalizePendingMessageForInterruptedTurn(
       if (message.status === "pending") {
         message.status = "interrupted";
         message.lifecycle = "interrupted";
+      }
+      return;
+    case "plugin-form-lifecycle":
+      if (message.status === "pending") {
+        message.status = "interrupted";
+        message.lifecycle = "cancelled";
       }
       return;
     case "assistant-text":

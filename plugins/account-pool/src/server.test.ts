@@ -1,3 +1,9 @@
+import {
+  usageMeasurementSchema,
+  usageResourceListSchema,
+  usageListMethod,
+  usageFetchMethod,
+} from "./usage-contract.js";
 import fs from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -346,6 +352,7 @@ describe("Account Pool config schema", () => {
       anthropicUpstreamBaseUrl: "https://api.anthropic.com",
       codexUpstreamBaseUrl: "https://chatgpt.com/backend-api/codex",
       switchThreshold: 0.98,
+      parentMode: "proxy",
     });
     expect(
       accountPoolConfigSetInputSchema.safeParse({
@@ -363,6 +370,41 @@ describe("Account Pool config schema", () => {
 });
 
 describe("Account Pool plugin", () => {
+  it("removes persisted cache debugging settings while preserving pool configuration across reloads", async () => {
+    const dataDir = await mkdtemp(
+      path.join(tmpdir(), "bb-account-pool-config-upgrade-"),
+    );
+    const host = createFakePluginHost({
+      pluginId: "account-pool",
+      dataDir,
+      sdk: sdkStubs(),
+    });
+    cleanups.push(async () => {
+      await host.harness.lifecycle.dispose();
+      await fs.rm(dataDir, { recursive: true, force: true });
+    });
+    const expected = accountPoolConfigSchema.parse({
+      anthropicUpstreamBaseUrl: "http://127.0.0.1:9000",
+      switchThreshold: 0.75,
+      parentMode: "isolate",
+    });
+    await host.bb.storage.kv.set("config", {
+      ...expected,
+      cacheMissDebug: true,
+      cacheMissMinTokens: 20_000,
+    });
+    const plugin = createAccountPoolPlugin();
+    await plugin(host.bb);
+    expect(await host.bb.storage.kv.get("config")).toEqual(expected);
+    expect(await host.harness.behavior.callRpc("config.get", null)).toEqual(
+      expected,
+    );
+    await host.harness.lifecycle.reload(plugin);
+    expect(await host.harness.behavior.callRpc("config.get", null)).toEqual(
+      expected,
+    );
+  });
+
   it("reads and updates one full config record through RPC and CLI", async () => {
     const dataDir = await mkdtemp(
       path.join(tmpdir(), "bb-account-pool-config-"),
@@ -410,6 +452,7 @@ describe("Account Pool plugin", () => {
       anthropicUpstreamBaseUrl: "http://127.0.0.1:9000",
       codexUpstreamBaseUrl: "https://chatgpt.com/backend-api/codex",
       switchThreshold: 0.75,
+      parentMode: "proxy",
     });
     expect(
       accountPoolConfigSchema.parse(await host.bb.storage.kv.get("config")),
@@ -420,21 +463,40 @@ describe("Account Pool plugin", () => {
     });
   });
 
-  it.each(["generations", "edits"])(
-    "routes native Codex image %s with pool authentication",
-    async (operation) => {
+  it.each([
+    {
+      path: "images/generations",
+      request: { prompt: "A fox astronaut", images: [] },
+      result: { data: [{ b64_json: "generated-image" }] },
+    },
+    {
+      path: "images/edits",
+      request: { prompt: "A fox astronaut", images: [] },
+      result: { data: [{ b64_json: "generated-image" }] },
+    },
+    {
+      path: "alpha/search",
+      request: {
+        id: "search-1",
+        model: "gpt-5.5",
+        commands: { search_query: [{ q: "bb account pooler" }] },
+      },
+      result: { encrypted_output: "encrypted-search-output" },
+    },
+  ])(
+    "routes native Codex $path with pool authentication",
+    async ({ path, request, result }) => {
       const requests: Request[] = [];
-      const image = { data: [{ b64_json: "generated-image" }] };
       const fixture = await createOAuthRequestFixture(
         "codex",
         async (input, init) => {
           requests.push(new Request(input, init));
-          return Response.json(image);
+          return Response.json(result);
         },
         Date.now,
       );
-      const route = `/v1/images/${operation}`;
-      const body = JSON.stringify({ prompt: "A fox astronaut", images: [] });
+      const route = `/v1/${path}`;
+      const body = JSON.stringify(request);
       const denied = await fixture.host.harness.behavior.fetchHttp(
         "POST",
         route,
@@ -455,11 +517,9 @@ describe("Account Pool plugin", () => {
         },
       );
       expect(response.status).toBe(200);
-      expect(await response.json()).toEqual(image);
+      expect(await response.json()).toEqual(result);
       expect(requests).toHaveLength(1);
-      expect(requests[0]?.url).toBe(
-        `https://upstream.example/images/${operation}`,
-      );
+      expect(requests[0]?.url).toBe(`https://upstream.example/${path}`);
       expect(requests[0]?.headers.get("authorization")).toBe(
         "Bearer oauth-old",
       );
@@ -480,6 +540,7 @@ describe("Account Pool plugin", () => {
     }> = [];
     const modelRequests: string[] = [];
     let responseNumber = 0;
+    let planType: unknown = "pro";
     const futureToken = `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1_000) + 3_600 })).toString("base64url")}.signature`;
     const upstream = await startUpstream(async (request, response) => {
       const body = (await readRequestBody(request)).toString("utf8");
@@ -505,7 +566,7 @@ describe("Account Pool plugin", () => {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(
           JSON.stringify({
-            plan_type: "pro",
+            plan_type: planType,
             rate_limit: {
               allowed: true,
               limit_reached: false,
@@ -651,6 +712,34 @@ describe("Account Pool plugin", () => {
     expect(accountTable.stdout).toContain("codex");
     expect(accountTable.stdout).toContain("7d=48% 2100-01-01T02:00:00.000Z");
     expect(accountTable.stdout).not.toContain("5h=");
+    const codexAccount = statusSchema
+      .parse(await host.harness.behavior.callRpc("status.get", null))
+      .accounts.find((account) => account.provider === "codex")!;
+    expect(codexAccount.subscriptionType).toBe("pro");
+    for (const [reportedPlan, expectedPlan] of [
+      ["pro", "pro"],
+      ["plus", "plus"],
+      [undefined, "plus"],
+      [null, "plus"],
+      [123, "plus"],
+      ["", "plus"],
+    ]) {
+      planType = reportedPlan;
+      expect(
+        await host.harness.behavior.callRpc("provider-usage.v1.getResource", {
+          resourceId: codexAccount.id,
+          refresh: true,
+        }),
+      ).toMatchObject({
+        usage: {
+          status: "ok",
+          plan: { id: expectedPlan, multiplier: null },
+          planLabel: expectedPlan === "pro" ? "Pro" : "Plus",
+          windows: [expect.objectContaining({ usedPercent: 48 })],
+        },
+      });
+    }
+
     const routed = await resolveCodexToken(host);
     expect(routed.baseUrl).toBe("/api/v1/plugins/account-pool/http/v1");
     await expect(
@@ -1086,10 +1175,26 @@ describe("Account Pool plugin", () => {
     expect(help.exitCode).toBe(0);
     expect(help.stdout).toContain("--login");
     expect(help.stdout).toContain("account login-complete");
-    expect(help.stdout).toContain("--code-stdin");
     expect(help.stdout).toContain("--api-key-stdin");
     expect(help.stdout).toContain("Unsafe: exposes the key");
-    expect(help.stdout).toContain("account refresh <id>");
+    const loginCompleteHelp = await fixture.host.harness.behavior.runCli([
+      "account",
+      "login-complete",
+      "--help",
+    ]);
+    expect(loginCompleteHelp.exitCode).toBe(0);
+    expect(loginCompleteHelp.stdout).toContain("--code-stdin");
+    const topLevelHelp = await fixture.host.harness.behavior.runCli(["--help"]);
+    expect(topLevelHelp.exitCode).toBe(0);
+    expect(topLevelHelp.stdout).toContain("bb pool account refresh");
+    expect(topLevelHelp.stdout).toContain("bb pool account login-poll");
+    const refreshHelp = await fixture.host.harness.behavior.runCli([
+      "account",
+      "refresh",
+      "--help",
+    ]);
+    expect(refreshHelp.exitCode).toBe(0);
+    expect(refreshHelp.stdout).toContain("bb pool account refresh <id>");
     const list = await fixture.host.harness.behavior.runCli([
       "account",
       "list",
@@ -1109,6 +1214,26 @@ describe("Account Pool plugin", () => {
         account.id,
       ]),
     ).toMatchObject({ exitCode: 0 });
+    const refreshedAsJson = await fixture.host.harness.behavior.runCli([
+      "account",
+      "refresh",
+      account.id,
+      "--json",
+    ]);
+    expect(refreshedAsJson.exitCode).toBe(0);
+    expect(JSON.parse(refreshedAsJson.stdout)).toMatchObject({
+      ok: true,
+      account: { id: account.id },
+    });
+    const configAsJson = await fixture.host.harness.behavior.runCli([
+      "config",
+      "--json",
+    ]);
+    expect(configAsJson.exitCode).toBe(0);
+    expect(JSON.parse(configAsJson.stdout)).toMatchObject({
+      ok: true,
+      config: { switchThreshold: expect.any(Number) },
+    });
     expect(
       (
         await fixture.host.harness.behavior.runCli([
@@ -1165,6 +1290,126 @@ describe("Account Pool plugin", () => {
     expect(
       await fixture.host.harness.behavior.callRpc("account.list", null),
     ).toEqual([]);
+  });
+
+  it("refuses unusable pool invocations instead of guessing", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "bb-account-pool-cli-"));
+    const host = createFakePluginHost({
+      pluginId: "account-pool",
+      dataDir,
+      sdk: sdkStubs(),
+    });
+    await createAccountPoolPlugin()(host.bb);
+    cleanups.push(async () => {
+      await host.harness.lifecycle.dispose();
+      await fs.rm(dataDir, { recursive: true, force: true });
+    });
+    const run = (argv: string[], ctx?: { threadId: string }) =>
+      host.harness.behavior.runCli(argv, ctx);
+
+    const unknownOption = await run(["account", "list", "--jsonn"]);
+    expect(unknownOption.exitCode).toBe(1);
+    expect(unknownOption.stderr).toContain("unknown option '--jsonn'");
+    expect(unknownOption.stderr).toContain("Did you mean --json?");
+    expect(unknownOption.stdout).toBe("");
+
+    const noCommand = await run([]);
+    expect(noCommand.exitCode).toBe(1);
+    expect(noCommand.stdout).toContain("bb pool <command> [options]");
+
+    const unknownCommand = await run(["account", "lst"]);
+    expect(unknownCommand.exitCode).toBe(1);
+    expect(unknownCommand.stderr).toContain(
+      "unknown command 'account lst' (Did you mean account list?)",
+    );
+
+    const strayArgument = await run(["status", "everything"]);
+    expect(strayArgument.exitCode).toBe(1);
+    expect(strayArgument.stderr).toContain("unexpected argument 'everything'");
+
+    const allMissing = await run(["account", "login-complete"]);
+    expect(allMissing.exitCode).toBe(1);
+    expect(allMissing.stderr).toContain(
+      "missing required options: --session, --code",
+    );
+
+    const stdinFlag = await run([
+      "account",
+      "login-complete",
+      "--session",
+      "11111111-1111-4111-8111-111111111111",
+      "--code-stdin",
+    ]);
+    expect(stdinFlag.exitCode).toBe(1);
+    expect(stdinFlag.stderr).toContain(
+      "--code-stdin is read by the bb CLI, which rewrites it to --code <value>",
+    );
+
+    const badProvider = await run([
+      "account",
+      "add",
+      "--provider",
+      "gemini",
+      "--import",
+    ]);
+    expect(badProvider.exitCode).toBe(1);
+    expect(badProvider.stderr).toContain(
+      "invalid value 'gemini' for --provider. Expected one of: claude, codex",
+    );
+
+    const conflicting = await run([
+      "account",
+      "add",
+      "--provider",
+      "claude",
+      "--import",
+      "--login",
+    ]);
+    expect(conflicting.exitCode).toBe(1);
+    expect(conflicting.stderr).toContain(
+      "--login and --import cannot be combined",
+    );
+
+    const jsonEnvelope = await run([
+      "account",
+      "add",
+      "--provider",
+      "claude",
+      "--json",
+    ]);
+    expect(jsonEnvelope.exitCode).toBe(1);
+    expect(JSON.parse(jsonEnvelope.stdout)).toEqual({
+      ok: false,
+      error: {
+        code: "missing_required",
+        message:
+          "missing required options: one of --login, --import, --api-key",
+        hint: expect.stringContaining("bb pool account add"),
+      },
+    });
+    expect(jsonEnvelope.stderr).toContain(
+      "missing required options: one of --login, --import, --api-key",
+    );
+
+    const bypassWithoutThread = await run(["bypass"], {
+      threadId: "thread-seven",
+    });
+    expect(bypassWithoutThread.exitCode).toBe(1);
+    expect(bypassWithoutThread.stderr).toContain(
+      "This thread is thread-seven; re-run with bb pool bypass thread-seven",
+    );
+
+    for (const argv of [
+      ["--help"],
+      ["account", "add", "--help"],
+      ["account", "reorder", "-h"],
+      ["bypass", "--help"],
+    ]) {
+      const help = await run(argv);
+      expect(help.exitCode).toBe(0);
+      expect(help.stderr).toBe("");
+      expect(help.stdout).toContain("Usage:");
+    }
   });
 
   it("exposes manual Claude login over RPC and the two-step CLI", async () => {
@@ -1499,20 +1744,27 @@ describe("Account Pool plugin", () => {
         name: "ANTHROPIC_BASE_URL",
         value: { serverPath: "/api/v1/plugins/account-pool/http" },
         reason: "Routed through the Account Pooler hub",
-        secret: false,
       },
       {
         name: "ANTHROPIC_AUTH_TOKEN",
         value: fixture.key,
         reason: "Account Pooler hub token for this machine",
-        secret: true,
       },
       {
         name: "ENABLE_TOOL_SEARCH",
         value: "true",
         reason:
           "Claude Code turns tool search off behind a custom base URL; the hub forwards tool_reference blocks",
-        secret: false,
+      },
+      {
+        name: "BB_ACCOUNT_POOL_PARENT_URL",
+        value: { serverPath: "/api/v1/plugins/account-pool/http" },
+        reason: "Account Pooler hub for nested bb servers on this machine",
+      },
+      {
+        name: "BB_ACCOUNT_POOL_PARENT_TOKEN",
+        value: fixture.key,
+        reason: "Account Pooler hub token for this machine",
       },
     ]);
     await expect(
@@ -5687,6 +5939,13 @@ describe("sequential pool recovery", () => {
       "sk-third",
       "sk-second",
     ]);
+    const negativePriority = await fixture.host.harness.behavior.runCli([
+      "account",
+      "priority",
+      second.id,
+      "-1",
+    ]);
+    expect(negativePriority.exitCode, negativePriority.stderr).toBe(0);
     const priority = await fixture.host.harness.behavior.runCli([
       "account",
       "priority",
@@ -5797,4 +6056,305 @@ it("drains a streamed response before disposing the owned transport", async () =
     await reader.cancel().catch(() => undefined);
     await disposing;
   }
+});
+
+it("publishes pooled usage without a display plugin and does not invent unobserved utilization", async () => {
+  const upstream = await startUpstream((_request, response) => {
+    response.end();
+  });
+  cleanups.push(upstream.close);
+  const fixture = await createFixture({ upstreamUrl: upstream.url });
+  const inventory = usageResourceListSchema.parse(
+    await fixture.host.harness.behavior.callRpc(usageListMethod, {}),
+  );
+  expect(inventory.label).toBe("Account Pooler");
+  expect(inventory.resources).toEqual([
+    expect.objectContaining({
+      id: fixture.account.id,
+      providerId: "claude-code",
+      scope: { kind: "shared" },
+    }),
+  ]);
+  const result = usageMeasurementSchema.parse(
+    await fixture.host.harness.behavior.callRpc(usageFetchMethod, {
+      resourceId: fixture.account.id,
+      refresh: false,
+    }),
+  );
+  expect(result).toMatchObject({
+    observedAt: null,
+    usage: {
+      status: "error",
+      message: "Usage has not been observed for this account.",
+    },
+  });
+  expect(
+    fixture.host.harness.registrations.experimental_publishedRpcMethods.map(
+      (entry) => entry.method,
+    ),
+  ).toEqual([usageListMethod, usageFetchMethod]);
+});
+
+it("publishes an empty shared usage group before any accounts or settings are configured", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "bb-empty-usage-pool-"));
+  const host = createFakePluginHost({
+    pluginId: "account-pool",
+    dataDir,
+    sdk: sdkStubs(),
+  });
+  const fetch = vi.fn(async () => {
+    throw new Error("An empty pool must not contact an upstream");
+  });
+  try {
+    await createAccountPoolPlugin({ fetch })(host.bb);
+    expect(
+      host.harness.registrations.experimental_publishedRpcMethods.map(
+        (entry) => entry.method,
+      ),
+    ).toContain(usageListMethod);
+    await expect(
+      host.harness.behavior.callRpc(usageListMethod, {}),
+    ).resolves.toEqual({ label: "Account Pooler", resources: [] });
+    await expect(
+      host.harness.behavior.callRpc(usageFetchMethod, {
+        resourceId: "removed",
+        refresh: false,
+      }),
+    ).rejects.toThrow("no longer exists");
+    expect(fetch).not.toHaveBeenCalled();
+  } finally {
+    await host.harness.lifecycle.dispose();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+describe("Account Pool nested proxy", () => {
+  const PARENT_TOKEN = "vqMIj4xUiI3PyvKS2SllSKHsOfxLF_sAZwzNAAvV9TQ";
+
+  interface ParentRecord {
+    url: string;
+    token: string | null;
+    authorization: string | null;
+    body: string;
+  }
+
+  async function startParent(args: {
+    availability?: { claude: boolean; codex: boolean };
+    availabilityStatus?: number;
+  }): Promise<{ upstream: Upstream; records: ParentRecord[] }> {
+    const records: ParentRecord[] = [];
+    const upstream = await startUpstream(async (request, response) => {
+      const body = await readRequestBody(request);
+      records.push({
+        url: request.url ?? "",
+        token:
+          (request.headers["x-bb-account-pool-token"] as string | undefined) ??
+          null,
+        authorization: request.headers.authorization ?? null,
+        body: body.toString("utf8"),
+      });
+      if ((request.url ?? "").startsWith("/availability")) {
+        const status = args.availabilityStatus ?? 200;
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify(args.availability ?? { claude: true, codex: true }),
+        );
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    });
+    return { upstream, records };
+  }
+
+  async function createChild(args: {
+    parentUrl: string | null;
+    parentMode?: "proxy" | "isolate";
+  }): Promise<ReturnType<typeof createFakePluginHost>> {
+    const dataDir = await mkdtemp(
+      path.join(tmpdir(), "bb-account-pool-child-"),
+    );
+    const host = createFakePluginHost({
+      pluginId: "account-pool",
+      dataDir,
+      sdk: sdkStubs(),
+    });
+    if (args.parentMode !== undefined) {
+      await host.bb.storage.kv.set("config", { parentMode: args.parentMode });
+    }
+    await createAccountPoolPlugin({
+      usageUrl: "data:application/json,{}",
+      availabilityTtlMs: 0,
+      env:
+        args.parentUrl === null
+          ? {}
+          : {
+              BB_ACCOUNT_POOL_PARENT_URL: args.parentUrl,
+              BB_ACCOUNT_POOL_PARENT_TOKEN: PARENT_TOKEN,
+            },
+    })(host.bb);
+    host.harness.behavior.runService("hub");
+    cleanups.push(async () => {
+      await host.harness.lifecycle.dispose();
+      await fs.rm(dataDir, { recursive: true, force: true });
+    });
+    return host;
+  }
+
+  const PROVIDER_ENV = {
+    claude: ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"],
+    codex: ["CODEX_OPENAI_BASE_URL", "CODEX_POOL_AUTH_TOKEN"],
+  } as const;
+
+  function envNames(entries: Array<{ name: string }>): string[] {
+    return entries.map((entry) => entry.name);
+  }
+
+  const neutralised = (provider: "claude" | "codex") =>
+    PROVIDER_ENV[provider].map((name) => ({
+      name,
+      value: "",
+      reason:
+        "Account Pooler is isolated from the parent bb server's pool on this instance",
+    }));
+
+  it.each([
+    {
+      label: "the instance is set to isolate",
+      provider: "claude" as const,
+      parentMode: "isolate" as const,
+      availability: undefined,
+      stopParent: false,
+    },
+    {
+      label: "the parent cannot serve the provider",
+      provider: "codex" as const,
+      parentMode: undefined,
+      availability: { claude: true, codex: false },
+      stopParent: false,
+    },
+    {
+      label: "the parent is unreachable",
+      provider: "claude" as const,
+      parentMode: undefined,
+      availability: undefined,
+      stopParent: true,
+    },
+  ])("neutralises inherited routing when $label", async (args) => {
+    const parent = await startParent(
+      args.availability === undefined
+        ? {}
+        : { availability: args.availability },
+    );
+    if (args.stopParent) await parent.upstream.close();
+    else cleanups.push(parent.upstream.close);
+    const host = await createChild({
+      parentUrl: parent.upstream.url,
+      ...(args.parentMode === undefined ? {} : { parentMode: args.parentMode }),
+    });
+    await expect(
+      host.harness.behavior.resolveProviderEnv(
+        args.provider === "claude" ? "claude-code" : "codex",
+        {
+          threadId: "thread-one",
+          projectId: "project-one",
+          hostId: "host-one",
+        },
+      ),
+    ).resolves.toEqual(neutralised(args.provider));
+  });
+
+  it("contributes self-pointing routing and the marker while proxying", async () => {
+    const parent = await startParent({});
+    cleanups.push(parent.upstream.close);
+    const host = await createChild({ parentUrl: parent.upstream.url });
+    const entries = await host.harness.behavior.resolveProviderEnv(
+      "claude-code",
+      { threadId: "thread-one", projectId: "project-one", hostId: "host-one" },
+    );
+    expect(envNames(entries)).toEqual([
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_AUTH_TOKEN",
+      "ENABLE_TOOL_SEARCH",
+      "BB_ACCOUNT_POOL_PARENT_URL",
+      "BB_ACCOUNT_POOL_PARENT_TOKEN",
+    ]);
+    expect(
+      entries.find((entry) => entry.name === "ANTHROPIC_BASE_URL")?.value,
+    ).toEqual({ serverPath: "/api/v1/plugins/account-pool/http" });
+    expect(
+      entries.find((entry) => entry.name === "ANTHROPIC_AUTH_TOKEN")?.value,
+    ).not.toBe(PARENT_TOKEN);
+  });
+
+  it("forwards pooled traffic to the parent with the parent token", async () => {
+    const parent = await startParent({});
+    cleanups.push(parent.upstream.close);
+    const host = await createChild({ parentUrl: parent.upstream.url });
+    const entries = await host.harness.behavior.resolveProviderEnv(
+      "claude-code",
+      { threadId: "thread-one", projectId: "project-one", hostId: "host-one" },
+    );
+    const childToken = entries.find(
+      (entry) => entry.name === "ANTHROPIC_AUTH_TOKEN",
+    )?.value;
+    const response = await host.harness.behavior.fetchHttp(
+      "POST",
+      "/v1/messages",
+      {
+        headers: { authorization: `Bearer ${String(childToken)}` },
+        body: JSON.stringify({ model: "claude-opus-4", messages: [] }),
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    const forwarded = parent.records.filter(
+      (record) => record.url === "/v1/messages",
+    );
+    expect(forwarded).toHaveLength(1);
+    expect(forwarded[0]?.token).toBe(PARENT_TOKEN);
+    expect(forwarded[0]?.authorization).toBeNull();
+    expect(JSON.parse(forwarded[0]?.body ?? "{}")).toEqual({
+      model: "claude-opus-4",
+      messages: [],
+    });
+  });
+
+  it("rejects pooled traffic that does not present the child's own token", async () => {
+    const parent = await startParent({});
+    cleanups.push(parent.upstream.close);
+    const host = await createChild({ parentUrl: parent.upstream.url });
+    const response = await host.harness.behavior.fetchHttp(
+      "POST",
+      "/v1/messages",
+      { headers: { authorization: `Bearer ${PARENT_TOKEN}` }, body: "{}" },
+    );
+    expect(response.status).toBe(401);
+    expect(
+      parent.records.filter((record) => record.url === "/v1/messages"),
+    ).toHaveLength(0);
+  });
+
+  it("serves availability only to hub token holders", async () => {
+    const upstream = await startUpstream(async (request, response) => {
+      await readRequestBody(request);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    cleanups.push(upstream.close);
+    const fixture = await createFixture({ upstreamUrl: upstream.url });
+    const denied = await fixture.host.harness.behavior.fetchHttp(
+      "GET",
+      "/availability",
+      {},
+    );
+    expect(denied.status).toBe(401);
+    const allowed = await fixture.host.harness.behavior.fetchHttp(
+      "GET",
+      "/availability",
+      { headers: { "x-bb-account-pool-token": fixture.key } },
+    );
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toEqual({ claude: true, codex: false });
+  });
 });

@@ -120,6 +120,24 @@ interface QueueActiveParentSystemMessageInTransactionArgs extends QueueReadyPare
   preparedCommand: PreparedTurnSubmitCommandPayload;
 }
 
+function parentSystemTurnRequestFields(
+  args: QueueReadyParentSystemMessageArgs,
+) {
+  return {
+    threadId: args.thread.id,
+    environmentId: args.environment.id,
+    type: "client/turn/requested",
+    input: args.input,
+    execution: args.execution,
+    initiator: "system",
+    senderThreadId: null,
+    systemMessageKind: args.systemMessageKind,
+    systemMessageSubject: args.systemMessageSubject,
+    requestMethod: "turn/start",
+    source: PARENT_SYSTEM_MESSAGE_SOURCE,
+  } as const;
+}
+
 function splitRenderedParentSystemSlot(
   args: BuildParentSystemInputFromTemplateSlotArgs,
 ): RenderedParentSystemSlotParts {
@@ -216,17 +234,7 @@ function queueActiveParentSystemMessageInTransaction(
 
   const expectedSteerTurnId = getActiveTurnId({ db: tx }, args.thread.id);
   const request = appendClientTurnEventInTransaction(tx, {
-    threadId: args.thread.id,
-    environmentId: args.environment.id,
-    type: "client/turn/requested",
-    input: args.input,
-    execution: args.execution,
-    initiator: "system",
-    senderThreadId: null,
-    systemMessageKind: args.systemMessageKind,
-    systemMessageSubject: args.systemMessageSubject,
-    requestMethod: "turn/start",
-    source: PARENT_SYSTEM_MESSAGE_SOURCE,
+    ...parentSystemTurnRequestFields(args),
     target: {
       kind: "auto",
       expectedTurnId: expectedSteerTurnId,
@@ -257,6 +265,9 @@ async function queueActiveParentSystemMessage(
         execution: args.execution,
         payload: { kind: "inline" },
         senderThreadId: null,
+        origin: null,
+        originPluginId: null,
+        requestedBy: null,
         systemNotice: {
           kind: args.systemMessageKind,
           subject: args.systemMessageSubject,
@@ -368,17 +379,7 @@ async function queueReadyParentSystemMessage(
     (tx) => {
       ensureThreadCanStartRequest(args.thread);
       appendPreparedClientTurnRequestedEventWithNotificationInTransaction(tx, {
-        threadId: args.thread.id,
-        environmentId: args.environment.id,
-        type: "client/turn/requested",
-        input: args.input,
-        execution: args.execution,
-        initiator: "system",
-        senderThreadId: null,
-        systemMessageKind: args.systemMessageKind,
-        systemMessageSubject: args.systemMessageSubject,
-        requestMethod: "turn/start",
-        source: PARENT_SYSTEM_MESSAGE_SOURCE,
+        ...parentSystemTurnRequestFields(args),
         target: { kind: "new-turn" },
         requestId,
       });
@@ -432,7 +433,7 @@ export async function queueParentSystemMessage(
     return false;
   }
   const hasPendingInteraction =
-    deps.pendingInteractions.hasPendingThreadInteraction(parentThread.id);
+    deps.pendingInteractions.hasTurnBoundPendingThreadInteraction(parentThread.id);
   if (!hasPendingInteraction) {
     try {
       return await deliverParentSystemMessage(deps, {
@@ -457,6 +458,8 @@ export async function queueParentSystemMessage(
     threadId: parentThread.id,
     content: args.input,
     senderThreadId: null,
+    origin: null,
+    originPluginId: null,
     model: execution.model,
     reasoningLevel: execution.reasoningLevel,
     permissionMode: execution.permissionMode,

@@ -464,6 +464,19 @@ describe("timeline CLI rendering snapshots", () => {
     `);
   });
 
+  it("pads top-level separators by display width", () => {
+    const event = createTimelineEventFactory({ threadId: "thread-1" });
+    const command = "调".repeat(10);
+    const timeline = renderActiveTimeline([
+      event.turnStarted(),
+      event.commandStarted({ itemId: "cmd-wide", command }),
+    ]);
+
+    expect(timeline.text).toContain(
+      `── Running ${command} ${"─".repeat(28)}\n`,
+    );
+  });
+
   it("uses shared turn title fallback text in CLI output", () => {
     const text = formatThreadTimelineText(
       [
@@ -1450,7 +1463,7 @@ describe("timeline CLI rendering snapshots", () => {
 
     expect(timeline.projection.state.activeThinking).toMatchObject({
       id: expect.stringContaining("item:root-reasoning"),
-      text: "Root is still thinking.\n",
+      text: "Root is still thinking.",
     });
     expect(
       timeline.messages.filter((message) => message.kind === "operation"),
@@ -2402,10 +2415,11 @@ describe("timeline CLI rendering snapshots", () => {
       }),
       event.turnCompleted(),
     ];
-    const expectedText = "Summary 1.\nBody.\nSummary 2.\n";
+    const expectedText = "Summary 1.\nBody.\nSummary 2.";
 
     expect(
-      renderActiveTimeline(streamingEvents).projection.state.activeThinking?.text,
+      renderActiveTimeline(streamingEvents).projection.state.activeThinking
+        ?.text,
     ).toBe(expectedText);
     const completedMessages = renderActiveTimeline(
       completedEvents.slice(0, -1),
@@ -2418,6 +2432,33 @@ describe("timeline CLI rendering snapshots", () => {
     expect(renderIdleTimeline(completedEvents).messages).toEqual(
       completedMessages,
     );
+  });
+
+  it("drops provider paragraph padding around reasoning text", () => {
+    const event = createTimelineEventFactory({ threadId: "thread-1" });
+    const itemId = "reasoning-1";
+    const streamingEvents = [
+      event.turnStarted(),
+      event.reasoningStarted({ itemId }),
+      event.reasoningDelta({ delta: "First paragraph.\n\n", itemId }),
+      event.reasoningDelta({ delta: "Second paragraph.\n\n", itemId }),
+    ];
+    const expectedText = "First paragraph.\n\nSecond paragraph.";
+
+    expect(
+      renderActiveTimeline(streamingEvents).projection.state.activeThinking
+        ?.text,
+    ).toBe(expectedText);
+    expect(
+      renderIdleTimeline([
+        ...streamingEvents,
+        event.reasoningCompleted({
+          itemId,
+          text: "First paragraph.\n\nSecond paragraph.\n\n",
+        }),
+        event.turnCompleted(),
+      ]).messages.filter((message) => message.kind === "operation"),
+    ).toEqual([expect.objectContaining({ detail: expectedText })]);
   });
 
   it("keeps completed reasoning at root when provider parent scope is suppressed", () => {

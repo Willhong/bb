@@ -7,8 +7,7 @@ import type { IconName } from "@bb/shared-ui/icon";
 import {
   BROWSE_ARCHETYPES,
   UTILITY_EXAMPLES,
-  archetypePrompt,
-  utilityPrompt,
+  briefPrompt,
 } from "@/components/plugin/browse-hero/browse-hero-archetypes";
 import { CREATE_PLUGIN_PROMPT, CREATE_SKILL_PROMPT } from "@bb/client-core";
 
@@ -56,7 +55,7 @@ const CONFIG: Record<CreateViaPromptKind, KindConfig> = {
       label: archetype.title,
       icon: archetype.icon,
       description: archetype.hook,
-      prompt: archetypePrompt(archetype),
+      prompt: briefPrompt(archetype),
     })),
   },
 };
@@ -86,6 +85,7 @@ interface CreateWithTemplatesButtonProps {
   kind: CreateViaPromptKind;
   label: string;
   menuActions?: readonly ResourceCreateMenuAction[];
+  compactWhenNarrow?: boolean;
   onCreate: (prompt?: string) => void;
 }
 
@@ -93,6 +93,7 @@ export function CreateWithTemplatesButton({
   kind,
   label,
   menuActions,
+  compactWhenNarrow,
   onCreate,
 }: CreateWithTemplatesButtonProps) {
   const { examples } = getCreateExamples(kind);
@@ -106,7 +107,7 @@ export function CreateWithTemplatesButton({
               label: example.label,
               icon: example.icon,
               description: example.brief,
-              prompt: utilityPrompt(example),
+              prompt: briefPrompt(example),
             })),
           },
         ]
@@ -117,6 +118,7 @@ export function CreateWithTemplatesButton({
       templates={examples}
       templateGroups={templateGroups}
       menuActions={menuActions}
+      compactWhenNarrow={compactWhenNarrow}
       onCreate={onCreate}
     />
   );

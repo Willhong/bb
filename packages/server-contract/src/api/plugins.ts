@@ -3,19 +3,8 @@ import {
   pluginCatalogCategoryIdSchema,
   pluginMarketplaceCollectionIdSchema,
   pluginMarketplaceCollectionPluginIdSchema,
-  type PluginCatalogCategoryId,
-  type PluginMarketplaceCollectionId,
-  type PluginMarketplaceCollectionPluginId,
 } from "@bb/domain";
 import { z } from "zod";
-
-export { pluginCatalogCategoryIdSchema, type PluginCatalogCategoryId };
-export {
-  pluginMarketplaceCollectionIdSchema,
-  pluginMarketplaceCollectionPluginIdSchema,
-  type PluginMarketplaceCollectionId,
-  type PluginMarketplaceCollectionPluginId,
-};
 
 export const pluginRuntimeStatusSchema = z.enum([
   "starting",
@@ -41,7 +30,6 @@ export const pluginResolvedVersionSchema = z.object({
   version: z.string(),
   display: z.string(),
 });
-export type PluginResolvedVersion = z.infer<typeof pluginResolvedVersionSchema>;
 
 export const pluginUpdateCheckEntrySchema = z.object({
   id: z.string(),
@@ -113,7 +101,6 @@ export const pluginUpdateStateSchema = z.object({
     .object({ version: z.string(), at: z.number(), detail: z.string() })
     .optional(),
 });
-export type PluginUpdateState = z.infer<typeof pluginUpdateStateSchema>;
 
 export const pluginHandlerStatsSchema = z.object({
   count: z.number(),
@@ -236,7 +223,7 @@ export const ROOT_PLUGIN_SOURCE_SELECTION: PluginSourceSelection = {
   kind: "root",
 };
 
-export const pluginInstallSourceRequestSchema = z
+export const pluginInstallRequestSchema = z
   .object({
     source: z.string().min(1),
     selection: pluginSourceSelectionSchema.default(
@@ -262,15 +249,6 @@ export const pluginCatalogInstallRequestSchema = z
     confirmedSource: z.lazy(() => pluginCatalogResolvedSourceSchema).optional(),
   })
   .strict();
-
-export const pluginInstallRequestSchema = pluginInstallSourceRequestSchema;
-
-export const pluginMutationResponseSchema = z.object({
-  ok: z.literal(true),
-  plugin: installedPluginSchema,
-});
-
-export const pluginInstallResponseSchema = pluginMutationResponseSchema;
 
 export const pluginReloadResponseSchema = z.object({
   ok: z.literal(true),
@@ -497,9 +475,6 @@ export const pluginMarketplaceSourceKindSchema = z.enum([
   "git",
   "path",
 ]);
-export type PluginMarketplaceSourceKind = z.infer<
-  typeof pluginMarketplaceSourceKindSchema
->;
 
 export const pluginMarketplaceSchema = z.object({
   name: z.string(),
@@ -555,3 +530,27 @@ export type PluginMarketplaceRefreshResult = z.infer<
 export const pluginMarketplaceRefreshResponseSchema = z.object({
   results: z.array(pluginMarketplaceRefreshResultSchema),
 });
+
+export const pluginRpcDiscoveryQuerySchema = z.object({
+  pluginId: z.string().min(1).optional(),
+  method: z.string().min(1).optional(),
+});
+export type PluginRpcDiscoveryQuery = z.infer<
+  typeof pluginRpcDiscoveryQuerySchema
+>;
+
+export const publishedPluginRpcMethodSchema = z.object({
+  pluginId: z.string().min(1),
+  displayName: z.string().min(1),
+  method: z.string().min(1),
+  registrationDescription: z.string().nullable(),
+  methodDescription: z.string().nullable(),
+  inputSchema: z.record(z.string(), jsonValueSchema),
+  outputSchema: z.record(z.string(), jsonValueSchema),
+});
+export type PublishedPluginRpcMethod = z.infer<
+  typeof publishedPluginRpcMethodSchema
+>;
+export const pluginRpcDiscoveryResponseSchema = z.array(
+  publishedPluginRpcMethodSchema,
+);

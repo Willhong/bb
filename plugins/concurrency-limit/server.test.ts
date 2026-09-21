@@ -107,17 +107,20 @@ async function setup(options: SetupOptions = {}) {
 }
 
 function hostChanges(): {
-  emitHostConnected(hostId: string): void;
+  emitHostChanges(
+    hostId: string,
+    changes: Parameters<HostChangedSubscription["callback"]>[0]["changes"],
+  ): void;
   subscribe: BbPluginApi["sdk"]["subscribe"];
 } {
   let callback: HostChangedSubscription["callback"] | null = null;
   return {
-    emitHostConnected(hostId) {
+    emitHostChanges(hostId, changes) {
       callback?.({
         type: "changed",
         entity: "host",
         id: hostId,
-        changes: ["host-connected"],
+        changes,
       });
     },
     subscribe(subscription) {
@@ -264,10 +267,38 @@ describe("configuration", () => {
     expect(harness.experimental_hostRpcCalls).toHaveLength(0);
 
     status = "connected";
-    changes.emitHostConnected("host-a");
+    changes.emitHostChanges("host-a", ["host-connected"]);
     await vi.waitFor(() => {
       expect(harness.experimental_hostRpcCalls).toHaveLength(1);
     });
+
+    service.controller.abort();
+    await service.done;
+  });
+
+  it("ignores host messages that only report a provider model catalog change", async () => {
+    const changes = hostChanges();
+    const { harness } = await setup({
+      hosts: [hostRecord("host-a")],
+      subscribe: changes.subscribe,
+    });
+    const service = harness.behavior.runService("capacity-detector");
+    await vi.waitFor(() => {
+      expect(harness.experimental_hostRpcCalls).toHaveLength(1);
+      expect(harness.realtimeSignals).toHaveLength(1);
+    });
+    const hostListCalls = harness.inspection.sdk.callsTo("hosts.list").length;
+
+    changes.emitHostChanges("host-a", ["provider-model-catalog-changed"]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(harness.realtimeSignals).toHaveLength(1);
+    expect(harness.experimental_hostRpcCalls).toHaveLength(1);
+    expect(harness.inspection.sdk.callsTo("hosts.list")).toHaveLength(
+      hostListCalls,
+    );
+
+    changes.emitHostChanges("host-a", ["host-disconnected"]);
+    expect(harness.realtimeSignals).toHaveLength(2);
 
     service.controller.abort();
     await service.done;
@@ -300,6 +331,65 @@ describe("configuration", () => {
     await expect(
       harness.behavior.runCli(["global", "1.5"]),
     ).resolves.toMatchObject({ exitCode: 1 });
+  });
+
+  it("renders help, refuses unknown flags, and reports errors as JSON", async () => {
+    const { harness } = await setup({
+      hosts: [hostRecord("host-a", "connected", "Laptop")],
+      capacities: [{ hostId: "host-a", availableParallelism: 8 }],
+    });
+
+    for (const argv of [["--help"], ["-h"], ["host", "--help"]]) {
+      const help = await harness.behavior.runCli(argv);
+      expect(help.exitCode, argv.join(" ")).toBe(0);
+      expect(help.stderr).toBe("");
+      expect(help.stdout).toContain("bb concurrency-limit");
+    }
+    expect(
+      (await harness.behavior.runCli(["host", "--help"])).stdout,
+    ).toContain("0 to 10000");
+
+    const unknownFlag = await harness.behavior.runCli(["status", "--jsno"]);
+    expect(unknownFlag.exitCode).toBe(1);
+    expect(unknownFlag.stderr).toContain("unknown option '--jsno'");
+    expect(unknownFlag.stderr).toContain("(Did you mean --json?)");
+
+    const mistyped = await harness.behavior.runCli(["stats"]);
+    expect(mistyped.exitCode).toBe(1);
+    expect(mistyped.stderr).toContain("unknown command 'stats'");
+    expect(mistyped.stderr).toContain("(Did you mean status?)");
+
+    const missingHost = await harness.behavior.runCli(["host"]);
+    expect(missingHost.exitCode).toBe(1);
+    expect(missingHost.stderr).toContain(
+      "missing required arguments: <host-id>",
+    );
+
+    const stray = await harness.behavior.runCli(["global", "3", "4"]);
+    expect(stray.exitCode).toBe(1);
+    expect(stray.stderr).toContain("unexpected argument '4'");
+
+    const envelope = await harness.behavior.runCli([
+      "host",
+      "host-b",
+      "--json",
+    ]);
+    expect(envelope.exitCode).toBe(1);
+    expect(JSON.parse(envelope.stdout)).toEqual({
+      ok: false,
+      error: {
+        code: "unknown_host",
+        message: "Unknown host: host-b",
+        hint: "Run `bb machine list` for the enrolled host ids.",
+      },
+    });
+    expect(envelope.stderr).toContain("Unknown host: host-b");
+
+    const badLimit = await harness.behavior.runCli(["host", "host-a", "many"]);
+    expect(badLimit.exitCode).toBe(1);
+    expect(badLimit.stderr).toContain(
+      "Limit must be auto or a whole number from 0 to 10000",
+    );
   });
 });
 

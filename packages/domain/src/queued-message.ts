@@ -27,11 +27,17 @@ import {
  *   carries no payload of its own.
  * - `thread-busy` — the thread is running a turn and the message asked to
  *   wait for idle rather than steer.
+ * - `stopping` — the user asked the thread to stop and the stop has not
+ *   landed yet. Distinct from `thread-busy` because the manual-stop queue
+ *   pause deliberately holds back the rows that were merely waiting for the
+ *   turn to end, while a row carrying this wait is one the user asked for
+ *   AFTER requesting the stop — by sending it, queueing it, or pressing Send
+ *   now — and so dispatches as soon as the thread reaches idle.
  * - `provisioning` — the thread's workspace is being (re)provisioned. Only
  *   follow-ups and steers wait on this: a thread's first message rides the
  *   cold-start command instead.
  * - `host-offline` — the thread's workspace exists, but the machine it runs on
- *   has no live daemon session, so nothing can be delivered to it. Distinct
+ *   is disconnected or pausing/resuming, so execution waits for readiness. Distinct
  *   from `provisioning` because the two are cleared by different events and
  *   read differently to a user: a provisioning workspace is being built and
  *   will finish on its own, while an offline host is waiting on a machine that
@@ -48,6 +54,7 @@ import {
 export const queuedMessageWaitingOnKindValues = [
   "time",
   "thread-busy",
+  "stopping",
   "turn-starting",
   "provisioning",
   "host-offline",
@@ -81,6 +88,7 @@ export const queuedMessageWaitReasonSchema = z
 export const queuedMessageWaitingOnSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("time") }),
   z.object({ kind: z.literal("thread-busy") }),
+  z.object({ kind: z.literal("stopping") }),
   z.object({ kind: z.literal("turn-starting") }),
   z.object({ kind: z.literal("provisioning") }),
   z.object({
@@ -96,16 +104,6 @@ export const queuedMessageWaitingOnSchema = z.discriminatedUnion("kind", [
 ]);
 export type QueuedMessageWaitingOn = z.infer<
   typeof queuedMessageWaitingOnSchema
->;
-
-export type QueuedMessagePluginWaitingOn = Extract<
-  QueuedMessageWaitingOn,
-  { kind: "plugin" }
->;
-
-export type QueuedMessageHostOfflineWaitingOn = Extract<
-  QueuedMessageWaitingOn,
-  { kind: "host-offline" }
 >;
 
 /**
@@ -191,11 +189,6 @@ export const queuedMessagePayloadSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 export type QueuedMessagePayload = z.infer<typeof queuedMessagePayloadSchema>;
-
-export type QueuedMessageRetryPayload = Extract<
-  QueuedMessagePayload,
-  { kind: "retry" }
->;
 
 /**
  * Core's own taxonomy for a queued row that is a SYSTEM notice rather than

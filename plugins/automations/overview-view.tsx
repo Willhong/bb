@@ -47,10 +47,10 @@ import {
   getOneShotLifecycle,
   matchesAutomationStatusFilters,
   oneShotLifecycleAllowsToggle,
+  PERSONAL_PROJECT_ID,
 } from "./lib/format-schedule.js";
 import { AutomationMetadataItem } from "./metadata.js";
-
-const PERSONAL_PROJECT_ID = "proj_personal";
+import { AutomationActionsMenu } from "./actions-menu.js";
 
 const AUTOMATION_STATUS_FILTER_OPTIONS = [
   { id: "active", label: "Active" },
@@ -155,10 +155,9 @@ function AutomationRowLeading({
 }
 
 export function automationProjectLabel(
-  project: OverviewEntry["project"] | null | undefined,
+  project: OverviewEntry["project"],
 ): string {
-  if (project == null) return "Workspace";
-  return project.id === PERSONAL_PROJECT_ID ? "Local" : project.name;
+  return project.name;
 }
 
 function automationProjectFilterId(
@@ -223,8 +222,8 @@ function AutomationRowMetadata({
     <ResourceMeta
       items={[
         <AutomationMetadataItem
-          icon={personalProject ? "Laptop" : "Folder"}
-          iconLabel={personalProject ? "Local project" : "Project"}
+          icon="Folder"
+          iconLabel={personalProject ? `Project: ${projectLabel}` : "Project"}
           title={projectLabel}
         >
           {projectLabel}
@@ -248,11 +247,13 @@ function AutomationRowMetadata({
   );
 }
 
-function OverviewRow({
+export function OverviewRow({
   automation,
   project,
   onNavigate,
   onEnabledChange,
+  onRunNow,
+  onDelete,
 }: {
   automation: AutomationResponse;
   project: OverviewEntry["project"];
@@ -261,8 +262,11 @@ function OverviewRow({
     enabled: boolean,
     route: AutomationDetailRoute,
   ) => Promise<void>;
+  onRunNow: (route: AutomationDetailRoute) => Promise<void>;
+  onDelete: (route: AutomationDetailRoute, name: string) => void;
 }) {
   const [togglePending, setTogglePending] = useState(false);
+  const [runPending, setRunPending] = useState(false);
   const route = routeOf(automation);
   const oneShotLifecycle = getOneShotLifecycle({
     enabled: automation.enabled,
@@ -281,6 +285,18 @@ function OverviewRow({
       }
       muted={lifecycleLocked}
       onOpen={() => onNavigate(route)}
+      actions={
+        <AutomationActionsMenu
+          name={automation.name}
+          pending={runPending}
+          onRunNow={() => {
+            setRunPending(true);
+            void onRunNow(route).finally(() => setRunPending(false));
+          }}
+          onDelete={() => onDelete(route, automation.name)}
+        />
+      }
+      actionsVisibility="always"
       persistentActions={
         <AutomationLifecycleControl
           checked={automation.enabled && !lifecycleLocked}
@@ -310,6 +326,7 @@ function AutomationProblemRow({
   automation,
   project,
   onNavigate,
+  onDelete,
 }: {
   automation: AutomationReadProblem;
   project: OverviewEntry["project"];
@@ -317,6 +334,7 @@ function AutomationProblemRow({
     route: AutomationDetailRoute,
     options?: AutomationDetailNavigationOptions,
   ) => void;
+  onDelete: (route: AutomationDetailRoute, name: string) => void;
 }) {
   const repairTarget =
     automation.problem === "missing-agent-prompt" ? automation : null;
@@ -354,6 +372,20 @@ function AutomationProblemRow({
       onOpen={() =>
         onNavigate(route, repairTarget === null ? undefined : { editing: true })
       }
+      actions={
+        <AutomationActionsMenu
+          name={automation.name}
+          pending={false}
+          runDisabledReason={
+            repairTarget !== null
+              ? "Add a prompt before running this automation."
+              : "The stored configuration cannot be read."
+          }
+          onRunNow={() => {}}
+          onDelete={() => onDelete(route, automation.name)}
+        />
+      }
+      actionsVisibility="always"
       persistentActions={
         repairTarget !== null ? (
           <Button
@@ -403,8 +435,7 @@ function automationSearchValues(
     values.push(automationProblemSearchText(automation));
     if (automation.problem === "invalid-stored-data") return values;
   }
-  const status = formatScheduleStatusLabel(automation);
-  if (status !== undefined) values.push(status);
+  values.push(formatScheduleStatusLabel(automation));
   values.push(formatAutomationTrigger(automation.trigger));
   return values;
 }
@@ -415,6 +446,8 @@ export function AutomationOverviewView({
   onRetry,
   onOpenDetail,
   onEnabledChange,
+  onRunNow,
+  onDelete,
   onCreateViaChat,
   activeMode,
   onModeChange,
@@ -430,6 +463,8 @@ export function AutomationOverviewView({
     enabled: boolean,
     route: AutomationDetailRoute,
   ) => Promise<void>;
+  onRunNow: (route: AutomationDetailRoute) => Promise<void>;
+  onDelete: (route: AutomationDetailRoute, name: string) => void;
   onCreateViaChat: (prompt?: string) => void;
   activeMode: AutomationCollectionMode;
   onModeChange: (mode: AutomationCollectionMode) => void;
@@ -594,6 +629,7 @@ export function AutomationOverviewView({
               automation={automation}
               project={project}
               onNavigate={onOpenDetail}
+              onDelete={onDelete}
             />
           ) : (
             <OverviewRow
@@ -602,6 +638,8 @@ export function AutomationOverviewView({
               project={project}
               onNavigate={onOpenDetail}
               onEnabledChange={onEnabledChange}
+              onRunNow={onRunNow}
+              onDelete={onDelete}
             />
           );
         })}

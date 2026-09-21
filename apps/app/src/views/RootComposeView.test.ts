@@ -4,7 +4,6 @@ import {
   type ThreadListEntry,
 } from "@bb/domain";
 import type {
-  ProjectBranchesResponse,
   ProjectWithThreadsResponse,
   SidebarBootstrapResponse,
   SystemEnvironmentProvider,
@@ -13,7 +12,6 @@ import type {
 import { describe, expect, it } from "vitest";
 import type { ReuseThreadOption } from "@/components/pickers/ReuseEnvironmentPicker";
 import {
-  hasPromptOptionValueChanged,
   mergeMissingPromptDraftAttachments,
   resolveNewThreadProjectDefaultsState,
   resolveNewThreadSubmitDisabledReason,
@@ -21,7 +19,6 @@ import {
   type ResolveNewThreadSubmitDisabledReasonArgs,
 } from "@/components/promptbox/NewThreadComposer";
 import { getProjectStoredPromptAttachmentPaths } from "@bb/client-core";
-import { THREAD_HANDOFF_CREATE_SEED_LOCATION_STATE_KEY } from "@bb/client-core";
 import {
   buildRootComposeTerminalSessions,
   buildMobileRecentThreads,
@@ -43,9 +40,57 @@ import {
 import { makeTerminalSession as makeTerminalSessionFixture } from "@/test/fixtures/terminal-sessions";
 import {
   buildReuseThreadOptions,
-  resolveProjectSourceGitDisabledReason,
+  resolveHostEnvironmentProvider,
   resolveRootComposeEffectiveEnvironmentValue,
 } from "./root-compose-environment-selection";
+
+describe("resolveHostEnvironmentProvider", () => {
+  const checkoutProvider = makeProjectProvider("project-checkout");
+  const worktreeProvider = makeProjectProvider("git-worktree");
+
+  it("keeps the tab's current environment option when the host supports it", () => {
+    expect(
+      resolveHostEnvironmentProvider({
+        currentProvider: worktreeProvider,
+        providers: [checkoutProvider, worktreeProvider],
+      }),
+    ).toBe(worktreeProvider);
+  });
+
+  it("falls back to the first usable option when the current one is unavailable", () => {
+    const unavailableWorktree = {
+      ...worktreeProvider,
+      availability: {
+        status: "unavailable" as const,
+        message: "Not installed",
+      },
+    };
+    expect(
+      resolveHostEnvironmentProvider({
+        currentProvider: unavailableWorktree,
+        providers: [checkoutProvider, unavailableWorktree],
+      }),
+    ).toBe(checkoutProvider);
+  });
+
+  it("keeps the current option so selecting an unconfigured host still takes effect", () => {
+    expect(
+      resolveHostEnvironmentProvider({
+        currentProvider: worktreeProvider,
+        providers: [],
+      }),
+    ).toBe(worktreeProvider);
+  });
+
+  it("returns no selection when neither the host nor the tab has a machine option", () => {
+    expect(
+      resolveHostEnvironmentProvider({
+        currentProvider: null,
+        providers: [],
+      }),
+    ).toBeNull();
+  });
+});
 
 describe("root-compose project file routing", () => {
   it("uses a persisted opener host instead of the newly selected context", () => {
@@ -157,6 +202,7 @@ describe("resolveNewThreadProjectDefaultsState", () => {
 describe("resolveNewThreadSubmitDisabledReason", () => {
   const readyState = {
     environmentProviderInputsBlocker: null,
+    environmentSetupRequiredReason: null,
     isCopyingAttachments: false,
     isLoadingModels: false,
     isSubmitting: false,
@@ -170,6 +216,18 @@ describe("resolveNewThreadSubmitDisabledReason", () => {
     selectedThreadModel: "gpt-5.6-sol",
     submissionEnvironmentUnavailable: false,
   } satisfies ResolveNewThreadSubmitDisabledReasonArgs;
+
+  it("blocks the send while the selected environment needs setting up", () => {
+    expect(
+      resolveNewThreadSubmitDisabledReason({
+        ...readyState,
+        environmentSetupRequiredReason:
+          "Modal Sandbox is not configured: set tokenId, tokenSecret in the plugin's settings.",
+      }),
+    ).toBe(
+      "Modal Sandbox is not configured: set tokenId, tokenSecret in the plugin's settings.",
+    );
+  });
 
   it.each<
     [
@@ -275,9 +333,11 @@ function makeProjectSource(hostId = "host_1"): ProjectSource {
 
 function makeProjectProvider(id: string): SystemEnvironmentProvider {
   return {
+    machineProviderId: null,
     id,
     displayName: id,
-    icon: null,
+    description: "Prepare a workspace for this thread.",
+    icon: "Folder",
     logoUrl: null,
     pluginId: id,
     acceptsEmptyInputs: true,
@@ -298,9 +358,11 @@ function makeProjectlessProvider(
   projectless: boolean,
 ): SystemEnvironmentProvider {
   return {
+    machineProviderId: null,
     id,
     displayName: id,
-    icon: null,
+    description: "Prepare a workspace for this thread.",
+    icon: "Folder",
     logoUrl: null,
     pluginId: id,
     acceptsEmptyInputs: true,
@@ -361,27 +423,6 @@ function makeTerminalSession(
     updatedAt: 1,
     ...overrides,
   });
-}
-
-function makeProjectBranchesResponse(
-  overrides: Partial<ProjectBranchesResponse>,
-): ProjectBranchesResponse {
-  return {
-    branches: [],
-    branchesTruncated: false,
-    checkout: { kind: "branch", branchName: "main", headSha: null },
-    defaultBranch: "main",
-    defaultBranchRelation: "equal",
-    defaultWorktreeBaseBranch: "main",
-    isWorktree: false,
-    hasUncommittedChanges: false,
-    operation: { kind: "none" },
-    originDefaultBranch: "main",
-    remoteBranches: [],
-    remoteBranchesTruncated: false,
-    selectedBranch: null,
-    ...overrides,
-  };
 }
 
 describe("buildMobileRecentThreads", () => {
@@ -720,18 +761,6 @@ describe("restorePromptDraftAfterOptionChange", () => {
   });
 });
 
-describe("hasPromptOptionValueChanged", () => {
-  it("treats unchanged prompt option values as no-ops", () => {
-    expect(hasPromptOptionValueChanged("codex", "codex")).toBe(false);
-    expect(hasPromptOptionValueChanged(undefined, undefined)).toBe(false);
-  });
-
-  it("detects changed prompt option values", () => {
-    expect(hasPromptOptionValueChanged("codex", "claude")).toBe(true);
-    expect(hasPromptOptionValueChanged(undefined, "auto")).toBe(true);
-  });
-});
-
 describe("hasSingleUseRootComposeTargetState", () => {
   it("treats section targets as single-use navigation state", () => {
     expect(hasSingleUseRootComposeTargetState({ sectionId: "sec_work" })).toBe(
@@ -743,19 +772,6 @@ describe("hasSingleUseRootComposeTargetState", () => {
     expect(hasSingleUseRootComposeTargetState({ focusPrompt: true })).toBe(
       true,
     );
-  });
-
-  it("treats handoff seeds as single-use target state", () => {
-    expect(
-      hasSingleUseRootComposeTargetState({
-        [THREAD_HANDOFF_CREATE_SEED_LOCATION_STATE_KEY]: {
-          environmentId: "env_source",
-          projectId: "proj_source",
-          sourceThreadId: "thr_source",
-          sourceThreadTitle: "Source thread",
-        },
-      }),
-    ).toBe(true);
   });
 
   it("ignores non-target state", () => {
@@ -805,42 +821,6 @@ describe("shouldNavigateAfterThreadCreate", () => {
   });
 });
 
-describe("resolveProjectSourceGitDisabledReason", () => {
-  it("explains why non-git and commitless sources cannot create worktrees", () => {
-    expect(resolveProjectSourceGitDisabledReason(undefined)).toBeNull();
-    expect(
-      resolveProjectSourceGitDisabledReason(makeProjectBranchesResponse({})),
-    ).toBeNull();
-    expect(
-      resolveProjectSourceGitDisabledReason(
-        makeProjectBranchesResponse({
-          checkout: {
-            kind: "unknown",
-            reason: "Path is not a git repository",
-          },
-          defaultBranch: null,
-          defaultBranchRelation: null,
-          defaultWorktreeBaseBranch: null,
-          originDefaultBranch: null,
-        }),
-      ),
-    ).toBe("New worktrees require a Git repository with at least one commit");
-    expect(
-      resolveProjectSourceGitDisabledReason(
-        makeProjectBranchesResponse({
-          checkout: { kind: "unborn", branchName: "main" },
-          defaultBranch: null,
-          defaultBranchRelation: null,
-          defaultWorktreeBaseBranch: null,
-          originDefaultBranch: null,
-        }),
-      ),
-    ).toBe(
-      "Project source has no commits. Create an initial commit before creating a worktree",
-    );
-  });
-});
-
 describe("resolveRootComposeEffectiveEnvironmentValue", () => {
   const checkoutProvider = makeProjectProvider("project-checkout");
   const worktreeProvider = makeProjectProvider("git-worktree");
@@ -848,6 +828,7 @@ describe("resolveRootComposeEffectiveEnvironmentValue", () => {
   it("falls back to the checkout on the primary host for a project with a source there", () => {
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         knownHostIds: new Set(["host_1"]),
         environmentSelectionValue: "",
         environmentProviders: [checkoutProvider, worktreeProvider],
@@ -863,6 +844,7 @@ describe("resolveRootComposeEffectiveEnvironmentValue", () => {
   it("does not invent a checkout for a standard project without a source on the primary host", () => {
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         knownHostIds: new Set(["host_1", "host_2"]),
         environmentSelectionValue: "",
         environmentProviders: [checkoutProvider],
@@ -878,6 +860,7 @@ describe("resolveRootComposeEffectiveEnvironmentValue", () => {
   it("holds the selection until the provider list has loaded", () => {
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         knownHostIds: new Set(["host_1"]),
         environmentSelectionValue: "provider:git-worktree",
         isProjectless: false,
@@ -901,12 +884,14 @@ describe("resolveRootComposeEffectiveEnvironmentValue", () => {
     };
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         ...args,
         environmentSelectionValue: "provider:git-worktree",
       }),
     ).toBe("provider:git-worktree");
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         ...args,
         environmentSelectionValue: "provider:gone",
       }),
@@ -916,6 +901,7 @@ describe("resolveRootComposeEffectiveEnvironmentValue", () => {
   it("keeps a reuse environment only when it belongs to the selected project", () => {
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         knownHostIds: new Set(["host_1"]),
         environmentSelectionValue: "reuse:env_current",
         environmentProviders: [checkoutProvider],
@@ -929,6 +915,7 @@ describe("resolveRootComposeEffectiveEnvironmentValue", () => {
 
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         knownHostIds: new Set(["host_1"]),
         environmentSelectionValue: "reuse:env_stale",
         environmentProviders: [checkoutProvider],
@@ -941,9 +928,116 @@ describe("resolveRootComposeEffectiveEnvironmentValue", () => {
     ).toBe("provider:project-checkout");
   });
 
+  it("keeps a seeded environment that no live thread points at", () => {
+    expect(
+      resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: {
+          environmentId: "env_seeded",
+          status: "available",
+        },
+        knownHostIds: new Set(["host_1"]),
+        environmentSelectionValue: "reuse:env_seeded",
+        environmentProviders: [checkoutProvider],
+        isProjectless: false,
+        primaryHostId: "host_1",
+        projectSources: [makeProjectSource("host_1")],
+        reuseThreadOptions: [],
+        reuseThreadOptionsLoading: false,
+      }),
+    ).toBe("reuse:env_seeded");
+  });
+
+  it("holds a seeded environment while its lookup is still pending", () => {
+    expect(
+      resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: {
+          environmentId: "env_seeded",
+          status: "pending",
+        },
+        knownHostIds: new Set(["host_1"]),
+        environmentSelectionValue: "reuse:env_seeded",
+        environmentProviders: [checkoutProvider],
+        isProjectless: false,
+        primaryHostId: "host_1",
+        projectSources: [makeProjectSource("host_1")],
+        reuseThreadOptions: [],
+        reuseThreadOptionsLoading: false,
+      }),
+    ).toBe("reuse:env_seeded");
+  });
+
+  it("falls back when the seeded environment is gone", () => {
+    expect(
+      resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: {
+          environmentId: "env_seeded",
+          status: "missing",
+        },
+        knownHostIds: new Set(["host_1"]),
+        environmentSelectionValue: "reuse:env_seeded",
+        environmentProviders: [checkoutProvider],
+        isProjectless: false,
+        primaryHostId: "host_1",
+        projectSources: [makeProjectSource("host_1")],
+        reuseThreadOptions: [],
+        reuseThreadOptionsLoading: false,
+      }),
+    ).toBe("provider:project-checkout");
+  });
+
+  it("ignores a seeded lookup for a different environment than the selection", () => {
+    expect(
+      resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: {
+          environmentId: "env_other",
+          status: "available",
+        },
+        knownHostIds: new Set(["host_1"]),
+        environmentSelectionValue: "reuse:env_stale",
+        environmentProviders: [checkoutProvider],
+        isProjectless: false,
+        primaryHostId: "host_1",
+        projectSources: [makeProjectSource("host_1")],
+        reuseThreadOptions: [],
+        reuseThreadOptionsLoading: false,
+      }),
+    ).toBe("provider:project-checkout");
+  });
+
+  it("holds reuse mode before an environment is picked, including with nothing to reuse", () => {
+    expect(
+      resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
+        knownHostIds: new Set(["host_1"]),
+        environmentSelectionValue: "reuse",
+        environmentProviders: [checkoutProvider],
+        isProjectless: false,
+        primaryHostId: "host_1",
+        projectSources: [makeProjectSource("host_1")],
+        reuseThreadOptions: [],
+        reuseThreadOptionsLoading: false,
+      }),
+    ).toBe("reuse");
+
+    expect(
+      resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
+        knownHostIds: new Set(["host_1"]),
+        environmentSelectionValue: "reuse",
+        environmentProviders: [checkoutProvider],
+        isProjectless: false,
+        primaryHostId: "host_1",
+        projectSources: [makeProjectSource("host_1")],
+        reuseThreadOptions: [makeReuseThreadOption("env_current")],
+        reuseThreadOptionsLoading: false,
+      }),
+    ).toBe("reuse");
+  });
+
   it("holds a specific reuse selection while project worktrees load", () => {
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         knownHostIds: new Set(["host_1"]),
         environmentSelectionValue: "reuse:env_pending",
         environmentProviders: [checkoutProvider],
@@ -959,6 +1053,7 @@ describe("resolveRootComposeEffectiveEnvironmentValue", () => {
   it("keeps a projectless reuse selection when the environment is one of its own", () => {
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         knownHostIds: new Set(["host_1"]),
         environmentSelectionValue: "reuse:env_personal",
         environmentProviders: [
@@ -976,6 +1071,7 @@ describe("resolveRootComposeEffectiveEnvironmentValue", () => {
   it("drops a projectless reuse selection whose environment is not among its own", () => {
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         knownHostIds: new Set(["host_1"]),
         environmentSelectionValue: "reuse:env_gone",
         environmentProviders: [
@@ -993,6 +1089,7 @@ describe("resolveRootComposeEffectiveEnvironmentValue", () => {
   it("preselects the projectless-only provider once a projectless thread has a choice", () => {
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         knownHostIds: new Set(["host_1"]),
         environmentSelectionValue: "",
         environmentProviders: [
@@ -1011,6 +1108,7 @@ describe("resolveRootComposeEffectiveEnvironmentValue", () => {
   it("replaces a provider a projectless thread cannot use", () => {
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         knownHostIds: new Set(["host_1"]),
         environmentSelectionValue: "provider:modal-sandbox",
         environmentProviders: [
@@ -1029,6 +1127,7 @@ describe("resolveRootComposeEffectiveEnvironmentValue", () => {
   it("selects nothing for a projectless thread until its providers have loaded", () => {
     expect(
       resolveRootComposeEffectiveEnvironmentValue({
+        seededReuseEnvironment: null,
         knownHostIds: new Set(["host_1"]),
         environmentSelectionValue: "provider:personal-workspace",
         isProjectless: true,

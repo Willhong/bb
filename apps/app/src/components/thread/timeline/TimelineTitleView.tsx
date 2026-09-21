@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, useRef, useState } from "react";
 import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 import {
   assertNever,
@@ -14,10 +14,13 @@ import {
 } from "@bb/thread-view";
 import { cn } from "@bb/shared-ui/lib/utils";
 import { Icon } from "@bb/shared-ui/icon";
-import { isIconName } from "./presentation-display.js";
 import { DiffStatsTally } from "@/components/ui/diff-stats-tally.js";
 import { RouteAnchor } from "@/components/ui/app-route-anchor.js";
-import { useSecondTick } from "@/hooks/useSecondTick";
+import { LiveDurationText } from "./LiveDurationText.js";
+import {
+  ConversationMessageOverflowToggle,
+  useIsOverflowing,
+} from "./conversation-message-overflow.js";
 
 export type TimelineTitleActionResolver = (
   action: TimelineTitleAction,
@@ -31,6 +34,7 @@ interface TimelineTitleViewProps {
   title: TimelineTitle;
   onTitleAction?: TimelineTitleActionResolver;
   resolveSegmentLinkHref?: TimelineTitleLinkResolver;
+  wrap?: boolean;
 }
 
 function emToneClass(tone: TimelineTitleTone): string {
@@ -108,10 +112,13 @@ function renderSegment(
     onClick: (() => void) | null;
     linkHref: string | null;
   },
+  wrap: boolean,
 ): ReactNode {
-  const widthClass = segment.truncate
-    ? "min-w-0 truncate whitespace-pre"
-    : "shrink-0 whitespace-pre";
+  const widthClass = wrap
+    ? "whitespace-pre-wrap"
+    : segment.truncate
+      ? "min-w-0 truncate whitespace-pre"
+      : "shrink-0 whitespace-pre";
   const toneClass =
     segment.accent !== undefined
       ? accentToneClass(segment.accent, segment.em)
@@ -181,13 +188,6 @@ function renderSegment(
       {segment.text}
     </span>
   );
-}
-
-function LiveDurationText({ startedAt }: { startedAt: number }) {
-  const elapsedMs = useSecondTick() - startedAt;
-
-  if (elapsedMs <= 1_000) return null;
-  return <>{durationToCompactString(elapsedMs)}</>;
 }
 
 function renderDecoration(
@@ -288,13 +288,6 @@ function renderDecoration(
     }
     case "badge": {
       const badgeClass = badgeToneClass(decoration.tone);
-      if (!isIconName(decoration.glyph)) {
-        return (
-          <span key={index} className={cn(baseClass, badgeClass)}>
-            {decoration.label}
-          </span>
-        );
-      }
       return (
         <span
           key={index}
@@ -318,16 +311,21 @@ export function TimelineTitleView({
   title,
   onTitleAction,
   resolveSegmentLinkHref,
+  wrap = false,
 }: TimelineTitleViewProps) {
   const onClick =
     title.action && onTitleAction ? onTitleAction(title.action) : null;
 
   return (
     <span
-      className="inline-flex min-w-0 max-w-full items-baseline gap-1 overflow-hidden whitespace-nowrap text-sm leading-5"
+      className={cn(
+        "min-w-0 max-w-full text-sm leading-5",
+        wrap
+          ? "whitespace-pre-wrap [overflow-wrap:anywhere]"
+          : "inline-flex items-baseline gap-1 overflow-hidden whitespace-nowrap",
+      )}
       title={title.plain}
     >
-      {}
       {title.segments.map((segment, index) => {
         const linkHref =
           segment.link && resolveSegmentLinkHref
@@ -336,7 +334,13 @@ export function TimelineTitleView({
         return (
           <Fragment key={`segment-${index}`}>
             {index > 0 ? " " : null}
-            {renderSegment(segment, index, title.tone, { onClick, linkHref })}
+            {renderSegment(
+              segment,
+              index,
+              title.tone,
+              { onClick, linkHref },
+              wrap,
+            )}
           </Fragment>
         );
       })}
@@ -346,6 +350,33 @@ export function TimelineTitleView({
           {renderDecoration(decoration, index, title.tone)}
         </Fragment>
       ))}
+    </span>
+  );
+}
+
+export function ExpandableTimelineTitle(props: TimelineTitleViewProps) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const overflowing = useIsOverflowing({
+    elementRef: ref,
+    enabled: !expanded,
+    measurementKey: props.title.plain,
+  });
+
+  return (
+    <span className="block min-w-0 flex-1">
+      <span
+        ref={ref}
+        className={cn("block text-sm leading-5", !expanded && "line-clamp-2")}
+      >
+        <TimelineTitleView {...props} wrap />
+      </span>
+      {expanded || overflowing ? (
+        <ConversationMessageOverflowToggle
+          expanded={expanded}
+          onToggle={() => setExpanded((value) => !value)}
+        />
+      ) : null}
     </span>
   );
 }

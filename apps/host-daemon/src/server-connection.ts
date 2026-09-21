@@ -24,14 +24,12 @@ import {
   type ReconnectingWebSocketLike,
   type ServerConnectionOptions,
 } from "./server-connection-support.js";
-import { isLikelySystemSuspensionDelay } from "./system-suspension.js";
+import { isLikelySystemSuspensionDelay } from "@bb/process-utils";
+import { sliceUtf16Head } from "@bb/text-utils";
 import { normalizeCaughtError, runtimeErrorLogFields } from "./error-utils.js";
 import { ServerResponseError } from "./server-client.js";
 
-export type {
-  CreateReconnectingWebSocket,
-  ServerConnectionOptions,
-} from "./server-connection-support.js";
+export type { CreateReconnectingWebSocket } from "./server-connection-support.js";
 
 interface InvalidServerMessageArgs {
   data: unknown;
@@ -122,7 +120,7 @@ function summarizeServerMessagePayload(
   const text = decodeWebSocketMessageData(data);
   return {
     payloadLength: text.length,
-    payloadPreview: text.slice(0, SERVER_MESSAGE_PAYLOAD_PREVIEW_CHARS),
+    payloadPreview: sliceUtf16Head(text, SERVER_MESSAGE_PAYLOAD_PREVIEW_CHARS),
     payloadTruncated: text.length > SERVER_MESSAGE_PAYLOAD_PREVIEW_CHARS,
   };
 }
@@ -132,6 +130,7 @@ export class ServerConnection {
   private readonly startupTimeoutMs: number;
 
   private session: HostDaemonSessionOpenResponse | null = null;
+  private machineEnvironmentRevision = -1;
   private websocket: ReconnectingWebSocketLike | null = null;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private lastHeartbeatAcknowledgedAt: number | null = null;
@@ -342,16 +341,48 @@ export class ServerConnection {
         hostId: this.options.hostId,
         instanceId: this.options.instanceId,
         hostName: this.options.hostName,
-        hostType: this.options.hostType,
-        connectMachineId: this.options.connectMachineId,
         dataDir: this.options.dataDir,
         localApiPort: this.options.localApiPort,
         activeThreads: this.options.getActiveThreads?.() ?? [],
         loadedEnvironments: this.options.getLoadedEnvironments?.() ?? [],
       });
       this.session = session;
+      this.machineEnvironmentRevision = session.machineEnvironment.revision;
+      this.options.onMachineEnvironment?.(session.machineEnvironment);
       return session;
     } catch (error) {
+      if (
+        error instanceof ServerResponseError &&
+        error.serverMoved !== null &&
+        this.options.onServerMoved !== undefined
+      ) {
+        const moved = error.serverMoved;
+        this.options.logger.info(
+          { serverUrl: moved.serverUrl, toHostName: moved.toHostName },
+          "The bb server moved; switching this daemon to the new address",
+        );
+        const switched = await this.options
+          .onServerMoved({
+            source: "session-open",
+            serverUrl: moved.serverUrl,
+            headers: moved.headers ?? null,
+            toHostName: moved.toHostName,
+            movedAt: moved.movedAt,
+          })
+          .then(
+            () => true,
+            (handlerError: unknown) => {
+              this.options.logger.error(
+                { ...runtimeErrorLogFields(handlerError) },
+                "Failed to switch this daemon to the moved bb server",
+              );
+              return false;
+            },
+          );
+        if (switched) {
+          throw error;
+        }
+      }
       if (
         error instanceof ServerResponseError &&
         error.code === "protocol_version_mismatch"
@@ -420,11 +451,7 @@ export class ServerConnection {
           authorization: buildHostDaemonWebSocketAuthorizationHeader(
             this.options.hostKey,
           ),
-          ...(this.options.machineCredential !== undefined
-            ? {
-                "x-bb-connect-machine": this.options.machineCredential,
-              }
-            : {}),
+          ...this.options.serverHeaders,
         },
         maxRetries: Number.POSITIVE_INFINITY,
         protocols: buildHostDaemonWebSocketProtocols(),
@@ -587,6 +614,43 @@ export class ServerConnection {
 
     if (message.data.type === "session-close") {
       this.handleSessionCloseMessage(message.data.reason);
+      return;
+    }
+
+    if (message.data.type === "machine.shutdown") {
+      void Promise.resolve(this.options.onMachineShutdown?.()).catch(
+        (error) => {
+          this.options.logger.error(
+            { ...runtimeErrorLogFields(error) },
+            "Machine shutdown failed",
+          );
+        },
+      );
+      return;
+    }
+
+    if (message.data.type === "server.moved") {
+      const move = message.data;
+      void Promise.resolve(
+        this.options.onServerMoved?.({
+          serverUrl: move.serverUrl,
+          headers: move.headers,
+          source: "message",
+        }),
+      ).catch((error) => {
+        this.options.logger.error(
+          { ...runtimeErrorLogFields(error), serverUrl: move.serverUrl },
+          "Failed to switch this daemon to the moved bb server",
+        );
+      });
+      return;
+    }
+
+    if (message.data.type === "machine-environment.replace") {
+      if (message.data.environment.revision > this.machineEnvironmentRevision) {
+        this.machineEnvironmentRevision = message.data.environment.revision;
+        this.options.onMachineEnvironment?.(message.data.environment);
+      }
       return;
     }
 

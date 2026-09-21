@@ -1,5 +1,154 @@
 # Changelog
 
+## 0.43.3
+
+Save messages as drafts, annotate pages for your agent, and watch browser automation live in chat. This release also redesigns handoffs and improves everyday navigation, configuration across machines, and conversation performance.
+
+### Working with agents
+
+- **Save drafts.** The new Drafts plugin is bundled and enabled by default. Save a message from a new-thread or follow-up composer, then choose Send now when you’re ready.
+- **Redesigned handoffs.** Hand off from the follow-up composer while preserving your draft and workspace. Choose another provider or a model from the same provider, with an explicit control to exit handoff.
+- **Control finished turns.** Choose whether finished turns collapse for each provider in Settings → Providers. Claude Code now keeps finished turns expanded by default.
+- Drag sidebar threads into the composer to mention them. Skill search supports fuzzy matching and explicit `$skill` mentions.
+- Script automations support an explicit working directory. Open child threads directly from workflow previews.
+- BB Guide now instructs agents to wait for a user request before creating or messaging other bb threads.
+
+### Browser tools
+
+- **Annotate pages for your agent.** Enable the new Agent Annotations plugin to select elements in bb’s desktop browser and add comments. Your agent receives element details and available React component information. Edit or delete numbered annotations before sending.
+- **Watch browser automation live.** Headless Browser Automation sessions now show a live preview in chat, with an expandable view for following the agent’s work.
+- Import browser cookies from Helium on macOS.
+
+### Workspace and navigation
+
+- **Search and commands.** Updated palette UI with separate modes and grouped active and archived results. Open thread-search results in a split pane. Tasks search accepts terms in any order.
+- **Sidebar and panels.** Group worktree threads in any sidebar organization mode, retain collapsed sections, and drag overflow rows into splits. Close other panel tabs or tabs to the right; your chosen diff display mode survives resizing.
+- **Plugin browsing.** Improvements include category pages, compact mobile shelves, easier access to Plugin Guide, and preserved detail-tab selection.
+- Navigate conversation images in the lightbox and expand long system summaries. Themes can set the integrated terminal’s font family.
+- **Mobile.** Better panel-tab navigation, more consistent Recent statuses, larger provider toggle targets, and easier dismissal of image previews.
+
+### Machines and configuration
+
+- **Project environment variables.** Set project-specific variables that override machine-wide defaults for agent turns, terminals, and project setup. Import variables from a `.env` file through settings.
+- **Save multiple servers.** Add and switch between saved addresses from the desktop Window → Server menu.
+- **Move your server — experimental.** Transfer bb’s server data and plugin state to another enrolled machine. Repositories, workspaces, and provider sessions stay on their existing machines.
+- **Multi-machine picker — experimental.** A searchable picker separates machine selection from environment selection for projects with several machines.
+- **Accounts and usage.** Provider Usage brings pooled and machine-local accounts into a consistent view, deduplicates known accounts within a location, and retains cached measurements after refresh failures. Custom ACP agents can opt into usage reporting when supported by their dialect. Nested bb instances can use their parent’s Account Pooler for both Claude and Codex.
+- A persistent telemetry opt-out is available in settings.
+
+### Fixes and performance
+
+- Fix machine pairing when accessing bb over HTTP.
+- Faster streaming conversations, less animation repainting, and more stable working and thinking rows. Older pages stay loaded and Mermaid previews survive updates.
+- More reliable provider sessions, stopping, and queues during interruptions. Clearing Pi context starts a fresh session; ACP question cancellation and late answers are handled more reliably. Automatic provider selection can recover from a failed model catalog without overriding explicit choices.
+- Failed voice recordings are retained for retry, and the upload limit increases to 20 MB.
+- More reliable machine provisioning, downloads, file watching, and storage cleanup. Modal sandboxes avoid incidental wakes and recover tracked allocations more reliably; model catalogs load independently across machines.
+- Fixes for mobile startup and reload navigation, suggestion placement, and overlapping sidebar controls. Archived threads opened deliberately remain in split panes, and scheduled time labels handle daylight saving transitions.
+
+### CLI
+
+- CLI errors suggest valid commands and flags and explain missing context. Built-in plugin commands share consistent argument parsing, help, and output. Use `bb diagnostics cli-errors` to summarize local command failures.
+- Finished terminal output remains readable for 30 minutes after exit, with improved `terminal read` and `terminal wait` behavior.
+- Local image and file attachments upload before CLI thread requests, including when the server is remote.
+- Inspect discoverable plugin RPCs with `bb plugin rpc list` and `bb plugin rpc inspect`.
+
+### New plugin APIs
+
+- **Commands and shortcuts.** Register app commands with `app.commands.register` and provide rebindable keyboard shortcuts. Use `defineCli` and `cliCommand` to build CLI commands with shared parsing, validation, help, and errors.
+- **Browser extensions — experimental.** Add controls beside the browser address bar, run page scripts, and receive messages from the page. Mention providers can attach images as agent context.
+- **Composer controls — experimental.** Set model and other picker selections, remove plugin-owned mentions, react to successful submissions, and attach plugin data when submitting a draft. Initial prompts in embedded composers and compose navigation now resolve thread, project, and section mentions into labeled pills.
+- **Forms and timeline entries.** Plugin tools waiting on `bb.ui.requestInput` can outlive the agent’s turn and deliver their result later. Plugins control the form’s timeline labels and what submitted information the transcript retains.
+- **Discoverable RPCs — experimental.** Publish method descriptions and schemas for other plugins and agents to inspect with `experimental_discoverRpc`. SDK RPC calls also accept an abort signal.
+- **Dispatch context — experimental.** Inspect every queued message in a grouped dispatch, including its author and origin, with consistent sender information across retries.
+- **Thread and provider controls.** Create dependent threads that archive or delete with their owner, independently of sidebar nesting. Providers can choose whether completed turns collapse by default.
+- **Project configuration.** Read and manage project-specific machine environment variables through the SDK, with individual-variable updates for both project and global settings.
+- **Server and machine management — experimental.** Check, start, monitor, and cancel server moves; export server data and clean up an old server copy. Machine plugins can reconcile suspended machines through `hosts.experimental_reconcile`.
+- **Shared icons.** Plugin-declared icons now work wherever bb accepts an icon name, including tools, providers, and app controls.
+
+**For plugin authors upgrading:** `app.slots.commandPaletteAction` remains a deprecated runtime alias for `app.commands.register`. Its types are now `PluginCommandRegistration` and `PluginCommandContext`; tool presentation types are now `PluginRowPresentation` and `PluginRowLabels`. Dispatch hooks use `queuedMessages`, `initiator`, and `senderThreadId` in place of the old singular queue and requester fields.
+
+### Thanks
+
+Thank you to the contributors and co-authors outside the core team: [@0xferrous](https://github.com/0xferrous), [@kongenpei](https://github.com/kongenpei), [@lucasnetto](https://github.com/lucasnetto), [@maheen-ejaz](https://github.com/maheen-ejaz), [@manjoot](https://github.com/manjoot), [@OXI-717](https://github.com/OXI-717), [@robennals](https://github.com/robennals), [@samanthar0se](https://github.com/samanthar0se), [@technicalpickles](https://github.com/technicalpickles), [@timurkhakhalev](https://github.com/timurkhakhalev), [@vznh](https://github.com/vznh), and Ratul Sarna.
+
+## 0.43.0
+
+This release gives plugins new ways to create workspaces, manage machines, and control bb's built-in browser. Experimental Modal sandbox and Browser Automation plugins put those APIs to work for cloud development and agent-driven browsing.
+
+### New features
+
+- **Custom environments.** New environment APIs let plugins define how working areas are created for threads. For example, a plugin can use a copy-on-write filesystem to create a workspace instead of a Git worktree.
+- **Machine plugins.** New APIs let plugins provision and manage machines for development, including cloud machines that can pause and resume.
+- **Browser control.** A new plugin API lets plugins control bb's built-in desktop browser.
+- **Drag to nest threads.** Drag a thread onto another thread in the sidebar to make it a child of that thread.
+
+### Built-in plugin updates
+
+- **Modal sandboxes — experimental.** Use the new plugin for cloud development, with configurable images and machine sizes. Sandboxes can pause when idle and restore their files when work resumes. Shared machines stay available until their final owner releases them.
+- **Browser Automation — experimental.** Install and enable the new plugin to let agents control the bb desktop app browser or create headless browsers on a selected machine. Automation tabs belong to their thread, with controls to stop the agent or take over.
+- **Account Pooler.** Add multiple Claude and Codex accounts in one place. Threads automatically rotate through your accounts as they hit usage limits, without requiring you to sign into each account on every machine. This release adds account email addresses, drag reordering, and usage limits on mobile. Cached usage stays visible while fresh data loads. Fixes improve Codex reply history, generated images, account retries, reset-time reporting, and standalone search through the pool.
+- **BB Guide.** Choose whether agents receive bb's introduction and bundled skills, with controls for individual skills. Connect's remote-access instructions can also be turned off independently.
+- **Inline previews.** Read Markdown reports directly in chat and preview HTML or Markdown artifacts saved in thread storage.
+- **Provider Usage.** See which account a usage report belongs to.
+
+### Other improvements
+
+- **Message editing is out of experiments.** Editing messages is now available to everyone.
+- **Synced sidebar organization.** Sections, ordering, navigation preferences, and collapsed rows now sync through the server across devices. Move threads between sections from their menus.
+- **Projects settings.** Reorder projects by dragging and open a dedicated settings page for each project.
+- Import cookies from supported installed browsers through Settings → Browsers to reuse existing sign-ins in bb.
+- Plugins and Skills now have separate workspaces. Installed plugins have row actions and detail tabs, and remain accessible from Settings.
+- Preview color palettes by hovering or moving through the choices in Settings → Appearance.
+- Reasoning choices use compact, wrapping controls and support Left and Right arrow keys.
+
+### Performance
+
+- Faster file mentions by skipping Git-ignored paths, less GitHub background polling, and smaller startup JavaScript.
+
+### Notable fixes
+
+- Follow-ups preserve their chosen reasoning level.
+- Fixes prevent provider session mixups when threads start together, Codex subagent events appearing in the main feed, and stale Codex Fast settings after queued sends.
+- Pi extension dialogs become answerable bb interactions. Pi-native skills run through native commands, and dynamic tool results reach Bun-based Pi sessions.
+- Large tool outputs are retained, and generated images render in conversation history.
+- Thinking rows use a consistent presentation and preserve their content after completion. A setting controls diagnostic event visibility.
+- Older timeline details stay expandable, and pagination keeps conversation groups together.
+- Streaming Markdown handles incomplete formatting more cleanly. Local images and links resolve relative to their document.
+- Browser Automation works in the Linux AppImage. Browser discovery works when connected to a remote server, and controlled pages reveal in the focused thread.
+- Retry recoverable desktop startup failures from the app.
+- More reliable environment creation, cancellation, recovery, and cleanup after interruptions.
+- Fixes for plugin installation failures, Personal workspace file access, stale diff loading, panel navigation, and nested-thread archiving.
+- Ctrl+Enter works as the modifier submit shortcut on non-Mac keyboards. The command palette handles IME input correctly.
+
+### Thanks
+
+Thank you to the fourteen contributors and co-authors outside the core team:
+
+- [@andrewkchan](https://github.com/andrewkchan)
+- [@ariofrio](https://github.com/ariofrio)
+- [@dillonzq](https://github.com/dillonzq)
+- [@fgrehm](https://github.com/fgrehm)
+- [@hemaaanth](https://github.com/hemaaanth)
+- [@IlyaM](https://github.com/IlyaM)
+- [@kongenpei](https://github.com/kongenpei)
+- [@MacHatter1](https://github.com/MacHatter1)
+- [@noih](https://github.com/noih)
+- [@nqrwhal](https://github.com/nqrwhal)
+- [@salemsayed](https://github.com/salemsayed)
+- [@smsunarto](https://github.com/smsunarto)
+- [@vburojevic](https://github.com/vburojevic)
+- [@vznh](https://github.com/vznh)
+
+Thank you also to everyone who reported an issue addressed in this release: **[@0xferrous](https://github.com/0xferrous)**, **[@albrand](https://github.com/albrand)**, **[@andrewkchan](https://github.com/andrewkchan)**, **[@apsknight](https://github.com/apsknight)**, **[@ariofrio](https://github.com/ariofrio)**, **[@ComicBit](https://github.com/ComicBit)**, **[@dillonzq](https://github.com/dillonzq)**, **[@erwinkn](https://github.com/erwinkn)**, **[@hemaaanth](https://github.com/hemaaanth)**, **[@hxy91819](https://github.com/hxy91819)**, **[@IlyaM](https://github.com/IlyaM)**, **[@jjanousek](https://github.com/jjanousek)**, **[@kongenpei](https://github.com/kongenpei)**, **[@MacKevinroe](https://github.com/MacKevinroe)**, **[@markasoftware-tc](https://github.com/markasoftware-tc)**, **[@nawatt-works](https://github.com/nawatt-works)**, **[@noih](https://github.com/noih)**, **[@nqrwhal](https://github.com/nqrwhal)**, **[@salemsayed](https://github.com/salemsayed)**, **[@skyblue](https://github.com/skyblue)**, **[@smsunarto](https://github.com/smsunarto)**, **[@trieloff](https://github.com/trieloff)**, **[@vixalien](https://github.com/vixalien)**, and **[@xMinor-1](https://github.com/xMinor-1)**.
+
+### Mobile app
+
+[Join the iOS TestFlight](https://testflight.apple.com/join/T9MayTMb).
+
+- Fixes for iOS message sending, touch latency, and follow-up taps accidentally stopping active threads.
+- Queued message actions appear inline. The compact composer shows attachment counts and keeps dictation and send controls stable.
+- Model reasoning controls remain reachable on small screens. Pickers, notification drawers, and plugin navigation fit compact layouts more reliably.
+
 ## 0.42.0
 
 This release adds Account Pooler for Claude and Codex, push notifications across devices, and a new plugin catalog.
@@ -656,7 +805,6 @@ The server used to listen on every network interface, which exposed its unauthen
 - The mobile PWA shell tracks the iOS keyboard, and mobile voice recording controls work again.
 - bb connect relays DELETE request bodies.
 - First-run onboarding is behind an experiment while it settles.
-- New `pnpm dev:status` command for source development.
 
 ### Thanks
 

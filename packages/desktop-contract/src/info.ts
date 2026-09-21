@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { BbDesktopBrowserApi } from "./browser.js";
+import { bbDesktopVersionFeedPlatformSchema } from "./version-feed.js";
 import type { AppCommandId } from "@bb/domain";
 
 const isoUtcDateTimeSchema = z.iso.datetime();
@@ -16,7 +17,7 @@ export const bbDesktopInfoSchema = z.object({
   lastCheckedAt: isoUtcDateTimeSchema.nullable(),
   latestVersion: z.string().min(1).nullable(),
   pendingVersion: z.string().min(1).nullable(),
-  platform: z.enum(["macos", "linux"]),
+  platform: bbDesktopVersionFeedPlatformSchema,
   serverDaemonLogsAvailable: z.boolean().optional(),
   updateAvailable: z.boolean(),
   updateDownloaded: z.boolean(),
@@ -60,5 +61,9 @@ export interface BbDesktopApi extends BbDesktopInfo {
   ): BbDesktopInfoUnsubscribe;
   openExternalUrl(url: string): void;
   openServerDaemonLogs?(): Promise<void>;
+  setSplitNavigationEnabled?(
+    enabled: boolean,
+    directionalCommands?: readonly AppCommandId[],
+  ): void;
   setTheme(theme: BbDesktopTheme): void;
 }

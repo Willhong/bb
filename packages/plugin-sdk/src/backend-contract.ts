@@ -1,3 +1,4 @@
+import type { MachineBootstrapApi } from "./machine-bootstrap.js";
 import type Database from "better-sqlite3";
 import type { Context } from "hono";
 import type * as z from "zod";
@@ -14,18 +15,24 @@ import type {
   ProviderRateLimitState,
   ReasoningLevel,
   ServiceTier,
+  ThreadCreateOrigin,
   ThreadQueuedMessage,
+  ThreadTurnInitiator,
   WorkspaceProvisionType,
 } from "@bb/domain";
 import type { ProviderFork } from "@bb/domain/provider-fork";
-import type { BbSdk } from "@bb/sdk";
+import type {
+  BbSdk,
+  ThreadPluginMetadataArgs,
+  ThreadPluginMetadataUpdateArgs,
+  ThreadPluginMetadataResult,
+} from "@bb/sdk";
 import type {
   ExecutionInputFieldSource,
-  StartedOnBehalfOf,
-  ThreadCreateOrigin,
   ThreadResponse,
+  TerminalSession,
 } from "@bb/server-contract";
-import type { JsonValue } from "./json-value.js";
+import type { JsonValue, ReadonlyJsonValue } from "./json-value.js";
 import type {
   PluginRpcContract,
   PluginRpcHandlers,
@@ -258,6 +265,10 @@ export interface PluginTurnFailedEvent {
  * queued row GET /threads/:id/queued-messages serves.
  */
 export interface PluginThreadEventPayloads {
+  /** Debounced per thread (at most once per second), with the latest sequence and current thread DTO. Reading history does not emit this event. */
+  "experimental_thread.events": { thread: ThreadResponse; sequence: number };
+  /** Real accepted terminal input; excludes output, keepalives and input contents. */
+  "experimental_terminal.input": { terminal: TerminalSession };
   /** Fired after a thread row is created. */
   "thread.created": { thread: ThreadResponse };
   /** Fired when a thread transitions into `active`. */
@@ -288,8 +299,8 @@ export interface PluginThreadEventPayloads {
   /**
    * Fired after a dispatch attempt is queued as a row — by a `message.dispatch`
    * hook's `wait` decision, by a `sendAt` in the future, or by a core wait (the
-   * thread is busy, its turn is still starting, provisioning, or awaiting an
-   * interaction).
+   * thread is busy, its turn is still starting, provisioning, stopping, or
+   * awaiting an interaction).
    *
    * Every listener sees every queued row, not just the ones it is holding: an
    * observer that only wants its own filters on
@@ -398,7 +409,18 @@ export interface PluginEnvironments {
       import("./environment-provider.js").PluginEnvironmentProviderInputsSchema =
       undefined,
   >(
-    declaration: PluginEnvironmentProviderDeclaration<Requires, Inputs>,
+    declaration:
+      | PluginEnvironmentProviderDeclaration<Requires, Inputs>
+      | {
+          id: string;
+          displayName: string;
+          description: string;
+          icon: string;
+          machineProviderId: string;
+          environmentProviderId: string;
+          create?: never;
+          remove?: never;
+        },
   ): void;
   /**
    * Ask core to re-ask this plugin's waiting providers now instead of at their
@@ -406,6 +428,70 @@ export interface PluginEnvironments {
    * `experimental_hooks.recheck`.
    */
   recheck(): Promise<void>;
+}
+
+export type PluginMachineValidateDecision =
+  | { action: "accept" }
+  | { action: "refuse"; message: string };
+
+export type PluginMachineProviderDeclaration<
+  Inputs extends
+    import("./machine-provider.js").PluginMachineProviderInputsSchema =
+    import("./machine-provider.js").PluginMachineProviderInputsSchema,
+> = import("./machine-provider.js").PluginMachineProviderDefinition<Inputs>;
+
+export interface ServerAccessGrant {
+  id: string;
+  serverUrl: string;
+  headers?: Record<string, string>;
+}
+
+export interface ServerAccessProviderDeclaration {
+  id: string;
+  displayName: string;
+  description: string;
+  availability():
+    | (import("./machine-provider.js").PluginMachineProviderAvailability & {
+        serverUrl?: string;
+      })
+    | Promise<
+        import("./machine-provider.js").PluginMachineProviderAvailability & {
+          serverUrl?: string;
+        }
+      >;
+  acquire(context: {
+    key: string;
+    hostId: string;
+    signal: AbortSignal;
+  }): Promise<ServerAccessGrant | { status: "failed"; message: string }>;
+  release(context: {
+    key: string;
+    hostId: string;
+    /** Null when acquisition was interrupted before a grant was returned. Reconcile using key and hostId. */
+    grantId: string | null;
+  }): Promise<void>;
+}
+
+export interface PluginServerAccess {
+  register(declaration: ServerAccessProviderDeclaration): void;
+  /**
+   * Notify connected clients that server access configuration changed.
+   * Call when access is gained or lost. Clients reload system configuration,
+   * which re-checks availability for Machines settings and creation banners.
+   */
+  recheck(): void;
+}
+
+export interface PluginMachines extends MachineBootstrapApi {
+  /** Read core’s current persisted provider resource, or null when the host or resource is absent. Available across plugins; resources must not contain credentials. */
+  getResource(hostId: string): Promise<JsonValue | null>;
+  register<
+    const Inputs extends
+      import("./machine-provider.js").PluginMachineProviderInputsSchema =
+      undefined,
+  >(
+    declaration: PluginMachineProviderDeclaration<Inputs>,
+  ): void;
 }
 
 /**
@@ -419,7 +505,13 @@ export type PluginDispatchEnvironmentIntent =
   | {
       kind: "provider";
       environmentProviderId: string;
-      machine: { type: "existing"; hostId: string };
+      machine:
+        | { type: "existing"; hostId: string }
+        | {
+            type: "new";
+            machineProviderId: string;
+            inputs: JsonValue | null;
+          };
       inputs: JsonValue | null;
     };
 
@@ -541,8 +633,26 @@ export interface MessageDispatchHookContext {
   /** Whether this attempt starts a turn or joins a running one. */
   attempt: PluginDispatchAttemptKind;
   /**
-   * The queued row this attempt is re-trying, or null when the attempt is
-   * inline and no row has ever existed for it.
+   * The author category shared by this dispatch's messages: `user`, `agent`,
+   * or `system`. `mixed` means the queued messages have different categories.
+   * Different agents still share the `agent` category; read `queuedMessages`
+   * for each message's author. `mixed` is a hook summary, not a turn initiator.
+   */
+  initiator: ThreadTurnInitiator | "mixed";
+  /**
+   * The thread that sent every message in this dispatch: a thread id, null
+   * when none of them has a sender, or the literal `"mixed"` when the rows
+   * disagree. A thread-start names its requesting thread; a message a human
+   * typed and a core-driven retry have no sender. Null therefore still means
+   * "nobody sent this" rather than "bb could not tell", so a handler may key
+   * a human-versus-agent policy on it; `queuedMessages` names each row's own
+   * sender. Thread ids are prefixed, so no id collides with `"mixed"`.
+   */
+  senderThreadId: string | "mixed" | null;
+  /**
+   * All queued rows this attempt is re-trying, in dispatch order. Empty for
+   * an inline attempt. Each row retains its own content, author, and origin; `input`
+   * contains their combined input, and the hook decides for the whole group.
    *
    * This is how a hook tells a fresh send from a re-attempt of something it
    * already decided about — the replacement for the old
@@ -550,11 +660,26 @@ export interface MessageDispatchHookContext {
    * should treat the two identically; a hook that logs should not
    * double-count.
    */
-  queuedMessage: ThreadQueuedMessage | null;
-  /** How the dispatch was requested; null for internal/core-driven sends. */
-  origin: ThreadCreateOrigin | null;
-  originPluginId: string | null;
-  startedOnBehalfOf: StartedOnBehalfOf | null;
+  queuedMessages: ThreadQueuedMessage[];
+  /**
+   * Opaque JSON supplied by a plugin through the composer's
+   * `experimental_submit`, paired with that plugin's id. Null for ordinary
+   * submissions and queued re-attempts. Core does not persist or interpret
+   * the data.
+   */
+  experimental_submission: {
+    pluginId: string;
+    data: JsonValue;
+  } | null;
+  /**
+   * How the dispatch was requested; null for internal/core-driven sends, which
+   * includes every follow-up, steer and retry. Persisted with the queued row,
+   * so a drained re-attempt reads what its first attempt read. For a grouped
+   * dispatch, each field is its shared value or `"mixed"` when rows differ,
+   * including a value versus null. Each queued row exposes its own origin.
+   */
+  origin: ThreadCreateOrigin | "mixed" | null;
+  originPluginId: string | "mixed" | null;
   parentThreadId: string | null;
 }
 
@@ -732,6 +857,10 @@ export interface PluginRpc {
   register<Contract extends PluginRpcContract>(
     contract: Contract,
     handlers: PluginRpcHandlers<Contract>,
+    options?: {
+      experimental_discoverable?: boolean;
+      experimental_description?: string;
+    },
   ): void;
 }
 
@@ -806,6 +935,24 @@ export type PluginInteractionResult =
   | { outcome: "submitted"; value: JsonValue }
   | { outcome: "cancelled"; reason: PluginInteractionCancelReason };
 
+/**
+ * What a submitted form leaves in the thread timeline, chosen by the plugin.
+ * bb never stores the form's payload or the submitted value; it stores only
+ * this description, so a plugin decides what the transcript keeps.
+ */
+export interface PluginInteractionDescription {
+  /** Row title once submitted; defaults to the presentation's completed label. */
+  title?: string;
+  /** Short Markdown for the expanded row. */
+  detail?: string;
+  /**
+   * Persisted with the row and handed to this plugin's
+   * `experimental_timelineRenderer` registered for `"<pluginId>/<rendererId>"`.
+   * Omit anything the transcript must not keep.
+   */
+  payload?: JsonValue;
+}
+
 export interface PluginInteractionRequest {
   threadId: string;
   rendererId: string;
@@ -813,6 +960,21 @@ export interface PluginInteractionRequest {
   payload: JsonValue;
   /** Defaults to ten minutes; capped at one hour. */
   timeoutMs?: number;
+  /**
+   * How the form reads as a timeline row while it waits and once it settles,
+   * in the same shape as a native tool's presentation. bb fills what is left
+   * out: "Waiting for <title>" / "Submitted <title>" and the plugin's glyph.
+   */
+  presentation?: PluginRowPresentation;
+  /**
+   * Called once with the submitted value, before the waiting `requestInput`
+   * promise resolves; never for a cancellation, which bb titles itself. Its
+   * return is persisted on the row. A throw or a slow return leaves the row
+   * with its completed label and nothing more.
+   */
+  describeSubmission?(
+    value: JsonValue,
+  ): PluginInteractionDescription | Promise<PluginInteractionDescription>;
 }
 
 export interface PluginCliResult {
@@ -853,6 +1015,15 @@ export interface PluginCliRegistration {
   /** Subcommand metadata rendered in help and the plugin-commands skill
    * without executing plugin code. Parsing argv is plugin-owned. */
   commands?: PluginCliCommandInfo[];
+  /**
+   * Set when `run` answers `--help` / `-h` itself, at every level, without
+   * executing a command. The `bb` CLI then forwards help requests to the
+   * plugin instead of printing the one-line `usage` from `commands`.
+   * `defineCli` sets it. Leave it unset for a hand-written `run`:
+   * the host cannot know that such a parser will not act on the other
+   * arguments.
+   */
+  rendersHelp?: boolean;
   run(
     argv: string[],
     ctx: PluginCliContext,
@@ -886,32 +1057,39 @@ export type PluginAgentToolResult =
 export interface PluginAgentToolContext {
   threadId: string;
   projectId: string;
-  /** The tool-call request's abort signal (aborts if the daemon round-trip
-   * is torn down mid-call). */
+  /**
+   * Aborts when the tool-call request is cancelled, the thread is stopped or
+   * deleted, or this plugin is disposed. Opening a form with `bb.ui.requestInput`
+   * detaches the call from its request: the agent receives a waiting notice,
+   * and request cancellation no longer aborts this signal. The tool's eventual
+   * result is delivered as a system message (success steers a running turn or
+   * starts a new one; an `isError` result only steers). Thread stop/delete and
+   * plugin disposal still abort the signal after detachment.
+   */
   signal: AbortSignal;
 }
 
 /**
- * The row title of a plugin tool call while it is pending and once it
+ * The title of a plugin-owned timeline row while it is pending and once it
  * settled. Each label is capped at 80 characters and rendered as plain text.
  */
-export interface PluginAgentToolLabels {
-  /** Label shown while the tool call is pending. */
+export interface PluginRowLabels {
+  /** Label shown while the row is pending. */
   pending: string;
-  /** Label shown after the tool call completes successfully. */
+  /** Label shown after the row completes successfully. */
   completed: string;
 }
 
 /**
- * How calls to a native plugin tool read as a timeline row (grammar v3). Every
- * field is optional at registration: the server fills what the plugin leaves
- * out (a generic `Running <name>` / `Ran <name>` label; the plugin's branding
- * glyph, then `Toolbox`) and hands one complete presentation to the provider
- * bridge with the tool definition.
+ * How something a plugin owns reads as a timeline row (grammar v3): a native
+ * tool's calls, or the row a `bb.ui.requestInput` form leaves behind. Every
+ * field is optional: the server fills what the plugin leaves out (a generic
+ * label; the plugin's branding glyph, then `Toolbox`) and hands one complete
+ * presentation to whatever renders the row.
  */
-export interface PluginAgentToolPresentation {
-  /** Row title while the call is pending and once it settled. */
-  label?: PluginAgentToolLabels;
+export interface PluginRowPresentation {
+  /** Row title while the row is pending and once it settled. */
+  label?: PluginRowLabels;
   /**
    * A named host glyph (`{ glyph: "Workflow" }`), or one of this plugin's
    * own declared icons by its namespaced glyph (`{ glyph: "<pluginId>/<name>" }`,
@@ -945,11 +1123,18 @@ export interface PluginAgentToolRegistrationBase {
    * plugin's branding glyph. Approval, error, and interruption states keep
    * BB's standard rendering. See docs/api_to_audit.md.
    */
-  presentation?: PluginAgentToolPresentation;
+  presentation?: PluginRowPresentation;
 }
 
 /** Stable, plain-data context resolved by the server for one agent session. */
 export interface PluginAgentConfigurationContext {
+  /**
+   * The thread's metadata stored under this plugin's id, or `{}` when absent,
+   * as a deep-frozen snapshot for this configure call. Any API client, another
+   * plugin, or the thread's own agent can write it; treat values as untrusted,
+   * and quote or escape any value you put into returned instructions.
+   */
+  readonly pluginMetadata: { readonly [key: string]: ReadonlyJsonValue };
   thread: {
     id: string;
     title: string | null;
@@ -1184,6 +1369,9 @@ export interface PluginProviderOptionsContext {
 /** See {@link PluginProviderDeclaration.models}. */
 export type PluginProviderModelCatalogScope = "host" | "workspace";
 
+/** See {@link PluginProviderDeclaration.completedTurnDisplay}. */
+export type PluginProviderCompletedTurnDisplay = "collapse" | "flat";
+
 /**
  * One cold-cache fallback model. The provider's live `model/list` result is
  * the only real model source; this list stands in only while no probe has
@@ -1296,6 +1484,16 @@ export interface PluginProviderDeclaration {
   /** Composer actions this provider supports. No duplicates; may be empty
    * (the universal skills typeahead is implicit). */
   composerActions: readonly PluginProviderComposerAction[];
+  /**
+   * How the thread timeline shows this provider's turns once they finish.
+   * `"collapse"` (the default) folds a finished turn's work into one
+   * "Worked for" row and leaves the final answer visible. `"flat"` keeps
+   * every row of a finished turn visible, as it was while the turn ran. This
+   * is only the provider's default: the user can choose either display for
+   * each provider in Settings → Providers or with
+   * `bb settings completed-turns`, and that choice wins.
+   */
+  completedTurnDisplay?: PluginProviderCompletedTurnDisplay;
   // -------------------------------------------------------------------------
   // Target-state declaration fields (docs/provider-plugin-api.md §1). Each is
   // validated and carried on the normalized declaration; WS2a projects them
@@ -1524,7 +1722,6 @@ export interface ExperimentalPluginProviderEnvEntry {
   name: string;
   value: string | { serverPath: string };
   reason: string;
-  secret: boolean;
 }
 
 export interface ExperimentalPluginProviderEnvHealthContext {
@@ -1557,8 +1754,19 @@ export interface PluginMentionItem {
   id: string;
   title: string;
   subtitle?: string;
+  /**
+   * BB icon name: a built-in name, or a name the plugin's app bundle
+   * registered with `app.experimental_icons.register()`. The row prefers the
+   * plugin's own branding icon when it ships one; unknown names fall back to
+   * the generic plugin icon.
+   */
   icon?: string;
 }
+
+/** Agent-only image context resolved with a plugin mention. */
+export type ExperimentalPluginMentionImage =
+  | { type: "image"; url: string; context?: string }
+  | { type: "localImage"; path: string; context?: string };
 
 export interface PluginMentionProviderRegistration {
   /** Unique within this plugin: [a-zA-Z0-9_-]+ (no ":" — the host composes
@@ -1586,11 +1794,26 @@ export interface PluginMentionProviderRegistration {
    * message as an agent-visible (user-hidden) prompt input. Throwing blocks
    * the send with a visible error.
    */
-  resolve(itemId: string): { context: string } | Promise<{ context: string }>;
+  resolve(itemId: string):
+    | {
+        context: string;
+        experimental_images?: readonly ExperimentalPluginMentionImage[];
+      }
+    | Promise<{
+        context: string;
+        experimental_images?: readonly ExperimentalPluginMentionImage[];
+      }>;
 }
 
 export interface PluginUi {
-  /** Block until the app submits or cancels a plugin-owned composer form. */
+  /**
+   * Block until the user submits or cancels this plugin's form in the
+   * thread composer. Inside a native tool's `execute`, calling this answers
+   * the tool call at once with a waiting notice and the eventual return value
+   * reaches the agent as a message; see {@link PluginAgentToolContext.signal}.
+   * The form leaves a timeline row described by `presentation` and
+   * `describeSubmission`.
+   */
   requestInput(
     request: PluginInteractionRequest,
     options?: { signal?: AbortSignal },
@@ -1747,6 +1970,31 @@ export interface PluginStatusApi {
 }
 
 /**
+ * The BB SDK bound to one plugin (`bb.sdk`). `threads.getPluginMetadata` and
+ * `threads.updatePluginMetadata` default `pluginId` to that plugin's id. An
+ * explicit `pluginId` must be a plugin id (lowercase letters, digits, and
+ * dashes) or the request fails with HTTP 400. A `pluginMetadata` seed or a
+ * `set` that is over 256 KiB on its own rejects before any request is sent. A
+ * patch whose merged namespace would exceed 256 KiB fails with HTTP 413 and
+ * leaves the namespace unchanged.
+ */
+export type PluginBbSdk = Omit<BbSdk, "threads"> & {
+  threads: Omit<
+    BbSdk["threads"],
+    "getPluginMetadata" | "updatePluginMetadata"
+  > & {
+    getPluginMetadata(
+      args: Omit<ThreadPluginMetadataArgs, "pluginId"> & { pluginId?: string },
+    ): Promise<ThreadPluginMetadataResult>;
+    updatePluginMetadata(
+      args: Omit<ThreadPluginMetadataUpdateArgs, "pluginId"> & {
+        pluginId?: string;
+      },
+    ): Promise<ThreadPluginMetadataResult>;
+  };
+};
+
+/**
  * The API object handed to a plugin's factory (design §4). Implemented by
  * the BB server; this contract is what plugin `server.ts` files compile
  * against.
@@ -1794,6 +2042,9 @@ export interface BbPluginApi {
    * docs/api_to_audit.md.
    */
   readonly experimental_environments: PluginEnvironments;
+  /** Machine providers provision execution machines. Experimental: see docs/api_to_audit.md. */
+  readonly experimental_machines: PluginMachines;
+  readonly experimental_serverAccess: PluginServerAccess;
   /** Plugin-reported status (needs-configuration). */
   readonly status: PluginStatusApi;
   /** Read-only facts about the running server (loopback base URL). */
@@ -1811,10 +2062,12 @@ export interface BbPluginApi {
    * server binds it before loading plugins, so it is available from the
    * moment factories run there — but isolated harnesses may not, so prefer
    * using it from handlers, services, and timers for portability.
-   * `threads.spawn` defaults `origin` to "plugin" and `originPluginId` to
-   * this plugin's id so spawned threads are attributed automatically.
+   * `threads.spawn` and `threads.fork` default `origin` to "plugin" and, for
+   * that origin, `originPluginId` to this plugin's id unless you set them.
+   * Seeding `pluginMetadata` always attributes the new thread to this plugin,
+   * overriding an explicit `origin` or `originPluginId`.
    */
-  readonly sdk: BbSdk;
+  readonly sdk: PluginBbSdk;
   /**
    * Register cleanup to run on reload/disable/shutdown. Hooks run LIFO.
    * The sanctioned place to clear timers and close connections.

@@ -17,7 +17,7 @@ Every member below ships with the `experimental_` prefix and an entry in
 | Region                                     | Owner today                | After this change |
 | ------------------------------------------ | -------------------------- | ----------------- |
 | Top reserve / window drag row              | host                       | host, always      |
-| Primary actions (New thread, search)       | `ProjectListActionButtons` | host, always      |
+| Primary actions (New thread, search)       | `BuiltInSidebarNavigation` | host, always      |
 | Plugin nav rows (Tools, Docs, Tasks)       | `PluginNavSidebarItems`    | host, always      |
 | **Scrolling thread list**                  | `ProjectList`              | **the plugin**    |
 | Footer (Settings, plugin actions, updates) | host                       | host, always      |
@@ -515,7 +515,9 @@ import {
   type PluginSidebarThread,
   type PluginThreadListProps,
 } from "@get-bb/plugin-sdk/app";
-import { Loader2Icon, MessageCircleQuestionIcon } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import HelpCircleIcon from "@hugeicons/core-free-icons/HelpCircleIcon";
+import Loading03Icon from "@hugeicons/core-free-icons/Loading03Icon";
 
 function Row({
   thread,
@@ -556,9 +558,12 @@ function Row({
         </span>
         {/* Your icons, your rules — `indicator` is just a string. */}
         {thread.indicator === "runtime" ? (
-          <Loader2Icon className="size-3.5 animate-spin" />
+          <HugeiconsIcon
+            icon={Loading03Icon}
+            className="size-3.5 animate-spin"
+          />
         ) : thread.indicator === "waiting-for-input" ? (
-          <MessageCircleQuestionIcon className="size-3.5" />
+          <HugeiconsIcon icon={HelpCircleIcon} className="size-3.5" />
         ) : null}
       </a>
     </li>

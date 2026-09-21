@@ -48,6 +48,7 @@ import { useRouteNavigate } from "@/components/ui/app-route-anchor";
 export interface ThreadActionsContextValue {
   archiveThreadAndChildren: (thread: Thread) => void;
   renameThread: (threadId: string, title: string) => void;
+  renameThreadAsync: (threadId: string, title: string) => Promise<void>;
   requestRename: (thread: Thread) => void;
   requestDelete: (thread: Thread) => void;
   unarchiveThread: (thread: Thread) => void;
@@ -103,6 +104,7 @@ export function ThreadActionsProvider({
   const unpinThread = useUnpinThread();
   const deleteThread = useDeleteThread();
   const updateThread = useUpdateThread();
+  const inlineRenameThread = useUpdateThread({ showErrorToast: false });
   const threadActionContextAbortRef = useRef<AbortController | null>(null);
   const { mutateAsync: archiveThreadAndChildrenMutateAsync } =
     archiveThreadAndChildrenMutation;
@@ -113,6 +115,7 @@ export function ThreadActionsProvider({
   const { mutate: unpinMutate } = unpinThread;
   const { mutate: deleteMutate } = deleteThread;
   const { mutate: updateMutate } = updateThread;
+  const { mutateAsync: inlineRenameMutateAsync } = inlineRenameThread;
 
   const renameDialog = useDialogState<ThreadRenameDialogTarget>();
   const deleteDialog = useDialogState<ThreadDeleteDialogTarget>();
@@ -164,6 +167,13 @@ export function ThreadActionsProvider({
       updateMutate({ id: threadId, title });
     },
     [updateMutate],
+  );
+
+  const renameThreadAsync = useCallback(
+    async (threadId: string, title: string) => {
+      await inlineRenameMutateAsync({ id: threadId, title });
+    },
+    [inlineRenameMutateAsync],
   );
 
   const submitRename = useCallback(
@@ -326,7 +336,9 @@ export function ThreadActionsProvider({
             cancel: {
               label: "Undo",
               onClick: () => {
-                for (const threadId of response.archivedThreadIds) {
+                for (const threadId of [
+                  ...response.archivedThreadIds,
+                ].reverse()) {
                   unarchiveMutate({ id: threadId });
                 }
               },
@@ -356,24 +368,30 @@ export function ThreadActionsProvider({
   const toggleRead = useCallback(
     (thread: Thread) => {
       if (getThreadReadToggleAction(thread) === "mark_unread") {
-        markUnreadMutate(thread.id, {
+        markUnreadMutate(
+          { threadId: thread.id },
+          {
+            onError: (error) => {
+              showMutationErrorToast({
+                error,
+                fallbackMessage: "Failed to mark thread unread",
+              });
+            },
+          },
+        );
+        return;
+      }
+      markReadMutate(
+        { threadId: thread.id },
+        {
           onError: (error) => {
             showMutationErrorToast({
               error,
-              fallbackMessage: "Failed to mark thread unread",
+              fallbackMessage: "Failed to mark thread read",
             });
           },
-        });
-        return;
-      }
-      markReadMutate(thread.id, {
-        onError: (error) => {
-          showMutationErrorToast({
-            error,
-            fallbackMessage: "Failed to mark thread read",
-          });
         },
-      });
+      );
     },
     [markReadMutate, markUnreadMutate],
   );
@@ -392,6 +410,7 @@ export function ThreadActionsProvider({
   const value = useMemo<ThreadActionsContextValue>(
     () => ({
       renameThread,
+      renameThreadAsync,
       requestRename,
       requestDelete,
       archiveThreadAndChildren: archiveThreadAndChildrenAction,
@@ -402,6 +421,7 @@ export function ThreadActionsProvider({
     [
       archiveThreadAndChildrenAction,
       renameThread,
+      renameThreadAsync,
       requestRename,
       requestDelete,
       togglePin,

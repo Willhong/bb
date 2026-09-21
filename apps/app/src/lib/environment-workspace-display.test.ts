@@ -1,3 +1,4 @@
+import type { Host } from "@bb/domain";
 import { describe, expect, it } from "vitest";
 import type { EnvironmentDisplayInfo } from "@bb/core-ui";
 import type { SystemEnvironmentProvider } from "@bb/server-contract";
@@ -6,19 +7,29 @@ import {
   getEnvironmentDisplayIconName,
   getEnvironmentWorkspaceInfoDisplay,
   getEnvironmentWorkspaceSummaryDisplay,
-  shouldShowEnvironmentHostIdentity,
+  isHostAmbiguous,
 } from "./environment-workspace-display";
 
-describe("shouldShowEnvironmentHostIdentity", () => {
-  it("keeps the machine identity for a projectless thread with one machine", () => {
-    expect(shouldShowEnvironmentHostIdentity(false, true)).toBe(true);
-    expect(shouldShowEnvironmentHostIdentity(false, false)).toBe(false);
+describe("isHostAmbiguous", () => {
+  it("treats a lone persistent machine as unambiguous", () => {
+    expect(isHostAmbiguous(false, "persistent")).toBe(false);
+  });
+
+  it("treats more than one persistent machine as ambiguous", () => {
+    expect(isHostAmbiguous(true, "persistent")).toBe(true);
+  });
+
+  it("treats a machine that is not persistent as ambiguous", () => {
+    expect(isHostAmbiguous(false, "ephemeral")).toBe(true);
+    expect(isHostAmbiguous(false, null)).toBe(true);
   });
 });
 
 const worktreeProvider: SystemEnvironmentProvider = {
+  machineProviderId: null,
   id: "git-worktree",
   displayName: "Worktree",
+  description: "Prepare a workspace for this thread.",
   icon: "FolderGit",
   logoUrl: null,
   pluginId: "environment-git-worktree",
@@ -35,8 +46,10 @@ const worktreeProvider: SystemEnvironmentProvider = {
 };
 
 const personalProvider: SystemEnvironmentProvider = {
+  machineProviderId: null,
   id: "personal-workspace",
   displayName: "Personal workspace",
+  description: "Prepare a workspace for this thread.",
   icon: "Folder",
   logoUrl: null,
   pluginId: "environment-personal-workspace",
@@ -53,8 +66,10 @@ const personalProvider: SystemEnvironmentProvider = {
 };
 
 const machineContainerProvider: SystemEnvironmentProvider = {
+  machineProviderId: null,
   id: "container",
   displayName: "Container",
+  description: "Prepare a workspace for this thread.",
   icon: "Box",
   logoUrl: null,
   pluginId: "containers",
@@ -80,7 +95,6 @@ function makeDisplay(
   return {
     modeLabel: "Working locally",
     compactModeLabel: "Local",
-    typeLabel: "Local",
     providerLabel: null,
     lifecycle: null,
     id: "env_test",
@@ -108,7 +122,7 @@ interface SummaryDisplayOverrides {
   environmentName?: string | null;
   hasMultipleMachines?: boolean;
   hostName?: string | null;
-  isProjectless?: boolean;
+  hostType?: Host["type"] | null;
 }
 
 function getSummaryDisplay({
@@ -117,7 +131,7 @@ function getSummaryDisplay({
   environmentName = null,
   hasMultipleMachines = false,
   hostName = "Michael-M4",
-  isProjectless = false,
+  hostType = "persistent",
 }: SummaryDisplayOverrides = {}) {
   return getEnvironmentWorkspaceSummaryDisplay({
     display,
@@ -125,7 +139,7 @@ function getSummaryDisplay({
     environmentName,
     hasMultipleMachines,
     hostName,
-    isProjectless,
+    hostType,
   });
 }
 
@@ -162,13 +176,13 @@ describe("getEnvironmentDisplayIconName", () => {
     );
   });
 
-  it("falls back to the plugin placeholder icon for an unknown icon name", () => {
+  it("preserves a custom icon reference for the reactive renderer", () => {
     expect(
       getEnvironmentDisplayIconName({
         status: "loaded",
-        provider: { ...worktreeProvider, icon: "NotAnIconName" },
+        provider: { ...worktreeProvider, icon: "acme/workspace" },
       }),
-    ).toBe("Zap");
+    ).toBe("acme/workspace");
   });
 
   it("has no icon for a row with no provider or while the list loads", () => {
@@ -178,6 +192,21 @@ describe("getEnvironmentDisplayIconName", () => {
 });
 
 describe("getEnvironmentWorkspaceSummaryDisplay", () => {
+  it("retains the current sandbox identity when persistent machine choices are singular", () => {
+    expect(
+      getSummaryDisplay({
+        providerLookup: worktreeProviderLookup,
+        hostName: "Modal sandbox",
+        hostType: "ephemeral",
+        hasMultipleMachines: false,
+      }),
+    ).toMatchObject({
+      label: "Modal sandbox",
+      compactLabel: "Modal sandbox",
+      icon: "FolderGit",
+    });
+  });
+
   it("keeps provisioning ahead of the provider icon and label", () => {
     expect(
       getSummaryDisplay({
@@ -186,7 +215,6 @@ describe("getEnvironmentWorkspaceSummaryDisplay", () => {
           compactModeLabel: "Provisioning",
           lifecycle: "provisioning",
           providerLabel: "Worktree",
-          typeLabel: "Worktree · Local",
         }),
         providerLookup: worktreeProviderLookup,
         hasMultipleMachines: true,
@@ -195,7 +223,7 @@ describe("getEnvironmentWorkspaceSummaryDisplay", () => {
       label: "Provisioning",
       compactLabel: "Provisioning",
       icon: "Loading",
-      typeLabel: undefined,
+      providerName: null,
     });
   });
 
@@ -212,68 +240,85 @@ describe("getEnvironmentWorkspaceSummaryDisplay", () => {
       }),
     ).toMatchObject({ label: "Destroyed", compactLabel: "Destroyed" });
   });
-
   it.each([
     {
       name: "a local project checkout",
       display: makeDisplay(),
-      providerLookup: noProviderLookup,
     },
     {
       name: "a remote project checkout",
       display: makeDisplay({
         modeLabel: "Working remotely",
         compactModeLabel: "Remote",
-        typeLabel: "Remote",
       }),
-      providerLookup: noProviderLookup,
     },
+  ])("shows nothing for $name with no environment provider", (testCase) => {
+    expect(
+      getSummaryDisplay({
+        display: testCase.display,
+        providerLookup: noProviderLookup,
+      }),
+    ).toBeNull();
+  });
+
+  it.each([
     {
       name: "a worktree",
       display: makeDisplay({
         modeLabel: "Worktree",
         compactModeLabel: "Worktree",
-        typeLabel: "Worktree · Local",
         providerLabel: "Worktree",
       }),
       providerLookup: worktreeProviderLookup,
+      label: "Worktree",
     },
     {
       name: "a personal workspace",
       display: makeDisplay({
         modeLabel: "Personal workspace",
         compactModeLabel: "Personal workspace",
-        typeLabel: "Personal workspace · Local",
         providerLabel: "Personal workspace",
       }),
       providerLookup: personalProviderLookup,
+      label: "Personal workspace",
     },
-  ])("shows nothing for $name on a single machine", (testCase) => {
+  ])("names $name by its provider on a single machine", (testCase) => {
     expect(
       getSummaryDisplay({
         display: testCase.display,
         providerLookup: testCase.providerLookup,
       }),
-    ).toBeNull();
+    ).toMatchObject({
+      label: testCase.label,
+      compactLabel: testCase.label,
+    });
   });
 
-  it("shows the machine for a single-machine projectless thread", () => {
+  it("names a projectless thread by its provider on a lone persistent machine", () => {
+    expect(
+      getSummaryDisplay({ providerLookup: personalProviderLookup }),
+    ).toMatchObject({
+      label: "Personal workspace",
+      compactLabel: "Personal workspace",
+    });
+  });
+
+  it("shows the machine for a projectless thread once a second machine exists", () => {
     expect(
       getSummaryDisplay({
         providerLookup: personalProviderLookup,
-        isProjectless: true,
+        hasMultipleMachines: true,
       }),
     ).toMatchObject({ label: "Michael-M4", compactLabel: "Michael-M4" });
   });
 
-  it("omits an unnamed single-machine environment with an unregistered provider", () => {
+  it("marks an unregistered provider as not installed on a single machine", () => {
     expect(
       getSummaryDisplay({
         providerLookup: findEnvironmentDisplayProvider([], "retired-cloud"),
       }),
-    ).toBeNull();
+    ).toMatchObject({ label: "retired-cloud (not installed)" });
   });
-
   it.each([
     { name: "project checkout", providerLookup: noProviderLookup },
     { name: "git-worktree", providerLookup: worktreeProviderLookup },

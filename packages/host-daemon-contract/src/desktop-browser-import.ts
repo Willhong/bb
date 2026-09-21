@@ -3,6 +3,7 @@ import { z } from "zod";
 export const DESKTOP_BROWSER_IMPORT_SOURCE_IDS = [
   "chrome",
   "chromium",
+  "helium",
   "edge",
   "brave",
   "vivaldi",
@@ -86,9 +87,6 @@ export const desktopBrowserImportResultSchema = z
     skippedDomains: z.array(z.string().max(1024)).max(20),
   })
   .strict();
-export type DesktopBrowserImportResult = z.infer<
-  typeof desktopBrowserImportResultSchema
->;
 
 export const desktopBrowserImportOutcomeSchema = z.discriminatedUnion("ok", [
   desktopBrowserImportResultSchema.extend({ ok: z.literal(true) }).strict(),

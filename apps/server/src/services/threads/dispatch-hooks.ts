@@ -6,12 +6,14 @@ import {
   type Project,
   type PromptInput,
   type Thread,
+  type StartedOnBehalfOf,
+  type ThreadCreateOrigin,
   type ThreadQueuedMessage,
+  type ThreadTurnInitiator,
 } from "@bb/domain";
+import { sliceUtf16Head } from "@bb/text-utils";
 import type {
   ExecutionInputFieldSource,
-  StartedOnBehalfOf,
-  ThreadCreateOrigin,
   ThreadResponse,
 } from "@bb/server-contract";
 import type {
@@ -94,29 +96,15 @@ export interface MessageDispatchHookPassRequest {
   requestedExecution: PluginDispatchExecution;
   executionSources: PluginDispatchExecutionSources;
   attempt: DispatchAttemptKind;
+  initiator: ThreadTurnInitiator;
+  senderThreadId: string | null;
   origin: ThreadCreateOrigin | null;
   originPluginId: string | null;
   startedOnBehalfOf: StartedOnBehalfOf | null;
   parentThreadId: string | null;
-  /** The queued row being re-attempted; null for an inline first attempt. */
-  queuedMessage: ThreadQueuedMessage | null;
-  /**
-   * Commits this admission BEFORE the evaluation lock releases.
-   *
-   * This is what makes `sdk.threads.listRunning()` exact inside a handler. The
-   * lock already serializes evaluation, but serializing the *questions* is
-   * worthless if the answers land later: five creates arriving together would
-   * each ask "how many are running", each be told the same stale number, and
-   * each be admitted against a limit of two. Committing the thread's
-   * `pending → starting` flip here means attempt N+1 reads a database that
-   * already contains attempt N's admission.
-   *
-   * Run only when the pass yields no waits, and only for an attempt that has a
-   * transition to commit — a warm follow-up's `idle → active` flip lives inside
-   * the send transaction, which needs a prepared host command and therefore
-   * cannot run under this lock. See the exactness note on `listRunning`.
-   */
-  commitAdmission?: () => Promise<void>;
+  queuedMessages: ThreadQueuedMessage[];
+  pluginSubmission: MessageDispatchHookContext["experimental_submission"];
+  continueAfterHooks?: () => Promise<void>;
 }
 
 /**
@@ -184,8 +172,8 @@ export function hasMessageDispatchHooks(): boolean {
  *
  * A handler that limits concurrency is only correct if no two passes
  * interleave, so every pass runs to completion before the next starts — AND,
- * via `commitAdmission`, a cleared attempt's thread-status flip commits before
- * the lock releases. Those two together are what let a handler simply ask the
+ * via `continueAfterHooks`, a cleared attempt's thread-status flip commits
+ * before the lock releases. Those two together are what let a handler ask the
  * server what is running (`sdk.threads.listRunning()`) instead of maintaining
  * its own tally of in-flight `proceed`s: the fact is already true by the time
  * the next handler reads it.
@@ -294,6 +282,59 @@ export function dispatchInputText(input: readonly PromptInput[]): string {
 }
 
 /**
+ * Fields no longer in `MessageDispatchHookContext` that core still puts on the
+ * object, so a handler compiled against an older SDK keeps reading them.
+ * `startedOnBehalfOf` said why the THREAD was started, never who sent the
+ * message being decided about; `initiator` and `senderThreadId` answer that.
+ */
+interface DroppedFromContractStillEmitted {
+  startedOnBehalfOf: StartedOnBehalfOf | null;
+  queuedMessage: ThreadQueuedMessage | null;
+}
+
+/**
+ * The author a whole dispatch reports, which a group of queued rows may not
+ * agree on: the drain sends them as one turn and the hook decides once for all
+ * of them. `mixed` says the rows differ, so a handler that cares reads
+ * `queuedMessages` for each row's own author. An inline attempt has no rows and
+ * reports the author the dispatch was requested with.
+ */
+function summarizeDispatchProvenance(
+  request: MessageDispatchHookPassRequest,
+): Pick<
+  MessageDispatchHookContext,
+  "initiator" | "senderThreadId" | "origin" | "originPluginId"
+> {
+  const [first, ...rest] = request.queuedMessages;
+  if (first === undefined) {
+    return {
+      initiator: request.initiator,
+      senderThreadId: request.senderThreadId,
+      origin: request.origin,
+      originPluginId: request.originPluginId,
+    };
+  }
+  return {
+    origin: rest.every((message) => message.origin === first.origin)
+      ? first.origin
+      : "mixed",
+    originPluginId: rest.every(
+      (message) => message.originPluginId === first.originPluginId,
+    )
+      ? first.originPluginId
+      : "mixed",
+    initiator: rest.every((message) => message.initiator === first.initiator)
+      ? first.initiator
+      : "mixed",
+    senderThreadId: rest.every(
+      (message) => message.senderThreadId === first.senderThreadId,
+    )
+      ? first.senderThreadId
+      : "mixed",
+  };
+}
+
+/**
  * The context every handler in a pass sees.
  *
  * Built once and shared: with no amendments, nothing a handler returns can
@@ -308,7 +349,13 @@ function buildHookContext(
     deps,
     request.environmentId,
   );
+  const droppedFromContractStillEmitted: DroppedFromContractStillEmitted = {
+    startedOnBehalfOf: request.startedOnBehalfOf,
+    queuedMessage: request.queuedMessages[0] ?? null,
+  };
   return {
+    ...droppedFromContractStillEmitted,
+    ...summarizeDispatchProvenance(request),
     thread: request.threadResponse,
     attempt: request.attempt,
     project: request.project,
@@ -325,11 +372,9 @@ function buildHookContext(
     },
     requestedExecution: { ...request.requestedExecution },
     executionSources: { ...request.executionSources },
-    origin: request.origin,
-    originPluginId: request.originPluginId,
-    startedOnBehalfOf: request.startedOnBehalfOf,
     parentThreadId: request.parentThreadId,
-    queuedMessage: request.queuedMessage,
+    queuedMessages: request.queuedMessages,
+    experimental_submission: request.pluginSubmission,
   };
 }
 
@@ -405,8 +450,7 @@ export async function runMessageDispatchHookPass(
 
     const waiter = waits[0];
     if (waiter === undefined) {
-      // Still inside the lock, deliberately: see `commitAdmission`.
-      await request.commitAdmission?.();
+      await request.continueAfterHooks?.();
       return { kind: "proceed" };
     }
     return { kind: "wait", waiter, additionalWaiters: waits.slice(1) };
@@ -429,7 +473,7 @@ export function dispatchWaitReasonForPass(
       ? outcome.waiter.reason
       : `${outcome.waiter.reason} (also waiting on ${extra})`;
   return reason.length > QUEUED_MESSAGE_WAIT_REASON_MAX_LENGTH
-    ? `${reason.slice(0, QUEUED_MESSAGE_WAIT_REASON_MAX_LENGTH - 1)}…`
+    ? `${sliceUtf16Head(reason, QUEUED_MESSAGE_WAIT_REASON_MAX_LENGTH - 1)}…`
     : reason;
 }
 

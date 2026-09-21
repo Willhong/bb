@@ -1,3 +1,4 @@
+import type { Host } from "@bb/domain";
 import type {
   EnvironmentDisplayInfo,
   EnvironmentDisplayProviderLookup,
@@ -7,6 +8,8 @@ import type { SystemEnvironmentProvider } from "@bb/server-contract";
 import type { IconName } from "@bb/shared-ui/icon";
 import { pluginIconName } from "@/components/plugin/PluginIcon";
 import { PersistentHostIconName } from "@/lib/host-display";
+import type { MachineLabelHost } from "@/components/machines/MachineLabel";
+import type { MachineProviderPresentation } from "@/components/plugin/MachineProviderIcon";
 
 export type EnvironmentWorkspaceDisplayProviderLookup =
   | { status: "loading" }
@@ -16,14 +19,16 @@ export type EnvironmentWorkspaceDisplayProviderLookup =
       environmentProviderId: string | null;
     };
 
+export type EnvironmentSummaryChromeHost = MachineLabelHost;
+
 export const UNNAMED_ENVIRONMENT_LABEL = "Environment";
 export const REUSE_ENVIRONMENT_ICON_NAME: IconName = "Folder02";
 
-export function shouldShowEnvironmentHostIdentity(
+export function isHostAmbiguous(
   hasMultipleMachines: boolean,
-  isProjectless: boolean,
+  hostType: Host["type"] | null,
 ): boolean {
-  return hasMultipleMachines || isProjectless;
+  return hasMultipleMachines || hostType !== "persistent";
 }
 
 interface EnvironmentWorkspaceLabelArgs {
@@ -33,16 +38,16 @@ interface EnvironmentWorkspaceLabelArgs {
 }
 
 interface EnvironmentWorkspaceSummaryDisplayArgs extends EnvironmentWorkspaceLabelArgs {
+  hostType: Host["type"] | null;
   hasMultipleMachines: boolean;
   hostName: string | null;
-  isProjectless: boolean;
 }
 
 interface EnvironmentWorkspaceSummaryDisplay {
   label: string;
   compactLabel: string;
   icon: IconName;
-  typeLabel: string | undefined;
+  providerName: string | null;
 }
 
 interface EnvironmentWorkspaceInfoDisplayArgs extends EnvironmentWorkspaceLabelArgs {
@@ -100,27 +105,20 @@ function getEnvironmentWorkspaceLabel({
   );
 }
 
-function machineIsWorkspaceIdentity(
-  providerLookup: EnvironmentWorkspaceDisplayProviderLookup,
-): boolean {
-  if (providerLookup.status === "loading") return false;
-  return true;
-}
-
 export function getEnvironmentWorkspaceSummaryDisplay({
   display,
   providerLookup,
   environmentName,
   hasMultipleMachines,
+  hostType,
   hostName,
-  isProjectless,
 }: EnvironmentWorkspaceSummaryDisplayArgs): EnvironmentWorkspaceSummaryDisplay | null {
   if (display.lifecycle === "provisioning") {
     return {
       label: "Provisioning",
       compactLabel: "Provisioning",
       icon: "Loading",
-      typeLabel: undefined,
+      providerName: null,
     };
   }
   if (display.lifecycle === "destroyed") {
@@ -128,7 +126,7 @@ export function getEnvironmentWorkspaceSummaryDisplay({
       label: "Destroyed",
       compactLabel: "Destroyed",
       icon: getEnvironmentLabelIconName(providerLookup),
-      typeLabel: display.typeLabel,
+      providerName: getEnvironmentProviderDisplayName(providerLookup),
     };
   }
   if (environmentName !== null) {
@@ -136,21 +134,19 @@ export function getEnvironmentWorkspaceSummaryDisplay({
       label: environmentName,
       compactLabel: environmentName,
       icon: getEnvironmentLabelIconName(providerLookup),
-      typeLabel: display.typeLabel,
+      providerName: getEnvironmentProviderDisplayName(providerLookup),
     };
   }
   if (providerLookup.status === "loading") {
     return null;
   }
-  if (machineIsWorkspaceIdentity(providerLookup)) {
-    return (hasMultipleMachines || isProjectless) && hostName !== null
-      ? {
-          label: hostName,
-          compactLabel: hostName,
-          icon: getEnvironmentLabelIconName(providerLookup),
-          typeLabel: display.typeLabel,
-        }
-      : null;
+  if (isHostAmbiguous(hasMultipleMachines, hostType) && hostName !== null) {
+    return {
+      label: hostName,
+      compactLabel: hostName,
+      icon: getEnvironmentLabelIconName(providerLookup),
+      providerName: getEnvironmentProviderDisplayName(providerLookup),
+    };
   }
   const providerDisplayName = getEnvironmentProviderDisplayName(providerLookup);
   return providerDisplayName === null
@@ -159,7 +155,7 @@ export function getEnvironmentWorkspaceSummaryDisplay({
         label: providerDisplayName,
         compactLabel: providerDisplayName,
         icon: getEnvironmentLabelIconName(providerLookup),
-        typeLabel: display.typeLabel,
+        providerName: getEnvironmentProviderDisplayName(providerLookup),
       };
 }
 
@@ -176,10 +172,7 @@ export function getEnvironmentWorkspaceInfoDisplay({
       environmentName,
     }),
     icon: getEnvironmentLabelIconName(providerLookup),
-    machineName:
-      hostName !== null && machineIsWorkspaceIdentity(providerLookup)
-        ? hostName
-        : null,
+    machineName: hostName,
   };
 }
 
@@ -196,4 +189,51 @@ export function getEnvironmentLabelIconName(
   return (
     getEnvironmentDisplayIconName(providerLookup) ?? PersistentHostIconName
   );
+}
+
+interface EnvironmentSummaryChromeArgs extends EnvironmentWorkspaceLabelArgs {
+  hasMultipleMachines: boolean;
+  host: EnvironmentSummaryChromeHost | null;
+  machineProviders: readonly MachineProviderPresentation[] | undefined;
+}
+
+interface EnvironmentSummaryChrome {
+  environmentLabel: string | undefined;
+  environmentCompactLabel: string | undefined;
+  environmentIcon: IconName | undefined;
+  environmentProviderName: string | undefined;
+  environmentHost: EnvironmentSummaryChromeHost | undefined;
+  environmentMachineProvider: MachineProviderPresentation | undefined;
+}
+
+export function getEnvironmentSummaryChrome({
+  display,
+  providerLookup,
+  environmentName,
+  hasMultipleMachines,
+  host,
+  machineProviders,
+}: EnvironmentSummaryChromeArgs): EnvironmentSummaryChrome {
+  const summary = getEnvironmentWorkspaceSummaryDisplay({
+    display,
+    providerLookup,
+    environmentName,
+    hasMultipleMachines,
+    hostName: host?.name ?? null,
+    hostType: host?.type ?? null,
+  });
+  const summaryHost =
+    host !== null && environmentName === null && summary?.label === host.name
+      ? host
+      : undefined;
+  return {
+    environmentLabel: summary?.label,
+    environmentCompactLabel: summary?.compactLabel,
+    environmentIcon: summary?.icon,
+    environmentProviderName: summary?.providerName ?? undefined,
+    environmentHost: summaryHost,
+    environmentMachineProvider: machineProviders?.find(
+      (provider) => provider.id === summaryHost?.machineProviderId,
+    ),
+  };
 }

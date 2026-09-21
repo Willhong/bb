@@ -1,5 +1,6 @@
 import {
   getLatestSessionForHost,
+  getHost,
   listRetiredLoadedEnvironmentIdsOnHost,
   openSession,
   upsertHost,
@@ -9,8 +10,10 @@ import {
   HOST_DAEMON_PROTOCOL_VERSION,
   hostDaemonProjectAttachmentContentQuerySchema,
   hostDaemonSessionOpenRequestSchema,
+  SERVER_MOVED_ERROR_CODE,
   typedRoutes,
   type HostDaemonInternalSchema,
+  type ServerMovedErrorDetails,
 } from "@bb/host-daemon-contract";
 import type { Hono } from "hono";
 import { z } from "zod";
@@ -27,6 +30,7 @@ import { readAttachment } from "../services/projects/attachments.js";
 import { handleHostSessionOpened } from "./session-owner-side-effects.js";
 import { resolveReportedConnectMachineId } from "./hosts.js";
 import type { PluginService } from "../services/plugins/plugin-service.js";
+import { HostEnvironmentSync } from "../services/hosts/host-environment-sync.js";
 
 const sessionOpenCompatibilitySchema = z
   .object({
@@ -34,6 +38,12 @@ const sessionOpenCompatibilitySchema = z
     protocolVersion: z.number().int().positive(),
   })
   .passthrough();
+
+export interface ServerMoveSessionGate {
+  movedTo(): ServerMovedErrorDetails | null;
+  pendingMoveId(): string | null;
+  sessionOpened(hostId: string): Promise<void>;
+}
 
 function invalidSessionOpenRequest(message: string): ApiError {
   return new ApiError(400, "invalid_request", message);
@@ -51,12 +61,32 @@ export function registerInternalSessionRoutes(
   app: Hono,
   deps: AppDeps,
   plugins: PluginService,
+  serverMove: ServerMoveSessionGate,
 ): void {
+  const machineEnvironment = new HostEnvironmentSync(deps);
   const { get } = typedRoutes<HostDaemonInternalSchema>(app, {
     onValidationError: (msg) => new ApiError(400, "invalid_request", msg),
   });
 
   app.post("/session/open", async (context) => {
+    const pendingMoveId = serverMove.pendingMoveId();
+    if (pendingMoveId !== null) {
+      throw new ApiError(
+        503,
+        "server_move_pending",
+        "This server is finishing a move and doesn't accept machines yet",
+        { details: { moveId: pendingMoveId }, retryable: true },
+      );
+    }
+    const movedTo = serverMove.movedTo();
+    if (movedTo !== null) {
+      throw new ApiError(
+        410,
+        SERVER_MOVED_ERROR_CODE,
+        `This bb server moved to ${movedTo.toHostName} (${movedTo.serverUrl})`,
+        { details: movedTo, retryable: false },
+      );
+    }
     const input: unknown = await context.req.json().catch(() => {
       throw invalidSessionOpenRequest("Invalid JSON request body");
     });
@@ -69,7 +99,6 @@ export function registerInternalSessionRoutes(
     const daemon = getAuthenticatedDaemon(context);
     assertAuthenticatedHostMatches(daemon, {
       hostId: compatibility.data.hostId,
-      hostType: daemon.hostType,
     });
 
     if (compatibility.data.protocolVersion !== HOST_DAEMON_PROTOCOL_VERSION) {
@@ -107,18 +136,23 @@ export function registerInternalSessionRoutes(
     }
     const payload = parsed.data;
 
+    const host = getHost(deps.db, daemon.hostId);
+    if (host?.phase === "suspending" || host?.phase === "suspended") {
+      throw new ApiError(
+        409,
+        "machine_suspended",
+        "Machine daemon sessions are disabled while the machine is suspending or suspended",
+      );
+    }
+
     const previousSession = getLatestSessionForHost(deps.db, {
       hostId: daemon.hostId,
     });
-    const connectMachineId = resolveReportedConnectMachineId(
-      context,
-      payload.connectMachineId,
-    );
+    const connectMachineId = resolveReportedConnectMachineId(context);
     upsertHost(deps.db, deps.hub, {
       ...(connectMachineId !== undefined ? { connectMachineId } : {}),
       id: daemon.hostId,
       name: payload.hostName,
-      type: daemon.hostType,
     });
     updateHost(deps.db, deps.hub, daemon.hostId, {
       lastRejectedProtocolVersion: null,
@@ -127,7 +161,6 @@ export function registerInternalSessionRoutes(
       hostId: daemon.hostId,
       instanceId: payload.instanceId,
       hostName: payload.hostName,
-      hostType: daemon.hostType,
       dataDir: payload.dataDir,
       protocolVersion: payload.protocolVersion,
       heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
@@ -147,6 +180,7 @@ export function registerInternalSessionRoutes(
       openedSession: session,
       previousSession,
     });
+    await serverMove.sessionOpened(daemon.hostId);
 
     const retiredEnvironmentIds = listRetiredLoadedEnvironmentIdsOnHost(
       deps.db,
@@ -169,6 +203,7 @@ export function registerInternalSessionRoutes(
         ),
         pluginHostGenerations: plugins.listHostArtifactGenerations(),
         retiredEnvironmentIds,
+        machineEnvironment: await machineEnvironment.snapshot(daemon.hostId),
       },
       201,
     );

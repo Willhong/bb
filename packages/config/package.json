@@ -3,20 +3,10 @@
   "version": "0.0.1",
   "type": "module",
   "exports": {
-    "./common": {
-      "source": "./src/common.ts",
-      "types": "./src/common.ts",
-      "default": "./src/common.ts"
-    },
     "./server": {
       "source": "./src/server.ts",
       "types": "./src/server.ts",
       "default": "./src/server.ts"
-    },
-    "./dev-app": {
-      "source": "./src/dev-app.ts",
-      "types": "./src/dev-app.ts",
-      "default": "./src/dev-app.ts"
     },
     "./vite-dev": {
       "source": "./src/vite-dev.ts",
@@ -98,6 +88,16 @@
       "types": "./src/bb-app-managed-config.ts",
       "default": "./src/bb-app-managed-config.ts"
     },
+    "./managed-json-file": {
+      "source": "./src/managed-json-file.ts",
+      "types": "./src/managed-json-file.ts",
+      "default": "./src/managed-json-file.ts"
+    },
+    "./file-lock": {
+      "source": "./src/file-lock.ts",
+      "types": "./src/file-lock.ts",
+      "default": "./src/file-lock.ts"
+    },
     "./client-config": {
       "source": "./src/client-config.ts",
       "types": "./src/client-config.ts",
@@ -127,6 +127,11 @@
       "source": "./src/verified-process-stop.ts",
       "types": "./src/verified-process-stop.ts",
       "default": "./src/verified-process-stop.ts"
+    },
+    "./child-process-exit": {
+      "source": "./src/child-process-exit.ts",
+      "types": "./src/child-process-exit.ts",
+      "default": "./src/child-process-exit.ts"
     }
   },
   "scripts": {
@@ -136,6 +141,7 @@
   },
   "dependencies": {
     "@bb/domain": "workspace:*",
+    "fs-native-extensions": "1.5.0",
     "zod": "4.3.6"
   },
   "devDependencies": {

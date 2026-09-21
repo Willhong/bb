@@ -27,13 +27,10 @@ export interface PromptBoxAction {
   kind: PromptBoxActionKind;
   text: string;
   command?: ProviderPromptActionCommand;
-  label?: string;
-  disabled?: boolean;
 }
 
 interface PromptBoxActionsMenuProps {
   actions?: readonly PromptBoxAction[];
-  isAttaching?: boolean;
   onAttach?: () => void;
   onAction: (action: PromptBoxAction) => void;
   pluginItems?: readonly PluginComposerPlusMenuContribution[];
@@ -120,7 +117,6 @@ function orderedPromptActions(
 
 export function PromptBoxActionsMenu({
   actions = [],
-  isAttaching = false,
   onAttach,
   onAction,
   pluginItems = [],
@@ -209,18 +205,14 @@ export function PromptBoxActionsMenu({
         {onAttach ? (
           <>
             <DropdownMenuItem
-              disabled={isAttaching}
               onSelect={() => {
                 selectedItemRef.current = true;
                 onAttach();
               }}
             >
               <Icon
-                name={isAttaching ? "Spinner" : "Paperclip"}
-                className={cn(
-                  "size-4 text-muted-foreground",
-                  isAttaching && "animate-spin",
-                )}
+                name="Paperclip"
+                className="size-4 text-muted-foreground"
                 aria-hidden
               />
               Attach files
@@ -233,7 +225,6 @@ export function PromptBoxActionsMenu({
           return (
             <DropdownMenuItem
               key={action.kind}
-              disabled={action.disabled}
               onSelect={() => {
                 selectedItemRef.current = true;
                 onAction(action);
@@ -244,32 +235,22 @@ export function PromptBoxActionsMenu({
                 className="size-4 text-muted-foreground"
                 aria-hidden
               />
-              {action.label ?? presentation.label}
+              {presentation.label}
             </DropdownMenuItem>
           );
         })}
         {pluginItems.length > 0 ? <DropdownMenuSeparator /> : null}
-        {pluginItems.map((contribution, index) => {
-          const contributingPluginCount = new Set(
-            pluginItems.map((candidate) => candidate.pluginId),
-          ).size;
-          const previous = pluginItems[index - 1];
-          const startsPluginGroup =
-            contributingPluginCount >= 2 &&
-            previous?.pluginId !== contribution.pluginId;
-          return (
-            <PluginComposerPlusMenuEntry
-              key={contribution.key}
-              contribution={contribution}
-              showPluginLabel={startsPluginGroup}
-              onSelected={(selection) => {
-                selectedItemRef.current = true;
-                pluginSelectionRef.current = selection;
-                queueMicrotask(() => restorePluginComposerFocus(selection));
-              }}
-            />
-          );
-        })}
+        {pluginItems.map((contribution) => (
+          <PluginComposerPlusMenuEntry
+            key={contribution.key}
+            contribution={contribution}
+            onSelected={(selection) => {
+              selectedItemRef.current = true;
+              pluginSelectionRef.current = selection;
+              queueMicrotask(() => restorePluginComposerFocus(selection));
+            }}
+          />
+        ))}
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -12,13 +12,14 @@ function selectedSkillMention(
   name: string,
   start: number,
   source: "command" | "skill" = "skill",
+  trigger: "/" | "$" = "/",
 ) {
   return {
     start,
     end: start + name.length + 1,
     resource: {
       kind: "command" as const,
-      trigger: "/" as const,
+      trigger,
       name,
       source,
       origin: "user" as const,
@@ -29,8 +30,28 @@ function selectedSkillMention(
 }
 
 function extractText(input: PromptInput[]): string | undefined {
-  return extractPiPromptInput(input).text;
+  return extractPiPromptInput(input)?.text;
 }
+
+it("preserves local file paths with and without text", () => {
+  const path = "/workspace/notes.md";
+  const marker = `[Attached file: ${path}]`;
+  const file = {
+    type: "localFile" as const,
+    path,
+    name: "notes.md",
+    sizeBytes: 6,
+    mimeType: "text/markdown",
+  };
+
+  expect(
+    extractText([
+      { type: "text", text: "Read this file.", mentions: [] },
+      file,
+    ]),
+  ).toBe(`Read this file.\n${marker}`);
+  expect(extractText([file])).toBe(marker);
+});
 
 it("invokes a selected skill through Pi's native command", () => {
   expect(
@@ -54,6 +75,18 @@ it("invokes a selected skill without arguments", () => {
       },
     ]),
   ).toBe("/skill:inspect");
+});
+
+it("invokes an explicit skill through Pi's native command", () => {
+  expect(
+    extractText([
+      {
+        type: "text" as const,
+        text: "$inspect src",
+        mentions: [selectedSkillMention("inspect", 0, "skill", "$")],
+      },
+    ]),
+  ).toBe("/skill:inspect src");
 });
 
 it("moves a selected skill to Pi's command position and preserves its arguments", () => {
@@ -112,6 +145,33 @@ it("preserves text chunks, local files, and local images", () => {
   }
 });
 
+it("distinguishes an image-only prompt from empty input", () => {
+  const workspaceDir = mkdtempSync(join(tmpdir(), "bb-pi-image-input-"));
+  try {
+    const imagePath = join(workspaceDir, "screenshot.png");
+    writeFileSync(imagePath, Buffer.from("fake png data"));
+
+    expect(
+      extractPiPromptInput([{ type: "localImage", path: imagePath }]),
+    ).toEqual({
+      text: "",
+      images: [
+        {
+          data: Buffer.from("fake png data").toString("base64"),
+          mimeType: "image/png",
+          type: "image",
+        },
+      ],
+    });
+    expect(extractPiPromptInput([])).toBeNull();
+    expect(
+      extractPiPromptInput([{ type: "text", text: "", mentions: [] }]),
+    ).toBeNull();
+  } finally {
+    rmSync(workspaceDir, { recursive: true, force: true });
+  }
+});
+
 it("keeps multiple selected skills unchanged", () => {
   expect(
     extractText([
@@ -140,7 +200,7 @@ it.each([
     name: "text mismatch",
     mention: selectedSkillMention("other", 0),
   },
-])("keeps a $name skill mention unchanged", ({ mention }) => {
+])("keeps an invalid skill mention unchanged", ({ mention }) => {
   expect(
     extractText([{ type: "text", text: "/inspect src", mentions: [mention] }]),
   ).toBe("/inspect src");
@@ -168,16 +228,6 @@ it("rejects invalid skill mentions at the protocol boundary", () => {
       type: "text",
       text: "/inspect",
       mentions: [{ ...validMention, start: -1 }],
-    },
-    {
-      type: "text",
-      text: "$inspect",
-      mentions: [
-        {
-          ...validMention,
-          resource: { ...validMention.resource, trigger: "$" },
-        },
-      ],
     },
   ];
 

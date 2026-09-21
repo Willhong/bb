@@ -30,11 +30,15 @@ import { useAppThemeEpoch } from "@/hooks/useAppTheme";
 import { usePreferredTheme } from "@/hooks/useTheme";
 import type { MarkdownPreviewLinkHandler } from "@/components/ui/markdown-link";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
+import { decodeBase64Bytes } from "@/lib/base64-bytes";
 import { useAppNavigationHost } from "@/lib/app-navigation-host";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
 import {
   anchorPointFromMouseEvent,
+  selectionAnchorFromPointerRelease,
   type MessageProseSelection,
+  type SelectionAnchor,
+  type SelectionAnchorPoint,
 } from "@/components/thread/timeline/SelectableMessageProse.js";
 import { TimelineSelectionMenu } from "@/components/thread/timeline/TimelineSelectionMenu.js";
 import { buildTerminalWebSocketUrl } from "./terminal-websocket-url";
@@ -48,9 +52,9 @@ import {
 
 export const TERMINAL_FONT_FAMILY =
   '"JetBrainsMono Nerd Font Mono", "MesloLGS NF", "Symbols Nerd Font Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+const TERMINAL_FONT_CSS_VARIABLE = "--font-terminal";
 export const TERMINAL_UNICODE_VERSION = "11";
 export const TERMINAL_ALLOW_PROPOSED_API = true;
-const TERMINAL_SELECTION_DRAG_DIRECTION_THRESHOLD_PX = 4;
 const TERMINAL_TOUCH_FOCUS_MAX_DURATION_MS = 700;
 const TERMINAL_TOUCH_FOCUS_MOVEMENT_THRESHOLD_PX = 10;
 
@@ -119,12 +123,7 @@ export function loadTerminalWebglRenderer(
   }
 }
 
-interface TerminalSelectionAnchorPoint {
-  x: number;
-  y: number;
-}
-
-interface TerminalTouchPoint extends TerminalSelectionAnchorPoint {
+interface TerminalTouchPoint extends SelectionAnchorPoint {
   identifier: number;
 }
 
@@ -132,7 +131,7 @@ interface TerminalTouchFocusGesture {
   identifier: number;
   maximumMovementPx: number;
   startedAt: number;
-  startPoint: TerminalSelectionAnchorPoint;
+  startPoint: SelectionAnchorPoint;
 }
 
 interface FocusTerminalFromTouchReleaseArgs {
@@ -144,8 +143,8 @@ interface FocusTerminalFromTouchReleaseArgs {
 }
 
 function terminalTouchMovement(
-  startPoint: TerminalSelectionAnchorPoint,
-  currentPoint: TerminalSelectionAnchorPoint,
+  startPoint: SelectionAnchorPoint,
+  currentPoint: SelectionAnchorPoint,
 ): number {
   return Math.hypot(
     currentPoint.x - startPoint.x,
@@ -230,11 +229,6 @@ function terminalTouchPoints(
   }));
 }
 
-interface TerminalSelectionAnchor {
-  point: TerminalSelectionAnchorPoint;
-  side: "top" | "bottom";
-}
-
 interface HasVisibleTerminalSizeArgs {
   containerElement: HTMLElement;
   entries?: readonly ResizeObserverEntry[];
@@ -254,10 +248,17 @@ function readResolvedCssColor(
   return getComputedStyle(probe).color;
 }
 
-type TerminalCssColorReader = (name: string) => string | undefined;
+type TerminalCssVariableReader = (name: string) => string | undefined;
+
+export function resolveTerminalFontFamily(
+  get: TerminalCssVariableReader,
+): string {
+  const value = get(TERMINAL_FONT_CSS_VARIABLE)?.trim();
+  return value || TERMINAL_FONT_FAMILY;
+}
 
 export function buildTerminalThemeFromCssColors(
-  get: TerminalCssColorReader,
+  get: TerminalCssVariableReader,
 ): ITheme {
   return {
     background: get("--sidebar"),
@@ -297,6 +298,62 @@ function buildTerminalTheme(): ITheme {
   const theme = buildTerminalThemeFromCssColors(get);
   probe.remove();
   return theme;
+}
+
+function readTerminalFontFamily(): string {
+  if (typeof document === "undefined") {
+    return TERMINAL_FONT_FAMILY;
+  }
+  return resolveTerminalFontFamily((name) =>
+    getComputedStyle(document.documentElement).getPropertyValue(name),
+  );
+}
+
+export function applyTerminalFontFamily(
+  terminal: Pick<XTermTerminal, "options">,
+  fontFamily: string,
+  scheduleFit: TerminalFitScheduler,
+): boolean {
+  if (terminal.options.fontFamily === fontFamily) {
+    return false;
+  }
+  terminal.options.fontFamily = fontFamily;
+  scheduleFit();
+  return true;
+}
+
+export function forceTerminalFontMeasurement(
+  terminal: Pick<
+    XTermTerminal,
+    "options" | "clearTextureAtlas" | "refresh" | "rows"
+  >,
+): void {
+  const fontFamily = terminal.options.fontFamily;
+  terminal.options.fontFamily = `${fontFamily} `;
+  terminal.options.fontFamily = fontFamily;
+  terminal.clearTextureAtlas();
+  terminal.refresh(0, terminal.rows - 1);
+}
+
+export function observeTerminalFontLoading(
+  fontSet: Pick<
+    FontFaceSet,
+    "ready" | "addEventListener" | "removeEventListener"
+  >,
+  onFontsLoaded: () => void,
+): () => void {
+  let disposed = false;
+  const refresh = () => {
+    if (!disposed) {
+      onFontsLoaded();
+    }
+  };
+  fontSet.addEventListener("loadingdone", refresh);
+  void fontSet.ready.then(refresh);
+  return () => {
+    disposed = true;
+    fontSet.removeEventListener("loadingdone", refresh);
+  };
 }
 
 interface ThreadTerminalViewProps {
@@ -420,15 +477,6 @@ export function forwardTerminalData({
   }
 }
 
-export function decodeTerminalOutputBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
-
 function hasVisibleTerminalSize({
   containerElement,
   entries,
@@ -439,32 +487,12 @@ function hasVisibleTerminalSize({
   return width > 0 && height > 0;
 }
 
-function terminalSelectionAnchorFromPointerRelease(
-  startPoint: TerminalSelectionAnchorPoint | null,
-  releaseEvent: Pick<MouseEvent, "clientX" | "clientY">,
-): TerminalSelectionAnchor | null {
-  const releasePoint = anchorPointFromMouseEvent(releaseEvent);
-  if (releasePoint === null) {
-    return null;
-  }
-
-  return {
-    point: releasePoint,
-    side:
-      startPoint !== null &&
-      releasePoint.y - startPoint.y >
-        TERMINAL_SELECTION_DRAG_DIRECTION_THRESHOLD_PX
-        ? "bottom"
-        : "top",
-  };
-}
-
 function buildTerminalSelection({
   anchor,
   containerElement,
   text,
 }: {
-  anchor: TerminalSelectionAnchor | null;
+  anchor: SelectionAnchor | null;
   containerElement: HTMLElement;
   text: string;
 }): MessageProseSelection | null {
@@ -584,7 +612,7 @@ function handleTerminalServerMessage({
       return;
     case "output":
       writeTerminalOutput({
-        data: decodeTerminalOutputBytes(message.chunk.dataBase64),
+        data: decodeBase64Bytes(message.chunk.dataBase64),
         isReplay: replayNextSeq !== null && message.chunk.seq < replayNextSeq,
         replayWriteState,
         terminal,
@@ -635,13 +663,9 @@ export function ThreadTerminalView({
   const terminalRef = useRef<XTermTerminal | null>(null);
   const hoveredTerminalLinkRef = useRef<TerminalLinkTarget | null>(null);
   const pointerIsDownRef = useRef(false);
-  const pointerStartPointRef = useRef<TerminalSelectionAnchorPoint | null>(
-    null,
-  );
+  const pointerStartPointRef = useRef<SelectionAnchorPoint | null>(null);
   const touchFocusGestureRef = useRef<TerminalTouchFocusGesture | null>(null);
-  const lastPointerReleaseAnchorRef = useRef<TerminalSelectionAnchor | null>(
-    null,
-  );
+  const lastPointerReleaseAnchorRef = useRef<SelectionAnchor | null>(null);
   const onSessionChangeRef = useRef<
     ((session: TerminalSession) => void) | undefined
   >(onSessionChange);
@@ -679,7 +703,7 @@ export function ThreadTerminalView({
   onUserInputRef.current = onUserInput;
 
   const reportTerminalSelection = useCallback(
-    (anchor: TerminalSelectionAnchor | null) => {
+    (anchor: SelectionAnchor | null) => {
       const terminal = terminalRef.current;
       const container = containerRef.current;
       if (!terminal || !container) {
@@ -766,17 +790,16 @@ export function ThreadTerminalView({
   const handleTerminalPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       pointerIsDownRef.current = true;
-      pointerStartPointRef.current =
-        anchorPointFromMouseEvent(event);
+      pointerStartPointRef.current = anchorPointFromMouseEvent(event);
     },
     [],
   );
 
   const handleTerminalPointerRelease = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
-      const anchor = terminalSelectionAnchorFromPointerRelease(
+      const anchor = selectionAnchorFromPointerRelease(
         pointerStartPointRef.current,
-        event,
+        { clientX: event.clientX, clientY: event.clientY },
       );
       lastPointerReleaseAnchorRef.current = anchor;
       pointerIsDownRef.current = false;
@@ -863,6 +886,7 @@ export function ThreadTerminalView({
     let selectionAnimationFrame: number | null = null;
     let resizeObserver: ResizeObserver | null = null;
     let selectionChangeDisposable: { dispose: () => void } | null = null;
+    let stopObservingFonts: (() => void) | null = null;
 
     async function mountTerminal(
       containerElement: HTMLDivElement,
@@ -900,7 +924,7 @@ export function ThreadTerminalView({
         allowProposedApi: TERMINAL_ALLOW_PROPOSED_API,
         convertEol: true,
         cursorBlink: true,
-        fontFamily: TERMINAL_FONT_FAMILY,
+        fontFamily: readTerminalFontFamily(),
         fontSize: 12,
         linkHandler: osc8LinkHandler,
         scrollback: 10_000,
@@ -961,6 +985,16 @@ export function ThreadTerminalView({
         });
       };
       fitTerminal();
+      const fontSet = document.fonts;
+      if (fontSet !== undefined) {
+        stopObservingFonts = observeTerminalFontLoading(fontSet, () => {
+          if (terminal === null) {
+            return;
+          }
+          forceTerminalFontMeasurement(terminal);
+          scheduleFit();
+        });
+      }
       scheduleFitRef.current = scheduleFit;
       const currentActiveElement = document.activeElement;
       if (
@@ -1094,6 +1128,7 @@ export function ThreadTerminalView({
 
     return () => {
       disposed = true;
+      stopObservingFonts?.();
       if (resizeAnimationFrame !== null) {
         window.cancelAnimationFrame(resizeAnimationFrame);
       }
@@ -1144,6 +1179,9 @@ export function ThreadTerminalView({
     if (!terminal) {
       return;
     }
+    applyTerminalFontFamily(terminal, readTerminalFontFamily(), () =>
+      scheduleFitRef.current?.(),
+    );
     terminal.options.theme = buildTerminalTheme();
   }, [preferredTheme, appThemeEpoch]);
 

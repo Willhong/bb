@@ -74,21 +74,9 @@ const piAssistantUsageSchema = z
   .object({
     input: z.number().optional(),
     output: z.number().optional(),
-    cacheRead: z.number().optional(),
-    cacheWrite: z.number().optional(),
+    cacheRead: z.number().nonnegative().optional().catch(undefined),
+    cacheWrite: z.number().nonnegative().optional().catch(undefined),
     totalTokens: z.number().optional(),
-  })
-  .passthrough();
-
-const piAssistantMessageSchema = z
-  .object({
-    role: z.literal("assistant"),
-    content: z.array(piMessageContentBlockSchema),
-    stopReason: z.string().optional(),
-    errorMessage: z.string().optional(),
-    provider: z.string().optional(),
-    model: z.string().optional(),
-    usage: piAssistantUsageSchema.optional(),
   })
   .passthrough();
 
@@ -105,6 +93,11 @@ const piConversationMessageSchema = z
     usage: piAssistantUsageSchema.optional(),
   })
   .passthrough();
+
+const piAssistantMessageSchema = piConversationMessageSchema.extend({
+  role: z.literal("assistant"),
+  content: z.array(piMessageContentBlockSchema),
+});
 
 const piCustomMessageBoundaryEventSchema = z
   .object({
@@ -257,7 +250,10 @@ function classifyPiToolUse(
       changes: [
         {
           path: parsed.data.path,
-          kind: parsed.data.oldText === undefined ? "add" : "update",
+          kind:
+            toolName === "edit" || parsed.data.oldText !== undefined
+              ? "update"
+              : "add",
           ...(parsed.data.oldText === undefined
             ? {}
             : { oldText: parsed.data.oldText }),
@@ -520,10 +516,7 @@ export function createPiDeltaTranslator(
             typeof used === "number" && Number.isFinite(used) && used >= 0
               ? used
               : null,
-          size:
-            typeof size === "number" && Number.isFinite(size) && size > 0
-              ? size
-              : null,
+          size: toPositiveNumber(size) ?? null,
           estimated: contextWindowUsage.estimated,
           attach: "currentOrLast",
         },
@@ -988,6 +981,12 @@ function toAssistantUsageBreakdown(
         : inputTokens + outputTokens + cachedInputTokens,
     inputTokens,
     cachedInputTokens,
+    ...(typedUsage.cacheRead === undefined
+      ? {}
+      : { cacheReadInputTokens: typedUsage.cacheRead }),
+    ...(typedUsage.cacheWrite === undefined
+      ? {}
+      : { cacheWriteInputTokens: typedUsage.cacheWrite }),
     outputTokens,
     reasoningOutputTokens: 0,
   };

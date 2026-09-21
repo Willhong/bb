@@ -1,5 +1,6 @@
 import type {
   Account,
+  AccountPoolConfig,
   AccountQuota,
   AccountSecret,
   ModelFamily,
@@ -34,6 +35,7 @@ import type {
   PoolAffinityStore,
   QuotaStore,
 } from "./store.js";
+import { parentRequestHeaders, type ParentPool } from "./parent-pool.js";
 
 const ROUTE = "/api/v1/plugins/account-pool/http";
 const DEFAULT_REFRESH_URL = "https://platform.claude.com/v1/oauth/token";
@@ -60,24 +62,18 @@ const DROPPED_RESPONSE_HEADERS = new Set([
   "upgrade",
 ]);
 
-export interface HubSettings {
-  anthropicUpstreamBaseUrl: string;
-  codexUpstreamBaseUrl: string;
-  switchThreshold: number;
-}
-
 interface HubOptions {
   accounts: AccountStore;
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
   maxAffinityBindings: number;
   hubTokens: HubTokenStore;
-  getSettings: () => HubSettings;
+  getSettings: () => AccountPoolConfig;
   adapters: ReadonlyMap<PoolProvider, ProviderAdapter>;
   fetch: typeof fetch;
   now: () => number;
-  usageRefreshIntervalMs: number;
   drainTimeoutMs: number;
+  getParentRoute: () => ParentPool | null;
   onAccountsChanged: () => void;
   onUpstreamError: (provider: PoolProvider, error: unknown) => void;
 }
@@ -158,7 +154,7 @@ export class AccountPoolHub {
     this.accepting = true;
     while (!signal.aborted) {
       await this.refreshUsage();
-      await waitForDelay(this.options.usageRefreshIntervalMs, signal);
+      await waitForDelay(DEFAULT_USAGE_REFRESH_INTERVAL_MS, signal);
     }
     await this.stop();
   }
@@ -176,32 +172,100 @@ export class AccountPoolHub {
     return this.adapter(provider).importAccount();
   }
 
-  async handle(request: Request, provider: PoolProvider): Promise<Response> {
+  async handle(
+    request: Request,
+    provider: PoolProvider,
+    routePath: string,
+  ): Promise<Response> {
     const adapter = this.adapter(provider);
     const hostId = await this.authenticate(request);
     if (hostId === null) {
       return adapter.errorResponse(401, "Invalid Account Pooler bearer token.");
     }
-    return this.handleAuthenticated(request, provider, hostId);
-  }
-
-  async handleAuthenticated(
-    request: Request,
-    provider: PoolProvider,
-    hostId: string | null = null,
-  ): Promise<Response> {
-    const adapter = this.adapter(provider);
     if (!this.accepting)
       return adapter.errorResponse(
         503,
         "Account Pooler is not accepting requests.",
       );
+    const parent = this.options.getParentRoute();
+    if (parent !== null) {
+      return this.forwardToParent(request, adapter, routePath, parent);
+    }
     return this.forward(
       request,
       new Uint8Array(await request.arrayBuffer()),
       adapter,
       hostId,
     );
+  }
+
+  private trackRequest(
+    request: Request,
+    onRelease?: () => void,
+  ): { controller: AbortController; release: () => void } {
+    const controller = new AbortController();
+    const abortFromRequest = () => controller.abort(request.signal.reason);
+    this.activeControllers.add(controller);
+    if (request.signal.aborted) abortFromRequest();
+    else
+      request.signal.addEventListener("abort", abortFromRequest, {
+        once: true,
+      });
+    let released = false;
+    return {
+      controller,
+      release: () => {
+        if (released) return;
+        released = true;
+        request.signal.removeEventListener("abort", abortFromRequest);
+        this.activeControllers.delete(controller);
+        onRelease?.();
+      },
+    };
+  }
+
+  private async forwardToParent(
+    request: Request,
+    adapter: ProviderAdapter,
+    routePath: string,
+    parent: ParentPool,
+  ): Promise<Response> {
+    const { controller, release } = this.trackRequest(request);
+    try {
+      const search = new URL(request.url).search;
+      const body =
+        request.method === "GET" || request.method === "HEAD"
+          ? undefined
+          : await request.arrayBuffer();
+      const response = await this.options
+        .fetch(`${parent.baseUrl}${routePath}${search}`, {
+          method: request.method,
+          headers: parentRequestHeaders(request.headers, parent.token),
+          ...(body === undefined ? {} : { body }),
+          signal: controller.signal,
+        })
+        .catch((cause: unknown) => {
+          if (!controller.signal.aborted)
+            this.options.onUpstreamError(adapter.provider, cause);
+          throw new UpstreamConnectionError("Parent pool unreachable.", {
+            cause,
+          });
+        });
+      return this.clientResponse({ response, controller, release });
+    } catch (error) {
+      release();
+      if (request.signal.aborted)
+        return adapter.errorResponse(
+          499,
+          "Account Pooler request was canceled.",
+        );
+      if (error instanceof UpstreamConnectionError)
+        return adapter.errorResponse(
+          502,
+          "Account Pooler could not reach the parent pool.",
+        );
+      throw error;
+    }
   }
 
   async refreshUsage(accountId?: string, force = false): Promise<void> {
@@ -221,17 +285,13 @@ export class AccountPoolHub {
     force: boolean,
   ): Promise<void> {
     const adapter = this.adapter(account.provider);
-    if (
-      adapter.refreshUsage === undefined ||
-      (this.inFlightByAccount.get(account.id) ?? 0) > 0
-    )
-      return;
+    if ((this.inFlightByAccount.get(account.id) ?? 0) > 0) return;
     const now = this.options.now();
     const last = this.lastUsageRefreshAt.get(account.id);
     if (
       !force &&
       last !== undefined &&
-      now - last < this.options.usageRefreshIntervalMs
+      now - last < DEFAULT_USAGE_REFRESH_INTERVAL_MS
     )
       return;
     const running = this.usageRefreshes.get(account.id);
@@ -275,7 +335,7 @@ export class AccountPoolHub {
     }
   }
 
-  async status(): Promise<Omit<PoolStatus, "routing">> {
+  async status(): Promise<Omit<PoolStatus, "routing" | "parent">> {
     const settings = this.options.getSettings();
     const now = this.options.now();
     const accounts = (await this.options.accounts.list()).sort(
@@ -289,21 +349,11 @@ export class AccountPoolHub {
       hosts: await this.options.hubTokens.list(),
       accounts: accounts.map((account) => {
         const quota = this.options.quotas.get(account.id);
+        const { accountId: _accountId, ...quotaFields } = quota;
         return {
           ...account,
           lastUsedHostName: null,
-          fiveHourUtilization: quota.fiveHourUtilization,
-          fiveHourResetAt: quota.fiveHourResetAt,
-          fiveHourStatus: quota.fiveHourStatus,
-          sevenDayUtilization: quota.sevenDayUtilization,
-          sevenDayResetAt: quota.sevenDayResetAt,
-          sevenDayStatus: quota.sevenDayStatus,
-          representativeClaim: quota.representativeClaim,
-          familyWeekly: quota.familyWeekly,
-          limitWindows: quota.limitWindows,
-          observedAt: quota.observedAt,
-          heldUntil: quota.heldUntil,
-          error: quota.error,
+          ...quotaFields,
           inFlight: this.inFlightByAccount.get(account.id) ?? 0,
           status: accountStatus(account, quota, settings.switchThreshold, now),
         };
@@ -315,7 +365,7 @@ export class AccountPoolHub {
     request: Request,
     body: Uint8Array,
     adapter: ProviderAdapter,
-    hostId: string | null,
+    hostId: string,
   ): Promise<Response> {
     const signal = AbortSignal.any([request.signal, this.stopped.signal]);
     const attempted = new Set<string>();
@@ -334,7 +384,7 @@ export class AccountPoolHub {
     const parsed = adapter.parseRequest(body, request.headers);
     const family = parsed.family;
     const affinityKey =
-      hostId === null || parsed.affinityId === null
+      parsed.affinityId === null
         ? null
         : JSON.stringify([adapter.provider, hostId, parsed.affinityId]);
     const parentAffinityKey =
@@ -398,14 +448,12 @@ export class AccountPoolHub {
         }
         previousAccountId = selected.account.id;
         attempted.add(selected.account.id);
-        if (hostId !== null) {
-          const changed = await this.options.accounts.recordUsed(
-            selected.account.id,
-            this.options.now(),
-            hostId,
-          );
-          if (changed) this.options.onAccountsChanged();
-        }
+        const changed = await this.options.accounts.recordUsed(
+          selected.account.id,
+          this.options.now(),
+          hostId,
+        );
+        if (changed) this.options.onAccountsChanged();
         let secret: AccountSecret;
         try {
           signal.throwIfAborted();
@@ -990,23 +1038,10 @@ export class AccountPoolHub {
     secret: AccountSecret,
     adapter: ProviderAdapter,
   ): Promise<UpstreamResult> {
-    const controller = new AbortController();
-    const abortFromRequest = () => controller.abort(request.signal.reason);
-    this.activeControllers.add(controller);
     this.increment(account.id);
-    if (request.signal.aborted) abortFromRequest();
-    else
-      request.signal.addEventListener("abort", abortFromRequest, {
-        once: true,
-      });
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      request.signal.removeEventListener("abort", abortFromRequest);
-      this.activeControllers.delete(controller);
-      this.decrement(account.id);
-    };
+    const { controller, release } = this.trackRequest(request, () =>
+      this.decrement(account.id),
+    );
     try {
       const upstreamBody = new ArrayBuffer(body.byteLength);
       new Uint8Array(upstreamBody).set(body);
@@ -1177,7 +1212,7 @@ export function createHub(options: {
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
   hubTokens: HubTokenStore;
-  getSettings: () => HubSettings;
+  getSettings: () => AccountPoolConfig;
   fetch?: typeof fetch;
   now?: () => number;
   refreshUrl?: string;
@@ -1187,9 +1222,9 @@ export function createHub(options: {
   importCodexCredentials?: () => Promise<ImportedCodexCredentials>;
   usageUrl?: string;
   profileUrl?: string;
-  usageRefreshIntervalMs?: number;
   drainTimeoutMs?: number;
   maxAffinityBindings?: number;
+  getParentRoute?: () => ParentPool | null;
   onAccountsChanged?: () => void;
   onUpstreamError?: (provider: PoolProvider, error: unknown) => void;
 }): AccountPoolHub {
@@ -1222,9 +1257,8 @@ export function createHub(options: {
     adapters,
     fetch: options.fetch ?? fetch,
     now: options.now ?? Date.now,
-    usageRefreshIntervalMs:
-      options.usageRefreshIntervalMs ?? DEFAULT_USAGE_REFRESH_INTERVAL_MS,
     drainTimeoutMs: options.drainTimeoutMs ?? 60_000,
+    getParentRoute: options.getParentRoute ?? (() => null),
     onAccountsChanged: options.onAccountsChanged ?? (() => {}),
     onUpstreamError: options.onUpstreamError ?? (() => {}),
   });

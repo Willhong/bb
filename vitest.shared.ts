@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { mergeConfig, type ViteUserConfig } from "vitest/config";
 import { BaseSequencer, type TestSpecification } from "vitest/node";
 
@@ -9,7 +10,7 @@ const GLOBAL_TARGET = String.raw`(?:${GLOBAL_OBJECT}|\(\s*${GLOBAL_OBJECT}\s+as\
 
 const ISOLATION_REQUIRING_API = new RegExp(
   [
-    String.raw`\bvi\.(mock|doMock|unmock|doUnmock|resetModules|stubGlobal|stubEnv)\(`,
+    String.raw`\bvi\.(mock|doMock|unmock|doUnmock|resetModules|stubGlobal|stubEnv|useFakeTimers|setSystemTime)\(`,
     String.raw`\bprocess\.chdir\(`,
     String.raw`\bprocess\.env(\.[A-Za-z_$][\w$]*|\[[^\]]+\])\s*=[^=]`,
     String.raw`\bdelete\s+process\.env\b`,
@@ -64,7 +65,6 @@ const ISOLATED_ENVIRONMENTS = new Set(["jsdom", "happy-dom"]);
 
 export interface PartitionOptions {
   aliases?: Record<string, string>;
-  defaultEnvironment?: string;
 }
 
 export interface SharedTestFileGroup {
@@ -163,7 +163,6 @@ export function partitionTestFiles(
   roots: string[],
   options: PartitionOptions = {},
 ): TestFilePartition {
-  const defaultEnvironment = options.defaultEnvironment ?? "node";
   const scan: IsolationScan = {
     pkgDir,
     aliases: options.aliases ?? {},
@@ -191,7 +190,7 @@ export function partitionTestFiles(
         const source = readFileSync(fullPath, "utf8");
         const environment = ENVIRONMENT_DOCBLOCK.exec(source)?.[1] ?? null;
         if (
-          ISOLATED_ENVIRONMENTS.has(environment ?? defaultEnvironment) ||
+          ISOLATED_ENVIRONMENTS.has(environment ?? "node") ||
           requiresIsolation(fullPath, scan)
         ) {
           isolated.add(relative);
@@ -227,7 +226,6 @@ export interface SharedWorkerProjectsArgs {
   include: string[];
   exclude?: string[];
   aliases?: Record<string, string>;
-  defaultEnvironment?: string;
 }
 
 export function sharedWorkerProjects(
@@ -236,9 +234,6 @@ export function sharedWorkerProjects(
   const exclude = args.exclude ?? ["dist/**", "node_modules/**"];
   const options: PartitionOptions = {};
   if (args.aliases !== undefined) options.aliases = args.aliases;
-  if (args.defaultEnvironment !== undefined) {
-    options.defaultEnvironment = args.defaultEnvironment;
-  }
   const partition = partitionTestFiles(
     args.pkgDir,
     args.include.map(globRoot),
@@ -346,6 +341,9 @@ export function defineWorkspaceTestConfig(
         conditions: ["source"],
       },
       test: {
+        globalSetup: [
+          fileURLToPath(new URL("./vitest.global-tmpdir.ts", import.meta.url)),
+        ],
         sequence: { sequencer: SharedWorkerSequencer },
         coverage: {
           provider: "v8",

@@ -1,4 +1,4 @@
-import { withEnvironmentPathAdmission } from "../environments/path-admission.js";
+import { assertEnvironmentPathAvailable } from "../environments/path-admission.js";
 import { z } from "zod";
 import {
   createEnvironment,
@@ -16,7 +16,7 @@ import { runLiveHostCommand } from "../hosts/live-command.js";
 import { appendThreadEventInTransaction } from "./thread-events.js";
 import { buildEnvironmentProvisionCommand } from "./thread-create-helpers.js";
 import { findHostDataDir } from "../lib/entity-lookup.js";
-import { foreignProviderOwnedPathRefusal } from "./workspace-path-claims.js";
+import { suppliedWorkspacePathRefusal } from "./workspace-path-claims.js";
 
 export const UPDATE_ENVIRONMENT_DIRECTORY_TOOL_NAME =
   "update_environment_directory";
@@ -280,15 +280,11 @@ export async function handleUpdateEnvironmentDirectoryToolCall(
   }
 
   try {
-    await withEnvironmentPathAdmission(
-      deps,
-      {
-        hostId: args.currentEnvironment.hostId,
-        path: normalizedPath,
-        threadId: args.thread.id,
-      },
-      () => {},
-    );
+    assertEnvironmentPathAvailable(deps, {
+      hostId: args.currentEnvironment.hostId,
+      path: normalizedPath,
+      threadId: args.thread.id,
+    });
   } catch (error) {
     return toolCallFailure(
       error instanceof Error ? error.message : String(error),
@@ -320,7 +316,7 @@ export async function handleUpdateEnvironmentDirectoryToolCall(
     targetEnvironment = ready;
   } else {
     const dataDir = findHostDataDir(deps, args.currentEnvironment.hostId);
-    const refusal = foreignProviderOwnedPathRefusal(deps.db, {
+    const refusal = suppliedWorkspacePathRefusal(deps.db, {
       dataDir,
       hostId: args.currentEnvironment.hostId,
       path: normalizedPath,
@@ -347,18 +343,17 @@ export async function handleUpdateEnvironmentDirectoryToolCall(
 
   let attachResult: AttachEnvironmentResult;
   try {
-    attachResult = await withEnvironmentPathAdmission(
-      deps,
-      { ...targetEnvironment, threadId: args.thread.id },
-      () =>
-        attachReadyEnvironment(deps, {
-          currentEnvironment: args.currentEnvironment,
-          createdEnvironment,
-          targetEnvironment,
-          thread: args.thread,
-          turnId: args.turnId,
-        }),
-    );
+    assertEnvironmentPathAvailable(deps, {
+      ...targetEnvironment,
+      threadId: args.thread.id,
+    });
+    attachResult = attachReadyEnvironment(deps, {
+      currentEnvironment: args.currentEnvironment,
+      createdEnvironment,
+      targetEnvironment,
+      thread: args.thread,
+      turnId: args.turnId,
+    });
   } catch (error) {
     return toolCallFailure(
       error instanceof Error ? error.message : String(error),

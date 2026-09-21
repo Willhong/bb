@@ -2,9 +2,12 @@ import { z } from "zod";
 import {
   activeThinkingSchema,
   callerExecutionInputSourceSchema,
+  completedTurnDisplaySchema,
   environmentSchema,
   hostSchema,
   jsonValueSchema,
+  pluginIdSchema,
+  pluginMetadataSchema,
   pendingInteractionResolutionSchema,
   pendingInteractionSchema,
   permissionModeInputSchema,
@@ -16,6 +19,8 @@ import {
   reasoningLevelSchema,
   rawThreadIdSchema,
   serviceTierSchema,
+  startedOnBehalfOfSchema,
+  threadCreateOriginSchema,
   threadOriginKindSchema,
   threadListEntrySchema,
   threadQueuedMessageSchema,
@@ -54,9 +59,6 @@ export const sendMessageModeSchema = z.enum([
   "steer",
 ]);
 
-export const threadCreateOriginSchema = z.enum(["app", "cli", "sdk", "plugin"]);
-export type ThreadCreateOrigin = z.infer<typeof threadCreateOriginSchema>;
-
 export const executionInputFieldSourceSchema = callerExecutionInputSourceSchema;
 export type ExecutionInputFieldSource = CallerExecutionInputSource;
 
@@ -85,20 +87,14 @@ export type ExistingThreadExecutionInputSources = z.infer<
   typeof existingThreadExecutionInputSourcesSchema
 >;
 
-export const startedOnBehalfOfInitiatorSchema = z.enum(["agent", "system"]);
-
-export const startedOnBehalfOfSchema = z.object({
-  initiator: startedOnBehalfOfInitiatorSchema,
-  senderThreadId: z.string().min(1),
-});
-export type StartedOnBehalfOf = z.infer<typeof startedOnBehalfOfSchema>;
-
 export const createThreadRequestSchema = z
   .object({
     projectId: z.string().min(1),
     providerId: z.string().min(1).optional(),
     origin: threadCreateOriginSchema,
     originPluginId: z.string().min(1).optional(),
+    pluginMetadata: pluginMetadataSchema.optional(),
+    lifecycleOwnerThreadId: z.string().min(1).optional(),
     visibility: threadVisibilitySchema.optional(),
     title: z.string().min(1).optional(),
     input: z.array(promptInputSchema),
@@ -122,6 +118,9 @@ export const createThreadRequestSchema = z
      * created and creation runs exactly as it did before the queue existed.
      */
     sendAt: z.number().int().nonnegative().optional(),
+    pluginSubmission: z
+      .object({ pluginId: pluginIdSchema, data: jsonValueSchema })
+      .optional(),
   })
   .superRefine((value, ctx) => {
     if (value.origin === "plugin" && value.originPluginId === undefined) {
@@ -135,6 +134,25 @@ export const createThreadRequestSchema = z
       ctx.addIssue({
         code: "custom",
         message: 'originPluginId requires origin "plugin"',
+        path: ["originPluginId"],
+      });
+    }
+    if (value.pluginMetadata !== undefined && value.origin !== "plugin") {
+      ctx.addIssue({
+        code: "custom",
+        message: 'pluginMetadata requires origin "plugin"',
+        path: ["pluginMetadata"],
+      });
+    }
+    if (
+      value.pluginMetadata !== undefined &&
+      value.originPluginId !== undefined &&
+      !pluginIdSchema.safeParse(value.originPluginId).success
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "pluginMetadata requires originPluginId to be a valid plugin id",
         path: ["originPluginId"],
       });
     }
@@ -171,6 +189,8 @@ export const forkThreadRequestSchema = z
     environment: createThreadEnvironmentArgsSchema.optional(),
     origin: threadCreateOriginSchema.default("sdk"),
     originPluginId: z.string().min(1).optional(),
+    pluginMetadata: pluginMetadataSchema.optional(),
+    lifecycleOwnerThreadId: z.string().min(1).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -188,10 +208,29 @@ export const forkThreadRequestSchema = z
         path: ["originPluginId"],
       });
     }
+    if (value.pluginMetadata !== undefined && value.origin !== "plugin") {
+      ctx.addIssue({
+        code: "custom",
+        message: 'pluginMetadata requires origin "plugin"',
+        path: ["pluginMetadata"],
+      });
+    }
+    if (
+      value.pluginMetadata !== undefined &&
+      value.originPluginId !== undefined &&
+      !pluginIdSchema.safeParse(value.originPluginId).success
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "pluginMetadata requires originPluginId to be a valid plugin id",
+        path: ["originPluginId"],
+      });
+    }
   });
 export type ForkThreadRequest = z.infer<typeof forkThreadRequestSchema>;
 
-const sendMessageRequestBaseSchema = z.object({
+const sendMessageRequestFieldsSchema = z.object({
   input: z.array(promptInputSchema).min(1),
   model: z.string().optional(),
   serviceTier: serviceTierSchema.optional(),
@@ -200,6 +239,9 @@ const sendMessageRequestBaseSchema = z.object({
   executionInputSources: existingThreadExecutionInputSourcesSchema.optional(),
   mode: sendMessageModeSchema,
   senderThreadId: z.string().min(1).optional(),
+  pluginSubmission: z
+    .object({ pluginId: pluginIdSchema, data: jsonValueSchema })
+    .optional(),
   /**
    * Epoch ms at which this message should dispatch. Present ⇒ nothing is sent
    * now; the message is queued as a row waiting on the clock, and the due
@@ -208,7 +250,7 @@ const sendMessageRequestBaseSchema = z.object({
   sendAt: z.number().int().nonnegative().optional(),
 });
 
-export const sendMessageRequestSchema = sendMessageRequestBaseSchema;
+export const sendMessageRequestSchema = sendMessageRequestFieldsSchema;
 export type SendMessageRequest = z.infer<typeof sendMessageRequestSchema>;
 
 /**
@@ -240,8 +282,8 @@ export type SendMessageResponse = z.infer<typeof sendMessageResponseSchema>;
 
 // `sendAt` is deliberately dropped: an edit rewrites a message that has
 // already been dispatched, so there is nothing left to schedule.
-export const editMessageRequestSchema = sendMessageRequestBaseSchema
-  .omit({ mode: true, sendAt: true })
+export const editMessageRequestSchema = sendMessageRequestFieldsSchema
+  .omit({ mode: true, sendAt: true, pluginSubmission: true })
   .extend({
     operationId: z.string().min(1),
     expectedRequestSequence: z.number().int().nonnegative().optional(),
@@ -406,9 +448,6 @@ export const threadSearchHighlightRangeSchema = z
   .refine((range) => range.end > range.start, {
     message: "highlight range end must be greater than start",
   });
-export type ThreadSearchHighlightRange = z.infer<
-  typeof threadSearchHighlightRangeSchema
->;
 
 export const threadSearchMatchSchema = z
   .object({
@@ -426,7 +465,6 @@ export const threadSearchResultSchema = z
     matches: z.array(threadSearchMatchSchema),
   })
   .strict();
-export type ThreadSearchResult = z.infer<typeof threadSearchResultSchema>;
 
 export const threadSearchResultGroupSchema = z
   .object({
@@ -434,9 +472,6 @@ export const threadSearchResultGroupSchema = z
     results: z.array(threadSearchResultSchema),
   })
   .strict();
-export type ThreadSearchResultGroup = z.infer<
-  typeof threadSearchResultGroupSchema
->;
 
 export const threadSearchResponseSchema = z
   .object({
@@ -476,6 +511,40 @@ export const threadGetQuerySchema = z.object({
     .optional(),
 });
 export type ThreadGetQuery = z.infer<typeof threadGetQuerySchema>;
+
+export type ThreadPluginMetadataResponse = z.infer<typeof pluginMetadataSchema>;
+export const threadPluginMetadataQuerySchema = z
+  .object({ pluginId: pluginIdSchema })
+  .strict();
+export type ThreadPluginMetadataQuery = z.infer<
+  typeof threadPluginMetadataQuerySchema
+>;
+export const updateThreadPluginMetadataRequestSchema = z
+  .object({
+    pluginId: pluginIdSchema,
+    set: pluginMetadataSchema.optional(),
+    remove: z.array(z.string()).optional(),
+  })
+  .strict()
+  .superRefine(({ set, remove }, ctx) => {
+    if (remove && new Set(remove).size !== remove.length) {
+      ctx.addIssue({
+        code: "custom",
+        message: "remove contains duplicate keys",
+        path: ["remove"],
+      });
+    }
+    if (set && remove?.some((key) => Object.hasOwn(set, key))) {
+      ctx.addIssue({
+        code: "custom",
+        message: "set and remove overlap",
+        path: ["remove"],
+      });
+    }
+  });
+export type UpdateThreadPluginMetadataRequest = z.infer<
+  typeof updateThreadPluginMetadataRequestSchema
+>;
 
 export const threadWithIncludesResponseSchema = threadResponseSchema.extend({
   environment: environmentSchema.nullable().optional(),
@@ -779,7 +848,6 @@ export const threadRunningEntrySchema = z.object({
   /** The machine it runs on; null while no environment has been chosen. */
   hostId: z.string().nullable(),
 });
-export type ThreadRunningEntry = z.infer<typeof threadRunningEntrySchema>;
 
 export const threadRunningResponseSchema = z.array(threadRunningEntrySchema);
 export type ThreadRunningResponse = z.infer<typeof threadRunningResponseSchema>;
@@ -792,7 +860,7 @@ export type ThreadSearchQuery = z.infer<typeof threadSearchQuerySchema>;
 
 export const timelinePaginationCursorSchema = z
   .object({
-    anchorSeq: z.number().int().positive(),
+    anchorSeq: z.number().int().nonnegative(),
     anchorId: z.string().min(1),
   })
   .strict();
@@ -808,9 +876,10 @@ export const timelinePageMetadataSchema = z
     hasOlderRows: z.boolean(),
     olderCursor: timelinePaginationCursorSchema.nullable(),
     historySnapshot: z.string().optional(),
+    olderRowsSourceSeqEnd: z.number().int().nonnegative().nullable().optional(),
     contentPage: z
       .object({
-        anchorSeq: z.number().int().positive(),
+        anchorSeq: z.number().int().nonnegative(),
         start: z.number().int().nonnegative(),
         end: z.number().int().nonnegative(),
         total: z.number().int().nonnegative(),
@@ -823,7 +892,7 @@ export const threadTimelineQuerySchema = z
   .object({
     includeNestedRows: z.enum(["true", "false"]),
     segmentLimit: z.string().regex(/^\d+$/),
-    beforeAnchorSeq: z.string().regex(/^[1-9]\d*$/),
+    beforeAnchorSeq: z.string().regex(/^(0|[1-9]\d*)$/),
     beforeAnchorId: z.string().min(1),
     summaryOnly: z.enum(["true", "false"]),
     afterSequence: z.string().regex(/^\d+$/),
@@ -934,12 +1003,6 @@ export const threadFilesRawQuerySchema = z.object({
 });
 export type ThreadFilesRawQuery = z.infer<typeof threadFilesRawQuerySchema>;
 
-export const timelineTurnSummaryDetailsRequestSchema = z.object({
-  turnId: z.string().min(1),
-  sourceSeqStart: z.number().int().nonnegative(),
-  sourceSeqEnd: z.number().int().nonnegative(),
-});
-
 export const timelineTurnSummaryDetailsResponseSchema = z.object({
   olderCursor: z.string().nullable().optional(),
   historySnapshot: z.string().optional(),
@@ -952,6 +1015,7 @@ export type TimelineTurnSummaryDetailsResponse = z.infer<
 export const threadTimelineResponseSchema = z.object({
   rows: z.array(timelineRowSchema),
   contextBoundarySeq: z.number().int().nonnegative().nullable(),
+  completedTurnDisplay: completedTurnDisplaySchema,
   activePromptMode: threadTimelineActivePromptModeSchema.nullable(),
   activeThinking: activeThinkingSchema.nullable(),
   activeWorkflows: z.array(timelineWorkflowWorkRowSchema),

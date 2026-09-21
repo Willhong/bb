@@ -5,7 +5,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import type { NeighborReorderRequest } from "@bb/client-core";
-import { DropPreviewRow, ThreadTreeNodeRow } from "./ProjectRow";
+import { ThreadTreeNodeRow } from "./ProjectRow";
 import {
   useSidebarSortable,
   type SidebarSortableDragBindings,
@@ -17,7 +17,10 @@ import {
   type UseNeighborReorderSortableArgs,
 } from "./useNeighborReorderSortable";
 import { useChronologicalSectionThreadDnd } from "./SectionThreadDndContext";
-import { PINNED_THREAD_PARENT_KEY } from "./useSectionThreadDnd";
+import {
+  PINNED_THREAD_PARENT_KEY,
+  type SectionThreadDndState,
+} from "./useSectionThreadDnd";
 
 interface PinnedThreadRootReorderCallbacks {
   onSettled: () => void;
@@ -42,16 +45,18 @@ interface SortablePinnedRootItemProps {
   collapsedEnvironmentIds: Set<string>;
   collapsedThreadIds: Set<string>;
   disabled: boolean;
+  displace?: boolean;
   node: ProjectThreadNode;
   onProjectSelect?: () => void;
   onToggleEnvironmentCollapsed: (environmentId: string) => void;
   onToggleThreadCollapsed: (threadId: string) => void;
+  sectionDnd?: SectionThreadDndState | null;
   selectedThreadId?: string;
 }
 
 interface PinnedRootItemProps extends Omit<
   SortablePinnedRootItemProps,
-  "disabled"
+  "disabled" | "displace"
 > {
   consumeClickSuppression?: () => boolean;
   dragBindings?: SidebarSortableDragBindings;
@@ -72,6 +77,7 @@ const PinnedRootItem = memo(function PinnedRootItem({
   onProjectSelect,
   onToggleEnvironmentCollapsed,
   onToggleThreadCollapsed,
+  sectionDnd,
   selectedThreadId,
   sortableRef,
   sortableStyle,
@@ -82,6 +88,7 @@ const PinnedRootItem = memo(function PinnedRootItem({
       node={node}
       depthOffset={0}
       isEnvGrouped={false}
+      sectionDnd={sectionDnd}
       selectedThreadId={selectedThreadId}
       collapsedThreadIds={collapsedThreadIds}
       collapsedEnvironmentIds={collapsedEnvironmentIds}
@@ -99,13 +106,19 @@ const PinnedRootItem = memo(function PinnedRootItem({
 
 const SortablePinnedRootItem = memo(function SortablePinnedRootItem({
   disabled,
+  displace = true,
   node,
   ...props
 }: SortablePinnedRootItemProps) {
   const { dragBindings, setNodeRef, style } = useSidebarSortable({
     id: getPinnedRootNodeId(node),
     disabled,
+    displace,
   });
+  const sortableStyle: CSSProperties =
+    props.sectionDnd?.activeThread?.id === getPinnedRootNodeId(node)
+      ? { ...style, opacity: 0.35, pointerEvents: "none" }
+      : style;
 
   return (
     <PinnedRootItem
@@ -113,7 +126,7 @@ const SortablePinnedRootItem = memo(function SortablePinnedRootItem({
       node={node}
       dragBindings={dragBindings}
       sortableRef={setNodeRef}
-      sortableStyle={style}
+      sortableStyle={sortableStyle}
     />
   );
 });
@@ -175,13 +188,11 @@ export const PinnedThreadTree = memo(function PinnedThreadTree({
   }
 
   if (chronologicalDnd) {
-    const showDropPreview =
-      chronologicalDnd.dragOverParentKey === PINNED_THREAD_PARENT_KEY;
     return (
       <div
         ref={setPinnedParentRef}
         data-sidebar-sticky-section=""
-        className="relative space-y-0.5 group-data-[collapsible=icon]:hidden"
+        className="relative space-y-0.5"
         onClickCapture={chronologicalDnd.onClickCapture}
       >
         <SortableContext
@@ -193,6 +204,8 @@ export const PinnedThreadTree = memo(function PinnedThreadTree({
               key={getPinnedRootNodeId(node)}
               node={node}
               disabled={chronologicalDnd.pinnedReorderPending}
+              displace={false}
+              sectionDnd={chronologicalDnd}
               selectedThreadId={selectedThreadId}
               collapsedThreadIds={collapsedThreadIds}
               collapsedEnvironmentIds={collapsedEnvironmentIds}
@@ -202,7 +215,6 @@ export const PinnedThreadTree = memo(function PinnedThreadTree({
             />
           ))}
         </SortableContext>
-        <DropPreviewRow depth={0} visible={showDropPreview} />
       </div>
     );
   }
@@ -210,7 +222,7 @@ export const PinnedThreadTree = memo(function PinnedThreadTree({
   return (
     <div
       data-sidebar-sticky-section=""
-      className="relative space-y-0.5 group-data-[collapsible=icon]:hidden"
+      className="relative space-y-0.5"
       onClickCapture={onClickCapture}
     >
       {renderedRootNodes.length > 1 ? (

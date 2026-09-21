@@ -19,7 +19,29 @@ inspection.
 
 Run `bb --version` for the CLI version. Use `bb --help` or `bb help [command]`
 for help. Run bb guide for the system overview. Run bb guide <chapter> for one
-area. Use bb <group> --help for current flags and defaults.
+area. Use bb <group> --help for current flags and defaults, or
+`bb guide commands <group>` for every command in a group with its options on
+one page.
+
+## Errors and JSON
+
+- Read the whole error before you run `--help`. A failed invocation prints the
+  nearest command or option, the usage line, the valid options, and, for a
+  missing project, thread, machine, or environment, the exact flag to add with
+  the current ID filled in.
+- With `--json`, a failure prints
+  `{"ok": false, "error": {"code", "message", "hint"}}` on stdout and the
+  readable message on stderr, and exits non-zero. Parse stdout only; `2>&1`
+  mixes the message into the JSON.
+- Output shapes differ by command: `bb thread list --json` is a bare array,
+  `bb thread show --json` nests under `.thread`, `bb terminal list --json`
+  wraps in `.sessions`. `bb guide json` lists each shape, and the help of the
+  most-parsed commands ends with its JSON shape.
+- Pass long or multi-line text from a file: `bb thread tell <id>
+--message-file <path>`, `bb thread spawn --prompt-file <path>`, with `-` for
+  stdin. Inside double quotes the shell runs `backticks` and `$(...)` before
+  bb sees the text, which silently corrupts Markdown and can execute commands.
+- Timeouts take seconds or a duration with a unit (`90s`, `20m`, `4h`).
 
 A standalone CLI targets http://127.0.0.1:38886. Use BB_SERVER_URL and
 BB_HOST_DAEMON_PORT only for an intentional non-default target.
@@ -31,7 +53,7 @@ BB_HOST_DAEMON_PORT only for an intentional non-default target.
 - Read references/configuration.md for settings, agent instructions, skills,
   remote clients, and environment setup scripts.
 - Read references/thread-creation.md before you spawn or fork threads, create
-  projects, select machines, or create environments.
+  projects, select machines, move the server, or create environments.
 - Read references/thread-operation.md for messages, queues, interactions,
   panes, terminals, inspection, and long-running commands.
 - Read references/failure-recovery.md when a thread fails, stops, or needs plan
@@ -57,6 +79,34 @@ BB_HOST_DAEMON_PORT only for an intentional non-default target.
   providers that accept `{}` use it when the flag is omitted
   (`bb environment providers --json` prints both facts). `--base-branch`
   belongs to `--new-environment worktree` only.
+- Enroll an existing machine with `bb machine create --provider manual`; run
+  the printed command on the target. `--no-wait` returns its host ID.
+  Cancel with `bb machine remove <host-id>`. Removal revokes access; use the
+  original `install-machine.sh --uninstall --host-id <host-id>` on that box.
+- Create a standalone machine with `bb machine create --provider <id>`; use
+  `--inputs <JSON>` for non-secret provider inputs and `--key` for retry identity.
+- List plugin-provisioned machine choices with `bb machine providers`. Create a
+  machine and an explicit environment with
+  `bb thread spawn --new-machine <provider-id> --environment-provider <id>`; add
+  `--machine-inputs <json>` when its schema requires inputs. Machine inputs are
+  persisted and non-secret; credentials belong in plugin settings. Composed
+  environments choose their own machine: use `--environment-provider modal-sandbox`
+  without machine selectors and pass `--machine-inputs <json>` when configuring
+  the composition's machine provider.
+- Use `bb machine enroll` for a private core-prepared bundle. Local lifecycle is
+  handled by `install-machine.sh --start|--stop|--uninstall --host-id <id>`;
+  see references/thread-creation.md for ownership checks.
+- Move the bb server to another machine with
+  `bb server move --to <machine> --check`, then the same command without
+  `--check`; it stops all running work. `bb server export --out <file>` backs
+  up a running server. `bb server import`, `unlock`, `allow-connect`, and
+  `delete-old-copy` act on this computer's data directory without calling a
+  server. An imported server keeps its connect tunnel off until
+  `bb server allow-connect`.
+- Use `bb machine suspend|resume <id-or-name>` only for providers that expose
+  suspend and resume. Resume waits for pending suspension and is a no-op
+  when already active. Use `bb machine retry-cleanup <id-or-name>` to retry a
+  failed provider teardown immediately.
 - `bb environment providers` lists Project checkout, Worktree, then other
   installed providers by display name. With `--project <id> --machine <id>`
   it also prints that machine's availability (`available`, `setup-required`,
@@ -64,7 +114,7 @@ BB_HOST_DAEMON_PORT only for an intentional non-default target.
   through `bb settings show` and `bb settings general <key> <value>`.
 - The server keeps a registry of sidebar layout preferences (organization
   mode, section order, collapsed rows, navigation entries): `bb settings ui
-  list`, `get`, `set`, and `reset`.
+list`, `get`, `set`, and `reset`.
 - Query provider models on the machine that will run the thread.
 - Prefer non-interactive commands and machine-readable output for automation.
 - Pass `--yes` for a confirmed destructive command in a non-interactive shell.
@@ -85,6 +135,7 @@ bb machine list --json
 bb environment providers --json
 bb provider list --environment "$BB_ENVIRONMENT_ID" --json
 bb thread show "$BB_THREAD_ID" --json
+bb thread context --self --json
 bb environment status "$BB_ENVIRONMENT_ID" --json
 bb plugin list --json
 bb skill list --environment "$BB_ENVIRONMENT_ID" --json
@@ -111,4 +162,16 @@ plugins; do not add plugin command manuals here.
 
 ## Built-in browser control
 
-Use `bb browser instances --host <host-id> --json` to discover a desktop. Commands `tabs`, `create`, `acquire`, `connection`, `release`, `reveal`, `capture`, `close`, and `watch` require explicit `--host`, `--instance`, `--generation`, and `--thread`. See `bb guide browser` and `bb browser --help` for flags. New tabs use separate automation profiles; personal-tab control needs an explicit handoff. Revealing tabs or acquiring control opens the side panel and selects the tab only in the already focused thread, without switching threads or activating the desktop window. Connection credentials are written with `connection --output <new-file>` and work only on the browser host; keep them out of chat and public port shares. `import-sources` and `import-cookies --from <source> --profile <dir> [--into personal|automation:<id>]` copy signed-in cookies from an installed browser into a BB browser profile; they need `--host`, `--instance`, and `--generation` only, and the source browser must be quit first.
+Use `bb browser instances --host <host-id> --json` to discover a desktop. Commands `tabs`, `create`, `acquire`, `connection`, `release`, `reveal`, `capture`, `close`, and `watch` require explicit `--host`, `--instance`, `--generation`, and `--thread`. See `bb guide browser` and `bb browser --help` for flags. New tabs use separate automation profiles; personal-tab control needs an explicit handoff. Revealing tabs or acquiring control opens the side panel and selects the tab only in the already focused thread, without switching threads or activating the desktop window. Connection credentials are written with `connection --output <new-file>` and work only on the browser host; keep them out of chat and public port shares. `import-sources` and `import-cookies --from <source> --profile <dir> [--into personal|automation:<id>]` copy signed-in cookies from an installed browser (including Helium on macOS) into a BB browser profile; they need `--host`, `--instance`, and `--generation` only, and the source browser must be quit first.
+
+`bb machine show <id-or-name> --json` includes provider-owned inventory and
+estimates in `providerDetails` when available. Provider inventory failures are
+reported; this is not billing/invoice data. Suspension requires idle live threads
+and no open terminals; empty machines can use an opted-in provider idle policy.
+
+`bb thread context` reads recorded context usage without sending a model request. A breakdown is optional; absent usage is returned as `null`.
+
+`bb machine reconcile <id-or-name> [--json]` asks core to enforce its recorded
+suspended state through the provider and waits for completion. It leaves active
+machines and in-progress lifecycle operations alone. Use `machine suspend` to
+request a new pause. Core does not schedule reconciliation polling.

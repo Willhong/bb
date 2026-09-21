@@ -29,14 +29,17 @@ import { useProjectActions } from "./ProjectActionsProvider";
 
 interface ProjectActionsMenuBaseProps {
   project: ProjectResponse;
+  onRename?: () => void;
+  onCloseAutoFocus?: (event: Event) => void;
+  extraActions?: (surface: ProjectActionsMenuSurface) => ReactNode;
 }
 
 interface ProjectActionsMenuProps extends ProjectActionsMenuBaseProps {
   triggerClassName?: string;
-  onOpenChange?: (open: boolean) => void;
 }
 
 interface ProjectActionsContextMenuProps extends ProjectActionsMenuBaseProps {
+  disabled?: boolean;
   children: ReactNode;
   onOpenChange?: (open: boolean) => void;
 }
@@ -54,6 +57,8 @@ function stopProjectActionsMenuClickPropagation(event: MouseEvent) {
 export function ProjectActionsMenuItems({
   project,
   surface,
+  onRename,
+  extraActions,
 }: ProjectActionsMenuItemsProps) {
   const navigate = useNavigate();
   const { hostId: pickerHostId } = usePathPickerHost();
@@ -78,7 +83,8 @@ export function ProjectActionsMenuItems({
         surface={surface}
         icon="Edit"
         onSelect={() => {
-          requestRename(project);
+          if (onRename) onRename();
+          else requestRename(project);
         }}
       >
         Rename
@@ -94,6 +100,7 @@ export function ProjectActionsMenuItems({
           Add local path
         </ActionMenuItem>
       ) : null}
+      {extraActions?.(surface)}
       <ActionMenuSeparator surface={surface} />
       <ActionMenuItem
         surface={surface}
@@ -112,10 +119,12 @@ export function ProjectActionsMenuItems({
 export function ProjectActionsMenu({
   project,
   triggerClassName,
-  onOpenChange,
+  onRename,
+  onCloseAutoFocus,
+  extraActions,
 }: ProjectActionsMenuProps) {
   return (
-    <DropdownMenu onOpenChange={onOpenChange}>
+    <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
@@ -139,9 +148,15 @@ export function ProjectActionsMenu({
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
+        onCloseAutoFocus={onCloseAutoFocus}
         onClick={stopProjectActionsMenuClickPropagation}
       >
-        <ProjectActionsMenuItems project={project} surface="dropdown" />
+        <ProjectActionsMenuItems
+          project={project}
+          surface="dropdown"
+          onRename={onRename}
+          extraActions={extraActions}
+        />
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -159,14 +174,25 @@ export function ProjectActionsContextMenu(
 
 function ProjectActionsCompactLongPressMenu({
   children,
+  disabled,
   project,
   onOpenChange,
+  onRename,
+  extraActions,
 }: ProjectActionsContextMenuProps) {
   return (
     <CompactLongPressMenu
       label={`${project.name} actions`}
       onOpenChange={onOpenChange}
-      items={<ProjectActionsMenuItems project={project} surface="dropdown" />}
+      disabled={disabled}
+      items={
+        <ProjectActionsMenuItems
+          project={project}
+          surface="dropdown"
+          onRename={onRename}
+          extraActions={extraActions}
+        />
+      }
     >
       {children}
     </CompactLongPressMenu>
@@ -175,17 +201,29 @@ function ProjectActionsCompactLongPressMenu({
 
 function ProjectActionsDesktopContextMenu({
   children,
+  disabled,
   project,
   onOpenChange,
+  onRename,
+  onCloseAutoFocus,
+  extraActions,
 }: ProjectActionsContextMenuProps) {
   return (
     <ContextMenu onOpenChange={onOpenChange}>
-      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      <ContextMenuTrigger asChild disabled={disabled}>
+        {children}
+      </ContextMenuTrigger>
       <ContextMenuContent
         aria-label={`${project.name} actions`}
+        onCloseAutoFocus={onCloseAutoFocus}
         onClick={stopProjectActionsMenuClickPropagation}
       >
-        <ProjectActionsMenuItems project={project} surface="context" />
+        <ProjectActionsMenuItems
+          project={project}
+          surface="context"
+          onRename={onRename}
+          extraActions={extraActions}
+        />
       </ContextMenuContent>
     </ContextMenu>
   );

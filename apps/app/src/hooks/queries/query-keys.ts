@@ -56,12 +56,15 @@ const THREAD_CONVERSATION_OUTLINE_QUERY_KEY = "threadConversationOutline";
 const THREAD_TIMELINE_TURN_SUMMARY_DETAILS_QUERY_KEY =
   "threadTimelineTurnSummaryDetails";
 const SYSTEM_PROVIDERS_QUERY_KEY = "systemProviders";
+const SYSTEM_MACHINE_PROVIDERS_QUERY_KEY = "systemMachineProviders";
+const MACHINE_ENVIRONMENT_QUERY_KEY = "machine-environment";
 const SYSTEM_CONFIG_QUERY_KEY = "systemConfig";
 const UI_PREFERENCES_QUERY_KEY = "uiPreferences";
 const SYSTEM_THEME_QUERY_KEY = "systemTheme";
 export const SYSTEM_EXECUTION_OPTIONS_QUERY_KEY = "systemExecutionOptions";
 const SYSTEM_CLI_SKILLS_QUERY_KEY = "systemCliSkills";
 const SYSTEM_VERSION_QUERY_KEY = "systemVersion";
+const SERVER_MOVE_STATUS_QUERY_KEY = "serverMoveStatus";
 const HOST_PROVIDER_CLI_STATUS_QUERY_KEY = "hostProviderCliStatus";
 const SYSTEM_USAGE_LIMITS_QUERY_KEY = "systemUsageLimits";
 const SYSTEM_PROVIDER_STATES_QUERY_KEY = "systemProviderStates";
@@ -101,7 +104,9 @@ export interface ArchivedThreadsListFilters {
 
 export const ARCHIVED_THREADS_LIST_KIND = "archivedList";
 
-type HostsQueryKey = readonly [typeof HOSTS_QUERY_KEY];
+type HostsQueryKey =
+  | readonly [typeof HOSTS_QUERY_KEY]
+  | readonly [typeof HOSTS_QUERY_KEY, true];
 type HostQueryId = string | null | undefined;
 type HostQueryKey = readonly [typeof HOST_QUERY_KEY, HostQueryId];
 type AllHostQueryKeyPrefix = readonly [typeof HOST_QUERY_KEY];
@@ -446,12 +451,26 @@ type SystemProvidersQueryKey = readonly [
 type AllSystemProvidersQueryKeyPrefix = readonly [
   typeof SYSTEM_PROVIDERS_QUERY_KEY,
 ];
+type SystemMachineProvidersQueryKey = readonly [
+  typeof SYSTEM_MACHINE_PROVIDERS_QUERY_KEY,
+];
+type AllSystemMachineProvidersQueryKeyPrefix = readonly [
+  typeof SYSTEM_MACHINE_PROVIDERS_QUERY_KEY,
+];
+type MachineEnvironmentQueryKey = readonly [
+  typeof MACHINE_ENVIRONMENT_QUERY_KEY,
+  string | null,
+];
+type AllMachineEnvironmentQueryKeyPrefix = readonly [
+  typeof MACHINE_ENVIRONMENT_QUERY_KEY,
+];
 type SystemConfigQueryKey = readonly [typeof SYSTEM_CONFIG_QUERY_KEY];
 type UiPreferencesQueryKey = readonly [typeof UI_PREFERENCES_QUERY_KEY];
 type SystemThemeQueryKey = readonly [typeof SYSTEM_THEME_QUERY_KEY, string];
 type AllSystemThemesQueryKeyPrefix = readonly [typeof SYSTEM_THEME_QUERY_KEY];
 type SystemCliSkillsQueryKey = readonly [typeof SYSTEM_CLI_SKILLS_QUERY_KEY];
 type SystemVersionQueryKey = readonly [typeof SYSTEM_VERSION_QUERY_KEY];
+type ServerMoveStatusQueryKey = readonly [typeof SERVER_MOVE_STATUS_QUERY_KEY];
 type HostProviderCliStatusQueryKey = readonly [
   typeof HOST_PROVIDER_CLI_STATUS_QUERY_KEY,
   string | null,
@@ -491,8 +510,8 @@ interface ProjectDefaultExecutionOptionsQueryKeyArgs {
   projectId: string;
 }
 
-export function hostsQueryKey(): HostsQueryKey {
-  return [HOSTS_QUERY_KEY];
+export function hostsQueryKey(includeCreating = false): HostsQueryKey {
+  return includeCreating ? [HOSTS_QUERY_KEY, true] : [HOSTS_QUERY_KEY];
 }
 
 export function hostQueryKey(hostId: HostQueryId): HostQueryKey {
@@ -1075,6 +1094,24 @@ export function allSystemProvidersQueryKeyPrefix(): AllSystemProvidersQueryKeyPr
   return [SYSTEM_PROVIDERS_QUERY_KEY];
 }
 
+export function systemMachineProvidersQueryKey(): SystemMachineProvidersQueryKey {
+  return [SYSTEM_MACHINE_PROVIDERS_QUERY_KEY];
+}
+
+export function allSystemMachineProvidersQueryKeyPrefix(): AllSystemMachineProvidersQueryKeyPrefix {
+  return [SYSTEM_MACHINE_PROVIDERS_QUERY_KEY];
+}
+
+export function machineEnvironmentQueryKey(
+  projectId: string | null,
+): MachineEnvironmentQueryKey {
+  return [MACHINE_ENVIRONMENT_QUERY_KEY, projectId];
+}
+
+export function allMachineEnvironmentQueryKeyPrefix(): AllMachineEnvironmentQueryKeyPrefix {
+  return [MACHINE_ENVIRONMENT_QUERY_KEY];
+}
+
 export function systemCliSkillsQueryKey(): SystemCliSkillsQueryKey {
   return [SYSTEM_CLI_SKILLS_QUERY_KEY];
 }
@@ -1097,6 +1134,10 @@ export function allSystemThemesQueryKeyPrefix(): AllSystemThemesQueryKeyPrefix {
 
 export function systemVersionQueryKey(): SystemVersionQueryKey {
   return [SYSTEM_VERSION_QUERY_KEY];
+}
+
+export function serverMoveStatusQueryKey(): ServerMoveStatusQueryKey {
+  return [SERVER_MOVE_STATUS_QUERY_KEY];
 }
 
 export function hostProviderCliStatusQueryKey(
@@ -1204,6 +1245,10 @@ export function pluginSdkSettingsQueryKey(pluginId: string) {
 
 export function allPluginSettingsQueryKeyPrefix() {
   return [PLUGIN_SDK_SETTINGS_QUERY_KEY] as const;
+}
+
+export function pluginUpdateCheckQueryKey(pluginId: string | null) {
+  return ["plugins", "update-check", pluginId] as const;
 }
 
 export function pluginSourceQueryKey(pluginId: string) {

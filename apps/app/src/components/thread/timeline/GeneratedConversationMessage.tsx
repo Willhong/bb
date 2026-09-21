@@ -237,6 +237,14 @@ function systemMessageTitleSegments(
       return subject !== null && subject.kind === "thread-batch"
         ? [verbSegment(`${subject.count} threads updated`)]
         : SYSTEM_MESSAGE_FALLBACK_SEGMENTS;
+    case "tool-result-delivered":
+      return subject !== null && subject.kind === "tool-call"
+        ? [
+            verbSegment("Delivered"),
+            subjectSegment(subject.toolName, null),
+            verbSegment("result"),
+          ]
+        : SYSTEM_MESSAGE_FALLBACK_SEGMENTS;
     case "unlabeled":
       return SYSTEM_MESSAGE_FALLBACK_SEGMENTS;
   }
@@ -322,6 +330,8 @@ function systemMessageIconName(systemMessageKind: SystemMessageKind): IconName {
       return "AlertCircle";
     case "child-outcome-batch":
       return "ListTodo";
+    case "tool-result-delivered":
+      return "Toolbox";
     case "unlabeled":
       return "Info";
   }
@@ -539,7 +549,6 @@ export const GeneratedConversationMessage = memo(
         collapsedPreviewSource.hasAdditionalBodyLines ||
         collapsedPreviewSource.wasCapped ||
         collapsedPreviewOverflowMeasurement === "overflowing");
-    const renderManualContinuation = expandable;
     const hideManualContinuation =
       collapsedPreviewOverflowMeasurement === "overflowing";
     const collapsedPreviewBody = clipMentionTextToVisibleRange({
@@ -560,7 +569,6 @@ export const GeneratedConversationMessage = memo(
           className={`${NESTED_TIMELINE_GROUP_LINE_CLASS_NAME} max-w-full min-w-0`}
         >
           <div className="flex min-w-0 items-baseline truncate pl-2 text-sm leading-relaxed text-foreground">
-            {}
             <div ref={setCollapsedPreviewTextRef} className="min-w-0 truncate">
               {collapsedPreviewSource.parseAsMarkdown ? (
                 <MarkdownPreview
@@ -585,7 +593,7 @@ export const GeneratedConversationMessage = memo(
                 <span>{collapsedPreviewBody.text}</span>
               )}
             </div>
-            {renderManualContinuation ? (
+            {expandable ? (
               <span
                 className={cn(
                   "shrink-0 text-muted-foreground",

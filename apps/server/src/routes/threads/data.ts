@@ -1,15 +1,23 @@
+import { extractThreadContextWindowUsage } from "@bb/thread-view";
 import { clearTimelineOrderingContextCache } from "../../services/threads/timeline-context-order.js";
 import path from "node:path";
 import {
   getAppSettings,
+  getThreadPluginMetadata,
+  patchThreadPluginMetadata,
+  getLatestCompletedThreadContextClearSequence,
+  listContextWindowUsageRows,
   getLatestThreadSequence,
   getLatestStoredConversationOutlineSequence,
   listQueuedThreadMessages,
 } from "@bb/db";
 import type { Hono } from "hono";
 import {
+  DEFAULT_COMPLETED_TURN_DISPLAY,
   PROMPT_HISTORY_ENTRY_LIMIT,
   threadEventTypeSchema,
+  type AppSettings,
+  type CompletedTurnDisplay,
   type ThreadEventType,
 } from "@bb/domain";
 import {
@@ -45,6 +53,7 @@ import {
 import { requireThreadStoragePath } from "../../services/threads/thread-storage.js";
 import { toThreadQueuedMessage } from "../../services/threads/thread-queued-messages.js";
 import {
+  toThreadEventWithMeta,
   buildThreadConversationOutlineProjectionKey,
   buildThreadTimelineWithProfile,
   buildTimelineTurnSummaryDetails,
@@ -95,6 +104,18 @@ function resolveThreadProviderDisplayName(
   providerId: string,
 ): string | undefined {
   return deps.providerRegistry.get(providerId)?.info.displayName;
+}
+
+function resolveThreadCompletedTurnDisplay(
+  deps: Pick<AppDeps, "providerRegistry">,
+  settings: AppSettings,
+  providerId: string,
+): CompletedTurnDisplay {
+  return (
+    settings.providerCompletedTurnDisplay[providerId] ??
+    deps.providerRegistry.get(providerId)?.info.completedTurnDisplay ??
+    DEFAULT_COMPLETED_TURN_DISPLAY
+  );
 }
 
 function validateFilePath(filePath: string): void {
@@ -300,7 +321,7 @@ async function serveThreadWorktreeRawFile(
 }
 
 export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
-  const { get } = typedRoutes<PublicApiSchema>(app, {
+  const { get, patch } = typedRoutes<PublicApiSchema>(app, {
     onValidationError: (msg) => new ApiError(400, "invalid_request", msg),
   });
   const routes = publicApiRoutes.threads;
@@ -309,7 +330,6 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
   deps.hub.onChangedMessage((message) => {
     if (
       message.entity === "thread" &&
-      message.id !== undefined &&
       message.changes.includes("history-rewritten")
     ) {
       clearTimelineOrderingContextCache(deps.db);
@@ -326,6 +346,59 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
   >();
   const CONVERSATION_OUTLINE_CACHE_MAX_ENTRIES = 128;
 
+  get(routes.pluginMetadata.get, (context, query) => {
+    const thread = requirePublicThread(deps.db, context.req.param("id"));
+    const { metadata, corrupt } = getThreadPluginMetadata(
+      deps.db,
+      thread.id,
+      query.pluginId,
+    );
+    if (corrupt) {
+      deps.logger.warn(
+        `Ignoring corrupt plugin metadata for thread ${thread.id}, plugin ${query.pluginId}`,
+      );
+    }
+    return context.json(metadata);
+  });
+
+  patch(routes.pluginMetadata.update, (context, payload) => {
+    const thread = requirePublicThread(deps.db, context.req.param("id"));
+    const result = patchThreadPluginMetadata(deps.db, {
+      threadId: thread.id,
+      pluginId: payload.pluginId,
+      set: payload.set ?? {},
+      remove: payload.remove ?? [],
+    });
+    if (!result.ok) {
+      throw new ApiError(
+        413,
+        "invalid_request",
+        "pluginMetadata exceeds 256 KiB",
+      );
+    }
+    if (result.replacedCorrupt) {
+      deps.logger.warn(
+        `Replaced corrupt plugin metadata for thread ${thread.id}, plugin ${payload.pluginId}`,
+      );
+    }
+    return context.json(result.metadata);
+  });
+
+  get(routes.context, (context) => {
+    const thread = requirePublicThread(deps.db, context.req.param("id"));
+    const sequenceStart =
+      getLatestCompletedThreadContextClearSequence(deps.db, {
+        threadId: thread.id,
+      }) ?? 0;
+    const rows = listContextWindowUsageRows(deps.db, {
+      threadId: thread.id,
+      sequenceStart,
+    });
+    return context.json({
+      usage: extractThreadContextWindowUsage(rows.map(toThreadEventWithMeta)),
+    });
+  });
+
   get(routes.timeline, (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     const page = parseThreadTimelinePage(query);
@@ -336,9 +409,13 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       deps,
       thread.providerId,
     );
-    const includeDiagnosticOperations = getAppSettings(
-      deps.db,
-    ).showDiagnosticEvents;
+    const settings = getAppSettings(deps.db);
+    const includeDiagnosticOperations = settings.showDiagnosticEvents;
+    const completedTurnDisplay = resolveThreadCompletedTurnDisplay(
+      deps,
+      settings,
+      thread.providerId,
+    );
     const maxSeq = getLatestThreadSequence(deps.db, {
       threadId: thread.id,
     });
@@ -352,6 +429,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       includeNestedRows,
       summaryOnly,
       includeDiagnosticOperations,
+      completedTurnDisplay,
     };
     const full = timelineCache.getOrBuild(
       thread.id,
@@ -361,6 +439,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
           deps.db,
           thread,
           {
+            completedTurnDisplay,
             eventBudget,
             includeDiagnosticOperations,
             includeNestedRows,
@@ -421,12 +500,21 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       deps,
       thread.providerId,
     );
+    const outlineOptions = {
+      completedTurnDisplay: resolveThreadCompletedTurnDisplay(
+        deps,
+        getAppSettings(deps.db),
+        thread.providerId,
+      ),
+      maxSeq,
+      ...(providerDisplayName === undefined ? {} : { providerDisplayName }),
+    };
     const cacheKey = JSON.stringify([
       thread.id,
       buildThreadConversationOutlineProjectionKey(
         thread,
         outlineSequence,
-        providerDisplayName,
+        outlineOptions,
       ),
     ]);
     const cached = conversationOutlineCache.get(cacheKey);
@@ -436,9 +524,8 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       return context.json({ items: cached, maxSeq });
     }
     const response = loadThreadConversationOutline(deps.db, thread, {
-      maxSeq,
+      ...outlineOptions,
       outlineSequence,
-      ...(providerDisplayName === undefined ? {} : { providerDisplayName }),
     });
     conversationOutlineCache.set(cacheKey, response.items);
     while (
@@ -455,13 +542,16 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
 
   get(routes.timelineTurnSummaryDetails, (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    const includeDiagnosticOperations = getAppSettings(
-      deps.db,
-    ).showDiagnosticEvents;
+    const settings = getAppSettings(deps.db);
     return context.json(
       buildTimelineTurnSummaryDetails(deps.db, thread, {
         beforeCursor: query.beforeCursor,
-        includeDiagnosticOperations,
+        completedTurnDisplay: resolveThreadCompletedTurnDisplay(
+          deps,
+          settings,
+          thread.providerId,
+        ),
+        includeDiagnosticOperations: settings.showDiagnosticEvents,
         providerDisplayName: resolveThreadProviderDisplayName(
           deps,
           thread.providerId,

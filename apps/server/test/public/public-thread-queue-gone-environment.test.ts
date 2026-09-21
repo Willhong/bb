@@ -5,10 +5,7 @@ import {
   listIdleThreadsWithQueuedMessages,
   listQueuedThreadMessages,
 } from "@bb/db";
-import {
-  applyEnvironmentLifecycleEvent,
-  requireEnvironmentLifecycleEventApplied,
-} from "@bb/db/internal-environment-lifecycle";
+import { applyEnvironmentLifecycleEvent } from "@bb/db/internal-environment-lifecycle";
 import {
   encodeClientTurnRequestIdNumber,
   threadScope,
@@ -23,6 +20,7 @@ import {
   seedProjectWithSource,
   seedQueuedMessage,
   seedThread,
+  seedThreadIdentity,
   seedTurnStarted,
 } from "../helpers/seed.js";
 import { withTestHarness, type TestAppHarness } from "../helpers/test-app.js";
@@ -148,6 +146,11 @@ describe("queued message into a thread whose environment is gone (#1789)", () =>
         scope: threadScope(),
         data: earlierTurnEventData,
       });
+      seedThreadIdentity(harness.deps, {
+        threadId: thread.id,
+        environmentId: null,
+        providerThreadId: "provider-turn-1",
+      });
       seedTurnStarted(harness.deps, {
         threadId: thread.id,
         environmentId: null,
@@ -228,12 +231,10 @@ describe("queued message into a thread whose environment is gone (#1789)", () =>
       expect(sweepCandidates()).toEqual([thread.id]);
 
       archiveThread(harness.db, harness.hub, thread.id);
-      requireEnvironmentLifecycleEventApplied(
-        applyEnvironmentLifecycleEvent(harness.db, harness.hub, {
-          environmentId: environment.id,
-          event: { type: "destroy.recorded" },
-        }),
-      );
+      applyEnvironmentLifecycleEvent(harness.db, harness.hub, {
+        environmentId: environment.id,
+        event: { type: "destroy.recorded" },
+      });
       expect(getEnvironment(harness.db, environment.id)?.status).toBe(
         "destroyed",
       );

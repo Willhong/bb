@@ -3,10 +3,7 @@ import {
   type ProjectSource,
   type ThreadListEntry,
 } from "@bb/domain";
-import type {
-  ProjectBranchesResponse,
-  SystemEnvironmentProvider,
-} from "@bb/server-contract";
+import type { SystemEnvironmentProvider } from "@bb/server-contract";
 import {
   PERSONAL_WORKSPACE_ENVIRONMENT_PROVIDER_ID,
   PROJECT_CHECKOUT_ENVIRONMENT_PROVIDER_ID,
@@ -18,6 +15,13 @@ import {
 import type { ReuseThreadOption } from "@/components/pickers/ReuseEnvironmentPicker";
 import { getThreadDisplayTitle } from "@/lib/thread-title";
 
+export type SeededReuseEnvironmentStatus = "pending" | "available" | "missing";
+
+export interface SeededReuseEnvironment {
+  environmentId: string;
+  status: SeededReuseEnvironmentStatus;
+}
+
 interface ResolveRootComposeEffectiveEnvironmentValueArgs {
   environmentSelectionValue: string;
   environmentProviders?: readonly SystemEnvironmentProvider[];
@@ -27,6 +31,7 @@ interface ResolveRootComposeEffectiveEnvironmentValueArgs {
   projectSources: readonly ProjectSource[];
   reuseThreadOptions: readonly ReuseThreadOption[];
   reuseThreadOptionsLoading: boolean;
+  seededReuseEnvironment: SeededReuseEnvironment | null;
 }
 
 interface ResolveProjectlessEnvironmentValueArgs {
@@ -36,12 +41,52 @@ interface ResolveProjectlessEnvironmentValueArgs {
   primaryHostId: string | null;
   reuseThreadOptions: readonly ReuseThreadOption[];
   reuseThreadOptionsLoading: boolean;
+  seededReuseEnvironment: SeededReuseEnvironment | null;
 }
 
-const PROJECT_SOURCE_NOT_GIT_DISABLED_REASON =
-  "New worktrees require a Git repository with at least one commit";
-const PROJECT_SOURCE_NO_COMMITS_DISABLED_REASON =
-  "Project source has no commits. Create an initial commit before creating a worktree";
+function reuseSelectionSurvives({
+  environmentId,
+  reuseThreadOptions,
+  reuseThreadOptionsLoading,
+  seededReuseEnvironment,
+}: {
+  environmentId: string;
+  reuseThreadOptions: readonly ReuseThreadOption[];
+  reuseThreadOptionsLoading: boolean;
+  seededReuseEnvironment: SeededReuseEnvironment | null;
+}): boolean {
+  if (
+    reuseThreadOptions.some((option) => option.environmentId === environmentId)
+  ) {
+    return true;
+  }
+  if (reuseThreadOptionsLoading) return true;
+  if (seededReuseEnvironment?.environmentId === environmentId) {
+    return seededReuseEnvironment.status !== "missing";
+  }
+  return false;
+}
+
+interface ResolveHostEnvironmentProviderArgs {
+  currentProvider: SystemEnvironmentProvider | null;
+  providers: readonly SystemEnvironmentProvider[];
+}
+
+export function resolveHostEnvironmentProvider({
+  currentProvider,
+  providers,
+}: ResolveHostEnvironmentProviderArgs): SystemEnvironmentProvider | null {
+  const candidates = providers.filter(
+    (provider) =>
+      provider.machineProviderId === null &&
+      provider.availability?.status !== "unavailable",
+  );
+  return (
+    candidates.find((provider) => provider.id === currentProvider?.id) ??
+    candidates[0] ??
+    (currentProvider?.machineProviderId === null ? currentProvider : null)
+  );
+}
 
 export function buildReuseThreadOptions(
   threads: readonly ThreadListEntry[],
@@ -126,14 +171,17 @@ function resolveProjectlessEnvironmentValue({
   primaryHostId,
   reuseThreadOptions,
   reuseThreadOptionsLoading,
+  seededReuseEnvironment,
 }: ResolveProjectlessEnvironmentValueArgs): string {
   if (
     parsedSelection?.type === "reuse" &&
     parsedSelection.environmentId !== null &&
-    (reuseThreadOptionsLoading ||
-      reuseThreadOptions.some(
-        (option) => option.environmentId === parsedSelection.environmentId,
-      ))
+    reuseSelectionSurvives({
+      environmentId: parsedSelection.environmentId,
+      reuseThreadOptions,
+      reuseThreadOptionsLoading,
+      seededReuseEnvironment,
+    })
   ) {
     return environmentSelectionValue;
   }
@@ -159,21 +207,6 @@ function resolveProjectlessEnvironmentValue({
     : encodeProviderValue(defaultProvider.id);
 }
 
-export function resolveProjectSourceGitDisabledReason(
-  data: ProjectBranchesResponse | undefined,
-): string | null {
-  switch (data?.checkout.kind) {
-    case "unknown":
-      return PROJECT_SOURCE_NOT_GIT_DISABLED_REASON;
-    case "unborn":
-      return PROJECT_SOURCE_NO_COMMITS_DISABLED_REASON;
-    case "branch":
-    case "detached":
-    case undefined:
-      return null;
-  }
-}
-
 export function resolveRootComposeEffectiveEnvironmentValue({
   environmentSelectionValue,
   environmentProviders,
@@ -183,6 +216,7 @@ export function resolveRootComposeEffectiveEnvironmentValue({
   projectSources,
   reuseThreadOptions,
   reuseThreadOptionsLoading,
+  seededReuseEnvironment,
 }: ResolveRootComposeEffectiveEnvironmentValueArgs): string {
   const parsedSelection = parseEnvironmentValue(environmentSelectionValue);
 
@@ -194,6 +228,7 @@ export function resolveRootComposeEffectiveEnvironmentValue({
       primaryHostId,
       reuseThreadOptions,
       reuseThreadOptionsLoading,
+      seededReuseEnvironment,
     });
   }
 
@@ -221,23 +256,23 @@ export function resolveRootComposeEffectiveEnvironmentValue({
 
   if (parsedSelection?.type === "reuse") {
     if (parsedSelection.environmentId === null) {
-      return reuseThreadOptionsLoading || reuseThreadOptions.length > 0
-        ? environmentSelectionValue
-        : fallbackValue;
-    }
-
-    if (reuseThreadOptionsLoading) {
       return environmentSelectionValue;
     }
 
-    return reuseThreadOptions.some(
-      (option) => option.environmentId === parsedSelection.environmentId,
-    )
+    return reuseSelectionSurvives({
+      environmentId: parsedSelection.environmentId,
+      reuseThreadOptions,
+      reuseThreadOptionsLoading,
+      seededReuseEnvironment,
+    })
       ? environmentSelectionValue
       : fallbackValue;
   }
 
-  if (selectedProvider !== undefined && primaryHostId !== null) {
+  if (
+    selectedProvider !== undefined &&
+    (selectedProvider.machineProviderId !== null || primaryHostId !== null)
+  ) {
     return environmentSelectionValue;
   }
 

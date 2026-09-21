@@ -4,7 +4,7 @@ import {
   type ThreadEventItemType,
   type ThreadEventType,
 } from "@bb/domain";
-import { sliceUtf16HeadAndTail } from "@bb/domain/utf16";
+import { sliceUtf16HeadAndTail } from "@bb/text-utils";
 import type { DbQueryConnection } from "../connection.js";
 import {
   COMPLETED_EVENT_OUTPUT_RETAINED_HEAD_CHARS,
@@ -16,9 +16,6 @@ import {
   type RetainedEventOutputTarget,
 } from "../retained-event-output.js";
 import { events, retainedEventOutputs } from "../schema.js";
-
-export { RETAINED_EVENT_OUTPUT_TARGETS };
-export type { RetainedEventOutputTarget };
 
 const COMPLETED_EVENT_OUTPUT_TRUNCATION_MARKER =
   "\n\n[... output truncated by retention policy; showing beginning and end ...]\n\n";
@@ -137,9 +134,7 @@ function prepareRetainedOutputData(args: {
   }
 
   const expiresAt = args.createdAt + COMPLETED_EVENT_OUTPUT_RETENTION_MS;
-  const truncation = isJsonObject(existingTruncation)
-    ? existingTruncation
-    : {};
+  const truncation = isJsonObject(existingTruncation) ? existingTruncation : {};
   const preview = truncateOutput(value);
   args.item[args.outputPath] = preview.value;
   truncation[args.outputPath] = {
@@ -429,9 +424,7 @@ function projectedHydratedDataBytes<TRow extends HydratableStoredEventRow>(
       return total + Buffer.byteLength(row.data);
     }
     return (
-      total +
-      hydratedEventDataBaseBytes(row, size.outputPath) +
-      size.valueBytes
+      total + hydratedEventDataBaseBytes(row, size.outputPath) + size.valueBytes
     );
   }, 0);
 }

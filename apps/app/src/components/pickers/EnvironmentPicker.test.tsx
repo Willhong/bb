@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { MemoryRouter } from "react-router-dom";
 import type { Host, ProjectSource } from "@bb/domain";
 import { makeHost } from "@bb/test-helpers/domain-fixtures";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@bb/host-daemon-contract";
@@ -12,8 +14,10 @@ import {
 } from "./EnvironmentPicker";
 
 const checkoutProvider: SystemEnvironmentProvider = {
+  machineProviderId: null,
   id: "project-checkout",
   displayName: "Project checkout",
+  description: "Work in this project checkout.",
   icon: "Laptop",
   logoUrl: null,
   pluginId: "environment-project-checkout",
@@ -30,8 +34,10 @@ const checkoutProvider: SystemEnvironmentProvider = {
 };
 
 const branchProvider: SystemEnvironmentProvider = {
+  machineProviderId: null,
   id: "branchy",
   displayName: "New branch workspace",
+  description: "Prepare a workspace for this thread.",
   icon: "GitBranch",
   logoUrl: null,
   pluginId: "branchy",
@@ -48,8 +54,10 @@ const branchProvider: SystemEnvironmentProvider = {
 };
 
 const sandboxProvider: SystemEnvironmentProvider = {
+  machineProviderId: null,
   id: "container",
   displayName: "Docker container",
+  description: "Prepare a workspace for this thread.",
   icon: "Container",
   logoUrl: null,
   pluginId: "docker-sandbox",
@@ -70,8 +78,10 @@ const sandboxProvider: SystemEnvironmentProvider = {
 };
 
 const optionalInputsProvider: SystemEnvironmentProvider = {
+  machineProviderId: null,
   id: "optional-sandbox",
   displayName: "Optional sandbox",
+  description: "Prepare a workspace for this thread.",
   icon: "Container",
   logoUrl: null,
   pluginId: "optional-sandbox",
@@ -113,7 +123,42 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+function renderPicker(ui: ReactElement) {
+  return render(<MemoryRouter>{ui}</MemoryRouter>);
+}
+
 describe("EnvironmentPickerUI", () => {
+  it("does not expose an ephemeral host through the single-machine fallback", () => {
+    const ephemeralHost: Host = {
+      ...host,
+      name: "Modal sandbox 3f9a",
+      type: "ephemeral",
+      machineProviderId: "modal-sandbox",
+    };
+    renderPicker(
+      <EnvironmentPickerUI
+        value="provider:project-checkout"
+        sources={sources}
+        host={ephemeralHost}
+        isLocal={false}
+        providers={[checkoutProvider]}
+        onSelectProvider={vi.fn()}
+        modal={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
+      button: 0,
+    });
+    expect(screen.queryByText(ephemeralHost.name)).toBeNull();
+    expect(
+      screen.getByRole("option", { name: "No host connected" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("option", { name: /Project checkout/u }),
+    ).toBeNull();
+  });
+
   it.each([false, true])(
     "shows loading instead of empty options (multiple machines: %s)",
     (multipleMachines) => {
@@ -141,7 +186,7 @@ describe("EnvironmentPickerUI", () => {
         trigger.querySelector("[data-environment-loading-placeholder]"),
       ).not.toBeNull();
       expect(trigger.textContent).not.toContain("Loading environments…");
-      fireEvent.pointerDown(trigger, { button: 0 });
+      fireEvent.click(trigger, { button: 0 });
       const status = screen.getByRole("status", {
         name: "Loading environments",
       });
@@ -149,7 +194,7 @@ describe("EnvironmentPickerUI", () => {
         status.querySelectorAll("[data-environment-loading-row]"),
       ).toHaveLength(4);
       expect(screen.queryByText("Not set up for this project")).toBeNull();
-      expect(screen.queryByRole("menuitem")).toBeNull();
+      expect(screen.queryByRole("option")).toBeNull();
 
       rerender(
         <EnvironmentPickerUI {...props} providers={[checkoutProvider]} />,
@@ -164,7 +209,7 @@ describe("EnvironmentPickerUI", () => {
           .getAttribute("aria-busy"),
       ).toBe("false");
       fireEvent.click(
-        screen.getAllByRole("menuitem", { name: /Project checkout/u })[0]!,
+        screen.getAllByRole("option", { name: /Project checkout/u })[0]!,
       );
       expect(props.onSelectProvider).toHaveBeenCalledWith(
         checkoutProvider,
@@ -179,7 +224,7 @@ describe("EnvironmentPickerUI", () => {
       displayName: "Project checkout with a deliberately long provider label",
     };
     const onSelectProvider = vi.fn();
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:project-checkout"
         sources={sources}
@@ -200,9 +245,9 @@ describe("EnvironmentPickerUI", () => {
         ?.classList,
     ).toContain("truncate");
 
-    fireEvent.pointerDown(trigger, { button: 0 });
+    fireEvent.click(trigger, { button: 0 });
     fireEvent.click(
-      screen.getByRole("menuitem", { name: /New branch workspace/u }),
+      screen.getByRole("option", { name: /New branch workspace/u }),
     );
     expect(onSelectProvider).toHaveBeenCalledWith(branchProvider, host.id);
   });
@@ -229,20 +274,19 @@ describe("EnvironmentPickerUI", () => {
         modal={false}
       />,
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
     expect(
-      screen.queryByRole("menuitem", { name: /New branch workspace/u }),
+      screen.queryByRole("option", { name: /New branch workspace/u }),
     ).toBeNull();
     expect(
-      screen.getByRole("menuitem", { name: /Optional sandbox/u }),
+      screen.getByRole("option", { name: /Optional sandbox/u }),
     ).toBeTruthy();
     expect(screen.getByText("Configure credentials")).toBeTruthy();
   });
-
   it("omits a projectless-only provider from a project picker", () => {
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:project-checkout"
         sources={sources}
@@ -254,6 +298,8 @@ describe("EnvironmentPickerUI", () => {
             ...optionalInputsProvider,
             id: "personal-workspace",
             displayName: "Personal workspace",
+            description: "Prepare a workspace for this thread.",
+            icon: "Folder",
             requires: {
               projectCheckout: false,
               gitCheckout: false,
@@ -268,11 +314,11 @@ describe("EnvironmentPickerUI", () => {
       />,
     );
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
     expect(
-      screen.getByRole("menuitem", { name: /Project checkout/u }),
+      screen.getByRole("option", { name: /Project checkout/u }),
     ).toBeTruthy();
     expect(screen.queryByText("Personal workspace")).toBeNull();
   });
@@ -299,11 +345,11 @@ describe("EnvironmentPickerUI", () => {
       />,
     );
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
 
-    const providerItem = screen.getByRole("menuitem", {
+    const providerItem = screen.getByRole("option", {
       name: /Project checkout/u,
     });
     expect(providerItem.getAttribute("aria-disabled")).toBe("true");
@@ -334,19 +380,19 @@ describe("EnvironmentPickerUI", () => {
       />,
     );
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
 
     expect(
-      screen.getByRole("menuitem", { name: /Project checkout/u }),
+      screen.getByRole("option", { name: /Project checkout/u }),
     ).toBeTruthy();
     expect(
-      screen.queryByRole("menuitem", { name: /New branch workspace/u }),
+      screen.queryByRole("option", { name: /New branch workspace/u }),
     ).toBeNull();
     expect(screen.queryByText("No reflink support")).toBeNull();
     expect(
-      screen.getByRole("menuitem", { name: /Optional sandbox/u }),
+      screen.getByRole("option", { name: /Optional sandbox/u }),
     ).toBeTruthy();
   });
 
@@ -373,21 +419,22 @@ describe("EnvironmentPickerUI", () => {
       />,
     );
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
 
-    const branchItem = screen.getByRole("menuitem", {
+    const branchItem = screen.getByRole("option", {
       name: /New branch workspace/u,
     });
-    expect(branchItem.getAttribute("aria-disabled")).toBeNull();
+    expect(branchItem.getAttribute("aria-disabled")).toBe("false");
     expect(screen.getByText("Configure credentials")).toBeTruthy();
   });
 
-  it("keeps a setup-required provider selectable and shows its message", () => {
+  it("selects a setup-required composed provider without navigating away", () => {
     const onSelectProvider = vi.fn();
     const setupRequiredProvider: SystemEnvironmentProvider = {
       ...sandboxProvider,
+      machineProviderId: "modal-sandbox",
       acceptsEmptyInputs: true,
       machineAvailability: {},
       inputs: null,
@@ -396,7 +443,7 @@ describe("EnvironmentPickerUI", () => {
         message: "Add Modal credentials",
       },
     };
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:project-checkout"
         sources={sources}
@@ -408,20 +455,19 @@ describe("EnvironmentPickerUI", () => {
       />,
     );
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
 
-    const providerItem = screen.getByRole("menuitem", {
+    const providerItem = screen.getByRole("option", {
       name: /Docker container/u,
     });
-    expect(providerItem.getAttribute("aria-disabled")).toBeNull();
+    expect(providerItem.getAttribute("href")).toBeNull();
+    expect(screen.queryByText("Set it up in plugin settings")).toBeNull();
+    expect(providerItem.getAttribute("aria-disabled")).toBe("false");
     expect(screen.getByText("Add Modal credentials")).toBeTruthy();
     fireEvent.click(providerItem);
-    expect(onSelectProvider).toHaveBeenCalledWith(
-      setupRequiredProvider,
-      host.id,
-    );
+    expect(onSelectProvider).toHaveBeenCalledWith(setupRequiredProvider, null);
   });
 
   it("disables a provider that declares inputs until its plugin registers a control", () => {
@@ -438,10 +484,10 @@ describe("EnvironmentPickerUI", () => {
       />,
     );
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
-    const disabledItem = screen.getByRole("menuitem", {
+    const disabledItem = screen.getByRole("option", {
       name: /Docker container/u,
     });
     expect(disabledItem.getAttribute("aria-disabled")).toBe("true");
@@ -461,17 +507,17 @@ describe("EnvironmentPickerUI", () => {
         modal={false}
       />,
     );
-    const enabledItem = screen.getByRole("menuitem", {
+    const enabledItem = screen.getByRole("option", {
       name: /Docker container/u,
     });
-    expect(enabledItem.getAttribute("aria-disabled")).toBeNull();
+    expect(enabledItem.getAttribute("aria-disabled")).toBe("false");
     fireEvent.click(enabledItem);
     expect(onSelectProvider).toHaveBeenCalledWith(sandboxProvider, host.id);
   });
 
   it("keeps a provider whose inputs schema requires nothing selectable without a control", () => {
     const onSelectProvider = vi.fn();
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:project-checkout"
         sources={sources}
@@ -483,11 +529,11 @@ describe("EnvironmentPickerUI", () => {
       />,
     );
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
-    const item = screen.getByRole("menuitem", { name: /Optional sandbox/u });
-    expect(item.getAttribute("aria-disabled")).toBeNull();
+    const item = screen.getByRole("option", { name: /Optional sandbox/u });
+    expect(item.getAttribute("aria-disabled")).toBe("false");
     expect(screen.queryByText(PROVIDER_INPUTS_CONTROL_MISSING_REASON)).toBe(
       null,
     );
@@ -496,6 +542,76 @@ describe("EnvironmentPickerUI", () => {
       optionalInputsProvider,
       host.id,
     );
+  });
+
+  it("offers reusing an existing environment alongside the providers", () => {
+    const onSelectReuse = vi.fn();
+    renderPicker(
+      <EnvironmentPickerUI
+        value="provider:project-checkout"
+        sources={sources}
+        host={host}
+        isLocal
+        providers={[checkoutProvider]}
+        selectedProviderHostId={host.id}
+        onSelectProvider={vi.fn()}
+        onSelectReuse={onSelectReuse}
+        modal={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
+      button: 0,
+    });
+    const item = screen.getByRole("option", { name: /Reuse existing/u });
+    expect(item.getAttribute("aria-disabled")).toBe("false");
+    fireEvent.click(item);
+    expect(onSelectReuse).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks the existing-environment row selected while a reuse value is active", () => {
+    renderPicker(
+      <EnvironmentPickerUI
+        value="reuse:env_alpha"
+        sources={sources}
+        host={host}
+        isLocal
+        providers={[checkoutProvider]}
+        selectedProviderHostId={host.id}
+        onSelectProvider={vi.fn()}
+        onSelectReuse={vi.fn()}
+        modal={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
+      button: 0,
+    });
+    expect(
+      screen
+        .getByRole("option", { name: /Reuse existing/u })
+        .getAttribute("aria-current"),
+    ).toBe("true");
+  });
+
+  it("omits the existing-environment row when reuse is not wired up", () => {
+    renderPicker(
+      <EnvironmentPickerUI
+        value="provider:project-checkout"
+        sources={sources}
+        host={host}
+        isLocal
+        providers={[checkoutProvider]}
+        selectedProviderHostId={host.id}
+        onSelectProvider={vi.fn()}
+        modal={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
+      button: 0,
+    });
+    expect(screen.queryByText("Reuse existing")).toBeNull();
   });
 });
 
@@ -519,6 +635,14 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
     status: "disconnected",
     lastSeenAt: Date.now() - 2 * HOUR_MS,
   };
+  const manyHosts = [
+    thisMachine,
+    studio,
+    devVm,
+    makeHost({ ...host, id: "host_build", name: "Build server" }),
+    makeHost({ ...host, id: "host_office", name: "Office Mac Studio" }),
+    makeHost({ ...host, id: "host_travel", name: "Travel laptop" }),
+  ] as const;
 
   const machineSources: readonly ProjectSource[] = [
     { ...sources[0]!, id: "src_local", hostId: thisMachine.id, path: "~/bb" },
@@ -526,52 +650,256 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
   ];
 
   function renderMachineMenu(overrides?: {
+    hosts?: readonly Host[];
     value?: string;
-    selectedProviderHostId?: string;
+    selectedProviderHostId?: string | null;
+    multiMachinePickerEnabled?: boolean;
     providers?: readonly SystemEnvironmentProvider[];
     onSelectProvider?: (
       provider: SystemEnvironmentProvider,
       hostId: string | null,
     ) => void;
+    onSelectHost?: (hostId: string) => void;
   }) {
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value={overrides?.value ?? "provider:project-checkout"}
         sources={machineSources}
         host={thisMachine}
         isLocal
         machines={{
-          hosts: [thisMachine, studio, devVm],
+          hosts: overrides?.hosts ?? [thisMachine, studio, devVm],
           localDaemonHostId: thisMachine.id,
           primaryHostId: thisMachine.id,
         }}
         providers={overrides?.providers ?? [checkoutProvider]}
         selectedProviderHostId={
-          overrides?.selectedProviderHostId ?? thisMachine.id
+          overrides?.selectedProviderHostId === undefined
+            ? thisMachine.id
+            : overrides.selectedProviderHostId
         }
+        multiMachinePickerEnabled={overrides?.multiMachinePickerEnabled ?? true}
         onSelectProvider={overrides?.onSelectProvider ?? vi.fn()}
+        onSelectHost={overrides?.onSelectHost}
         modal={false}
       />,
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
   }
 
-  it("groups options per machine and selects the checkout with that machine's host id", () => {
-    const onSelectProvider = vi.fn();
-    renderMachineMenu({ onSelectProvider });
+  it("shows search starting at three machines", () => {
+    const result = render(
+      <EnvironmentPickerUI
+        value="provider:project-checkout"
+        sources={machineSources}
+        host={thisMachine}
+        isLocal
+        machines={{
+          hosts: manyHosts.slice(0, 2),
+          localDaemonHostId: thisMachine.id,
+          primaryHostId: thisMachine.id,
+        }}
+        providers={[checkoutProvider]}
+        selectedProviderHostId={thisMachine.id}
+        multiMachinePickerEnabled
+        onSelectProvider={vi.fn()}
+        modal={false}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }));
+    expect(
+      screen.queryByRole("combobox", { name: "Search machines" }),
+    ).toBeNull();
 
+    result.rerender(
+      <EnvironmentPickerUI
+        value="provider:project-checkout"
+        sources={machineSources}
+        host={thisMachine}
+        isLocal
+        machines={{
+          hosts: manyHosts.slice(0, 3),
+          localDaemonHostId: thisMachine.id,
+          primaryHostId: thisMachine.id,
+        }}
+        providers={[checkoutProvider]}
+        selectedProviderHostId={thisMachine.id}
+        multiMachinePickerEnabled
+        onSelectProvider={vi.fn()}
+        modal={false}
+      />,
+    );
+    expect(
+      screen.getByRole("combobox", { name: "Search machines" }),
+    ).toBeTruthy();
+  });
+
+  it("uses the grouped environment menu when the experiment is off", () => {
+    renderMachineMenu({
+      hosts: manyHosts.slice(0, 3),
+      multiMachinePickerEnabled: false,
+    });
+
+    expect(
+      screen.queryByRole("combobox", { name: "Search machines" }),
+    ).toBeNull();
+    expect(screen.queryByText("Machines")).toBeNull();
+    expect(screen.getByText("this machine")).toBeTruthy();
+    expect(
+      screen
+        .getByText("MacBook Pro")
+        .parentElement?.querySelector('[data-icon="Laptop"]'),
+    ).toBeNull();
+    expect(
+      screen.getAllByRole("option", { name: /Project checkout/u }),
+    ).toHaveLength(3);
+  });
+
+  it("fuzzy-searches machine names and host ids while keeping hostless targets visible", () => {
+    const modalComposition: SystemEnvironmentProvider = {
+      ...sandboxProvider,
+      id: "modal-composition",
+      displayName: "Modal Sandbox",
+      machineProviderId: "modal-sandbox",
+    };
+    renderMachineMenu({
+      hosts: manyHosts,
+      providers: [checkoutProvider, modalComposition],
+    });
+    const search = screen.getByRole("combobox", { name: "Search machines" });
+
+    fireEvent.change(search, { target: { value: "OMS" } });
+    expect(screen.queryByRole("option", { name: "Mac Studio" })).toBeNull();
+    expect(
+      screen.getByRole("option", { name: "Office Mac Studio" }),
+    ).toBeTruthy();
+    expect(screen.getByText("On MacBook Pro")).toBeTruthy();
+    expect(
+      screen.getByRole("option", { name: /Project checkout/u }),
+    ).toBeTruthy();
+    expect(screen.queryByText("Other environments")).toBeNull();
+    expect(screen.getByRole("option", { name: /Modal Sandbox/u })).toBeTruthy();
+
+    fireEvent.change(search, { target: { value: "host_travel" } });
+    expect(screen.getByRole("option", { name: "Travel laptop" })).toBeTruthy();
+
+    fireEvent.change(search, { target: { value: "missing" } });
+    expect(screen.getByText("No machines found")).toBeTruthy();
+    expect(screen.getByRole("option", { name: /Modal Sandbox/u })).toBeTruthy();
+  });
+
+  it("shows one active machine's environments and caps the machine section", () => {
+    const onSelectProvider = vi.fn();
+    const onSelectHost = vi.fn();
+    renderMachineMenu({ onSelectProvider, onSelectHost });
+
+    expect(screen.getByText("Machines")).toBeTruthy();
     expect(screen.getByText("MacBook Pro")).toBeTruthy();
     expect(screen.getByText("this machine")).toBeTruthy();
     expect(screen.getByText("Mac Studio")).toBeTruthy();
+    expect(screen.getByText("On MacBook Pro")).toBeTruthy();
+    const machineList = document.querySelector<HTMLElement>(
+      "[data-machine-picker-list]",
+    );
+    expect(machineList?.className).toContain("max-h-48");
+    expect(machineList?.className).toContain("overflow-y-auto");
+    const activeMachine = screen.getByRole("option", {
+      name: "MacBook Pro",
+    });
+    expect(activeMachine.getAttribute("aria-current")).toBe("true");
+    expect(
+      activeMachine.querySelector('[data-icon="Check"]')?.classList,
+    ).toContain("opacity-100");
 
-    const checkoutItems = screen.getAllByRole("menuitem", {
+    const checkoutItems = screen.getAllByRole("option", {
       name: /Project checkout/u,
     });
-    expect(checkoutItems).toHaveLength(3);
-    fireEvent.click(checkoutItems[1]!);
+    expect(checkoutItems).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("option", { name: "Mac Studio" }));
+    expect(onSelectHost).toHaveBeenCalledWith(studio.id);
+    expect(onSelectProvider).not.toHaveBeenCalled();
+    const previewedMachine = screen.getByRole("option", {
+      name: "Mac Studio",
+    });
+    expect(previewedMachine.getAttribute("aria-current")).toBe("true");
+    expect(
+      previewedMachine.querySelector('[data-icon="Check"]')?.classList,
+    ).toContain("opacity-100");
+    expect(activeMachine.getAttribute("aria-current")).toBeNull();
+    expect(
+      activeMachine.querySelector('[data-icon="Check"]')?.classList,
+    ).toContain("opacity-0");
+    expect(screen.getByText("On Mac Studio")).toBeTruthy();
+    fireEvent.click(screen.getByRole("option", { name: /Project checkout/u }));
     expect(onSelectProvider).toHaveBeenCalledWith(checkoutProvider, studio.id);
+  });
+
+  it("shows a selected hostless target without a machine environment section", () => {
+    const modalComposition: SystemEnvironmentProvider = {
+      ...sandboxProvider,
+      id: "modal-composition",
+      displayName: "Modal Sandbox",
+      machineProviderId: "modal-sandbox",
+    };
+    renderMachineMenu({
+      value: "provider:modal-composition",
+      selectedProviderHostId: null,
+      providers: [checkoutProvider, modalComposition],
+    });
+
+    const modalTarget = screen.getByRole("option", { name: /Modal Sandbox/u });
+    const machineTarget = screen.getByRole("option", { name: "MacBook Pro" });
+    const machineContent = machineTarget.querySelector(
+      "[data-machine-target-content]",
+    );
+    const modalContent = modalTarget.querySelector(
+      "[data-machine-target-content]",
+    );
+    expect(machineContent).not.toBeNull();
+    expect(modalContent).not.toBeNull();
+    for (const content of [machineContent, modalContent]) {
+      expect(content?.classList).toContain(
+        "grid-cols-[0.375rem_0.875rem_minmax(0,1fr)]",
+      );
+      expect(content?.classList).toContain(
+        "max-md:pointer-coarse:grid-cols-[0.5rem_1.25rem_minmax(0,1fr)]",
+      );
+      expect(content?.children[0]?.classList).toContain("size-1.5");
+      expect(content?.children[0]?.classList).toContain(
+        "max-md:pointer-coarse:size-2",
+      );
+      expect(content?.children[1]?.classList).toContain("size-3.5");
+      expect(content?.children[1]?.classList).toContain(
+        "max-md:pointer-coarse:size-5",
+      );
+      expect(
+        content?.children[1]?.getAttribute("data-machine-target-icon"),
+      ).toBe("");
+      expect(content?.children[1]?.firstElementChild?.classList).toContain(
+        "!size-full",
+      );
+    }
+    expect(modalTarget.querySelector("[data-machine-status-spacer]")).toBe(
+      modalContent?.children[0],
+    );
+    expect(modalTarget.getAttribute("aria-current")).toBe("true");
+    expect(
+      modalTarget.querySelector('[data-icon="Check"]')?.classList,
+    ).toContain("opacity-100");
+    expect(screen.queryByText(/On MacBook Pro/u)).toBeNull();
+    expect(
+      screen.queryByRole("option", { name: /Project checkout/u }),
+    ).toBeNull();
+
+    fireEvent.click(screen.getByRole("option", { name: "Mac Studio" }));
+    expect(modalTarget.getAttribute("aria-current")).toBeNull();
+    expect(
+      modalTarget.querySelector('[data-icon="Check"]')?.classList,
+    ).toContain("opacity-0");
+    expect(screen.getByText("On Mac Studio")).toBeTruthy();
   });
 
   it("does not show project checkout paths in machine headers", () => {
@@ -581,19 +909,61 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
     expect(screen.queryByText("~/code/bb")).toBeNull();
   });
 
-  it("offers a host-scoped provider once per machine", () => {
+  it("selects a host-scoped provider for the previewed machine", () => {
     const onSelectProvider = vi.fn();
     renderMachineMenu({
       providers: [branchProvider],
       onSelectProvider,
     });
 
-    const providerItems = screen.getAllByRole("menuitem", {
+    fireEvent.click(screen.getByRole("option", { name: "Mac Studio" }));
+    const providerItem = screen.getByRole("option", {
       name: /New branch workspace/u,
     });
-    expect(providerItems).toHaveLength(3);
-    fireEvent.click(providerItems[1]!);
+    fireEvent.click(providerItem);
     expect(onSelectProvider).toHaveBeenCalledWith(branchProvider, studio.id);
+  });
+
+  it("hides existing ephemeral hosts and keeps their composition entry", () => {
+    const ephemeralHost: Host = {
+      ...studio,
+      id: "host_sandbox",
+      name: "Modal sandbox 3f9a",
+      type: "ephemeral",
+      machineProviderId: "modal-sandbox",
+    };
+    const modalComposition: SystemEnvironmentProvider = {
+      ...sandboxProvider,
+      id: "modal-composition",
+      displayName: "Modal Sandbox",
+      machineProviderId: "modal-sandbox",
+    };
+    renderPicker(
+      <EnvironmentPickerUI
+        value="provider:project-checkout"
+        sources={machineSources}
+        host={thisMachine}
+        isLocal
+        machines={{
+          hosts: [thisMachine, studio, ephemeralHost],
+          localDaemonHostId: thisMachine.id,
+          primaryHostId: thisMachine.id,
+        }}
+        providers={[checkoutProvider, modalComposition]}
+        selectedProviderHostId={thisMachine.id}
+        onSelectProvider={vi.fn()}
+        modal={false}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
+      button: 0,
+    });
+
+    expect(screen.queryByText(ephemeralHost.name)).toBeNull();
+    expect(screen.getByRole("option", { name: /Modal Sandbox/u })).toBeTruthy();
+    expect(
+      screen.getAllByRole("option", { name: /Project checkout/u }),
+    ).toHaveLength(2);
   });
 
   it("hides a provider on the machine that reports it unavailable", () => {
@@ -639,27 +1009,28 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
         modal={false}
       />,
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
 
-    const checkoutItems = screen.getAllByRole("menuitem", {
+    const checkoutItems = screen.getAllByRole("option", {
       name: /Project checkout/u,
     });
     expect(checkoutItems).toHaveLength(1);
-    expect(checkoutItems[0]!.getAttribute("aria-disabled")).toBeNull();
+    expect(checkoutItems[0]!.getAttribute("aria-disabled")).toBe("false");
     expect(screen.queryByText("Checkout missing on Mac Studio")).toBeNull();
   });
 
   it("disables an offline machine's options and shows when it was last seen", () => {
     renderMachineMenu();
 
+    fireEvent.click(screen.getByRole("option", { name: "dev-vm" }));
     expect(screen.getByText(/last seen 2h ago/u)).toBeTruthy();
-    const checkoutItems = screen.getAllByRole("menuitem", {
+    const checkoutItems = screen.getAllByRole("option", {
       name: /Project checkout/u,
     });
-    expect(checkoutItems).toHaveLength(3);
-    expect(checkoutItems[2]!.getAttribute("aria-disabled")).toBe("true");
+    expect(checkoutItems).toHaveLength(1);
+    expect(checkoutItems[0]!.getAttribute("aria-disabled")).toBe("true");
   });
 
   it("shows protocol versions instead of plain offline metadata for stale daemons", () => {
@@ -667,7 +1038,7 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
       ...devVm,
       lastRejectedProtocolVersion: HOST_DAEMON_PROTOCOL_VERSION - 1,
     };
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:project-checkout"
         sources={machineSources}
@@ -681,7 +1052,7 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
         modal={false}
       />,
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
 
@@ -695,7 +1066,7 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
 
   it("disables options on an offline machine that has a source", () => {
     const offlineStudio: Host = { ...studio, status: "disconnected" };
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:project-checkout"
         sources={machineSources}
@@ -712,22 +1083,57 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
         modal={false}
       />,
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
 
-    const checkoutItems = screen.getAllByRole("menuitem", {
+    const checkoutItems = screen.getAllByRole("option", {
       name: /Project checkout/u,
     });
     expect(checkoutItems).toHaveLength(2);
-    expect(checkoutItems[0]!.getAttribute("aria-disabled")).toBeNull();
+    expect(checkoutItems[0]!.getAttribute("aria-disabled")).toBe("false");
     expect(checkoutItems[1]!.getAttribute("aria-disabled")).toBe("true");
   });
+
+  it.each(["removing", "resuming"] as const)(
+    "disables options on a machine that is %s",
+    (phase) => {
+      const unavailableStudio: Host = {
+        ...studio,
+        lifecycle: { ...studio.lifecycle, phase },
+      };
+      renderPicker(
+        <EnvironmentPickerUI
+          value="provider:project-checkout"
+          sources={machineSources}
+          host={thisMachine}
+          isLocal
+          machines={{
+            hosts: [thisMachine, unavailableStudio],
+            localDaemonHostId: thisMachine.id,
+            primaryHostId: thisMachine.id,
+          }}
+          providers={[checkoutProvider]}
+          selectedProviderHostId={thisMachine.id}
+          onSelectProvider={vi.fn()}
+          modal={false}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
+        button: 0,
+      });
+
+      const checkoutItems = screen.getAllByRole("option", {
+        name: /Project checkout/u,
+      });
+      expect(checkoutItems[1]!.getAttribute("aria-disabled")).toBe("true");
+    },
+  );
 
   it("offers guided setup for a connected machine without a source", () => {
     const onRequestMachineSetup = vi.fn();
     const onlineVm: Host = { ...devVm, status: "connected", lastSeenAt: null };
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:project-checkout"
         sources={machineSources}
@@ -739,17 +1145,17 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
           primaryHostId: thisMachine.id,
         }}
         onRequestMachineSetup={onRequestMachineSetup}
+        multiMachinePickerEnabled
         modal={false}
       />,
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
 
     expect(screen.queryByText("Not set up for this project")).toBeNull();
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: /Set up on dev-vm…/u }),
-    );
+    fireEvent.click(screen.getByRole("option", { name: "dev-vm" }));
+    fireEvent.click(screen.getByRole("option", { name: /Set up on dev-vm…/u }));
     expect(onRequestMachineSetup).toHaveBeenCalledWith(onlineVm);
   });
 
@@ -761,12 +1167,14 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
       ...checkoutProvider,
       id: "host-sandbox",
       displayName: "Host sandbox",
+      description: "Prepare a workspace for this thread.",
+      icon: "Folder",
       requires: {
         ...checkoutProvider.requires,
         projectCheckout: false,
       },
     };
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:project-checkout"
         sources={machineSources}
@@ -784,21 +1192,19 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
         modal={false}
       />,
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
 
     expect(
-      screen.getAllByRole("menuitem", { name: /Host sandbox/u }),
+      screen.getAllByRole("option", { name: /Host sandbox/u }),
     ).toHaveLength(2);
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: /Set up on dev-vm…/u }),
-    );
+    fireEvent.click(screen.getByRole("option", { name: /Set up on dev-vm…/u }));
     expect(onRequestMachineSetup).toHaveBeenCalledWith(onlineVm);
   });
 
   it("keeps the disabled not-set-up row for an offline machine", () => {
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:project-checkout"
         sources={machineSources}
@@ -810,15 +1216,17 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
           primaryHostId: thisMachine.id,
         }}
         onRequestMachineSetup={vi.fn()}
+        multiMachinePickerEnabled
         modal={false}
       />,
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
 
+    fireEvent.click(screen.getByRole("option", { name: "dev-vm" }));
     expect(screen.queryByText(/Set up on dev-vm/u)).toBeNull();
-    const placeholder = screen.getByRole("menuitem", {
+    const placeholder = screen.getByRole("option", {
       name: "Not set up for this project",
     });
     expect(placeholder.getAttribute("aria-disabled")).toBe("true");
@@ -841,7 +1249,7 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
 
   it("lists every eligible provider row under each machine", () => {
     const onSelectProvider = vi.fn();
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:project-checkout"
         sources={machineSources}
@@ -859,21 +1267,21 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
         modal={false}
       />,
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
 
-    const providerItems = screen.getAllByRole("menuitem", {
+    const providerItems = screen.getAllByRole("option", {
       name: /New branch workspace/u,
     });
     expect(providerItems).toHaveLength(2);
     fireEvent.click(providerItems[1]!);
     expect(onSelectProvider).toHaveBeenCalledWith(branchProvider, studio.id);
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
-    const sandboxItems = screen.getAllByRole("menuitem", {
+    const sandboxItems = screen.getAllByRole("option", {
       name: /Docker container/u,
     });
     expect(sandboxItems).toHaveLength(2);
@@ -885,7 +1293,7 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
   });
 
   it("names the selected machine and provider display name in the trigger label", () => {
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:branchy"
         sources={machineSources}
@@ -908,7 +1316,7 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
 
   it("reports an offline machine ahead of the provider it was selected on", () => {
     const offlineStudio: Host = { ...studio, status: "disconnected" };
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:branchy"
         sources={machineSources}
@@ -932,7 +1340,7 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
   });
 
   it("keeps the single-host menu when only one host exists", () => {
-    render(
+    renderPicker(
       <EnvironmentPickerUI
         value="provider:project-checkout"
         sources={machineSources}
@@ -949,12 +1357,12 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
         modal={false}
       />,
     );
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Environment" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Environment" }), {
       button: 0,
     });
 
     expect(
-      screen.getByRole("menuitem", { name: /Project checkout/u }),
+      screen.getByRole("option", { name: /Project checkout/u }),
     ).toBeTruthy();
     expect(screen.queryByText("MacBook Pro")).toBeNull();
   });

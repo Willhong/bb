@@ -3,6 +3,10 @@ import {
   desktopBrowserResultSchemas,
 } from "./desktop-browser.js";
 import {
+  serverMoveCommandSchemas,
+  serverMoveResultSchemas,
+} from "./server-move.js";
+import {
   availableModelSchema,
   discoveredWorkspacePropertiesSchema,
   dynamicToolSchema,
@@ -30,6 +34,7 @@ import {
   FILE_LIST_EXCLUDE_NAMES_MAX,
   FILE_LIST_LIMIT_MAX,
   FILE_LIST_QUERY_MAX_LENGTH,
+  flattenPromptInputGroups,
 } from "@bb/domain";
 import { z } from "zod";
 import {
@@ -190,9 +195,19 @@ export const hostDaemonContributedEnvEntrySchema = z
       z.string(),
       z.object({ serverPath: z.string().startsWith("/") }).strict(),
     ]),
-    source: z.object({ plugin: z.string().min(1) }).strict(),
+    source: z.union([
+      z.object({ plugin: z.string().min(1) }).strict(),
+      z
+        .object({
+          core: z.enum([
+            "machine-git",
+            "machine-environment",
+            "project-environment",
+          ]),
+        })
+        .strict(),
+    ]),
     reason: z.string(),
-    secret: z.boolean(),
   })
   .strict();
 export type HostDaemonContributedEnvEntry = z.infer<
@@ -246,16 +261,6 @@ type HostDaemonPromptInput = z.infer<typeof promptInputSchema>;
 interface GroupedPromptInputCommand {
   input: HostDaemonPromptInput[];
   inputGroups?: HostDaemonPromptInput[][];
-}
-
-function flattenPromptInputGroups(
-  inputGroups: readonly HostDaemonPromptInput[][],
-): HostDaemonPromptInput[] {
-  return inputGroups.flatMap((inputGroup, index) =>
-    index === 0
-      ? inputGroup
-      : [{ type: "text" as const, text: "\n\n", mentions: [] }, ...inputGroup],
-  );
 }
 
 function refineGroupedInputMatchesFlatInput(
@@ -360,6 +365,10 @@ export const threadStopCommandSchema = hostDaemonThreadTargetSchema
     intent: threadStopIntentSchema,
   })
   .strict();
+
+const threadStorageDeleteCommandSchema = hostDaemonThreadTargetSchema.extend({
+  type: z.literal("thread.storage.delete"),
+});
 
 const threadGoalClearCommandSchema = hostDaemonThreadTargetSchema
   .extend({
@@ -576,6 +585,8 @@ const projectCloneDefaultPathCommandSchema = z
 const projectCloneCommandSchema = z
   .object({
     type: z.literal("project.clone"),
+    operationId: z.string().min(1),
+    contributedEnv: z.array(hostDaemonContributedEnvEntrySchema).default([]),
     remoteUrl: z.string().min(1),
     projectSlug: z.string().min(1),
     targetPath: z.string().min(1).optional(),
@@ -600,7 +611,8 @@ const MAX_NODE_TIMER_DELAY_MS = 2_147_483_647;
 const environmentHookRunCommandSchema = z
   .object({
     type: z.literal("environment.hook.run"),
-    resumeOnly: z.boolean(),
+    contributedEnv: z.array(hostDaemonContributedEnvEntrySchema).default([]),
+    resumeOnly: z.boolean().default(false),
     operationId: z.string().min(1),
     path: z.string().min(1),
     kind: z.enum(["setup", "teardown"]),
@@ -618,6 +630,7 @@ const environmentHookCancelCommandSchema = z
 const pluginHostCallCommandSchema = z
   .object({
     type: z.literal("plugin.host.call"),
+    contributedEnv: z.array(hostDaemonContributedEnvEntrySchema).default([]),
     pluginId: z.string().min(1),
     generation: z.string().min(1),
     artifact: pluginHostArtifactSchema,
@@ -890,6 +903,7 @@ const unmanagedEnvironmentProvisionCommandSchema =
     .extend({
       path: z.string().min(1),
       setupScriptTimeoutMs: z.number().int().positive().nullable(),
+      contributedEnv: z.array(hostDaemonContributedEnvEntrySchema),
     })
     .strict();
 
@@ -1202,9 +1216,12 @@ const threadStartResultSchema = z.object({
 const turnSubmitResultSchema = z.object({
   appliedAs: z.enum(["new-turn", "steer"]),
 });
+export const COMPETING_TURN_ERROR_CODE = "competing_turn" as const;
+
 const threadStopResultSchema = z
   .object({
     providerCheckpointId: z.string().min(1).nullable(),
+    activeTurnRetained: z.boolean().optional(),
   })
   .strict();
 const emptyCommandResultSchema = z.object({});
@@ -1439,6 +1456,15 @@ export const hostDaemonCommandRegistry = {
   "thread.stop": defineHostDaemonCommandDescriptor({
     type: "thread.stop",
     schema: threadStopCommandSchema,
+    resultSchema: threadStopResultSchema,
+    transport: "settled",
+    retryable: false,
+    flushEventsBeforeResult: true,
+    envLane: null,
+  }),
+  "thread.storage.delete": defineHostDaemonCommandDescriptor({
+    type: "thread.storage.delete",
+    schema: threadStorageDeleteCommandSchema,
     resultSchema: threadStopResultSchema,
     transport: "settled",
     retryable: false,
@@ -1885,6 +1911,60 @@ export const hostDaemonCommandRegistry = {
     resultSchema: workspacePullRequestResultSchema,
     transport: "onlineRpc",
     retryable: true,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
+  "server_move.inspect": defineHostDaemonCommandDescriptor({
+    type: "server_move.inspect",
+    schema: serverMoveCommandSchemas["server_move.inspect"],
+    resultSchema: serverMoveResultSchemas["server_move.inspect"],
+    transport: "onlineRpc",
+    retryable: true,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
+  "server_move.probe": defineHostDaemonCommandDescriptor({
+    type: "server_move.probe",
+    schema: serverMoveCommandSchemas["server_move.probe"],
+    resultSchema: serverMoveResultSchemas["server_move.probe"],
+    transport: "onlineRpc",
+    retryable: true,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
+  "server_move.prepare": defineHostDaemonCommandDescriptor({
+    type: "server_move.prepare",
+    schema: serverMoveCommandSchemas["server_move.prepare"],
+    resultSchema: serverMoveResultSchemas["server_move.prepare"],
+    transport: "onlineRpc",
+    retryable: false,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
+  "server_move.activate": defineHostDaemonCommandDescriptor({
+    type: "server_move.activate",
+    schema: serverMoveCommandSchemas["server_move.activate"],
+    resultSchema: serverMoveResultSchemas["server_move.activate"],
+    transport: "onlineRpc",
+    retryable: false,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
+  "server_move.abort": defineHostDaemonCommandDescriptor({
+    type: "server_move.abort",
+    schema: serverMoveCommandSchemas["server_move.abort"],
+    resultSchema: serverMoveResultSchemas["server_move.abort"],
+    transport: "onlineRpc",
+    retryable: false,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
+  "server_move.delete_old_copy": defineHostDaemonCommandDescriptor({
+    type: "server_move.delete_old_copy",
+    schema: serverMoveCommandSchemas["server_move.delete_old_copy"],
+    resultSchema: serverMoveResultSchemas["server_move.delete_old_copy"],
+    transport: "onlineRpc",
+    retryable: false,
     flushEventsBeforeResult: false,
     envLane: null,
   }),

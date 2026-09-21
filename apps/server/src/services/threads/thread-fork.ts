@@ -85,6 +85,9 @@ export async function createThreadForkFromRequest(
       ...(request.originPluginId === undefined
         ? {}
         : { originPluginId: request.originPluginId }),
+      ...(request.pluginMetadata === undefined
+        ? {}
+        : { pluginMetadata: request.pluginMetadata }),
       originKind: "fork",
       permissionMode:
         request.permissionMode ??
@@ -101,6 +104,7 @@ export async function createThreadForkFromRequest(
       ...(request.sourceSeqEnd === undefined
         ? {}
         : { sourceSeqEnd: request.sourceSeqEnd }),
+      lifecycleOwnerThreadId: request.lifecycleOwnerThreadId,
       sourceThreadId: sourceThread.id,
       startedOnBehalfOf: isSeedOnlyIdleFork
         ? { initiator: "agent", senderThreadId: sourceThread.id }

@@ -32,6 +32,10 @@ import {
   QueuedEditorTypeaheadLayoutContext,
   type QueuedEditorTypeaheadLayout,
 } from "@/components/promptbox/queued-editor-typeahead-layout";
+import {
+  resetPluginLogoStoreForTest,
+  setPluginLogoUrls,
+} from "@/lib/plugin-logos";
 
 const bottomAnchorMocks = vi.hoisted(() => ({
   scrollElement: null as HTMLElement | null,
@@ -158,12 +162,48 @@ function renderQueuedMessagesWithOptions(
 
 afterEach(() => {
   cleanup();
+  resetPluginLogoStoreForTest();
   bottomAnchorMocks.scrollElement = null;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe("QueuedMessagesList", () => {
+  it.each([
+    { kind: "host-offline", hostName: "M4" },
+    { kind: "provisioning" },
+    { kind: "interaction" },
+    { kind: "turn-starting" },
+    { kind: "stopping" },
+  ] as const)("offers Send now for a failed $kind row", (waitingOn) => {
+    const onSend = vi.fn();
+    const { getByRole, getByText } = render(
+      <QueuedMessagesList
+        queuedMessages={[
+          makeThreadQueuedMessage({
+            id: "failed-row",
+            waitingOn,
+            failureReason: "Provider unavailable",
+          }),
+        ]}
+        sendDisabled={false}
+        actionDisabled={false}
+        processingMessageId={null}
+        processingAction={null}
+        onSend={onSend}
+        onReorder={noop}
+        onSetGroupBoundary={noop}
+        onEdit={noop}
+        onDelete={noop}
+      />,
+    );
+    expect(getByText("Provider unavailable")).toBeTruthy();
+    const button = getByRole("button", { name: "Send queued message 1 now" });
+    expect(button.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(button);
+    expect(onSend).toHaveBeenCalledWith("failed-row");
+  });
+
   it("labels non-user senders and refreshes their names from the thread cache", async () => {
     const queryClient = new QueryClient();
     const messages = [
@@ -443,7 +483,7 @@ describe("QueuedMessagesList", () => {
     ).toBe("collapsed");
   });
 
-  it("uses labeled hover-revealed icon actions on desktop and an overflow menu on mobile widths", async () => {
+  it("uses labeled inline icon actions with tooltips", async () => {
     const { container, findByRole, getByRole, queryByRole } =
       renderQueuedMessages([
         makeQueuedMessage("q_one", "First queued message"),
@@ -486,6 +526,98 @@ describe("QueuedMessagesList", () => {
         expect(queryByRole("tooltip")).toBeNull();
       });
     }
+  });
+
+  it("limits collapsed action hiding to compact widths", () => {
+    const { container } = renderQueuedMessages([
+      makeQueuedMessage("q_one", "First queued message"),
+    ]);
+    const actions = container.querySelector("[data-queued-message-actions]");
+
+    expect(actions?.classList.contains("max-md:hidden")).toBe(true);
+    expect(actions?.classList.contains("hidden")).toBe(false);
+    expect(actions?.classList.contains("md:flex")).toBe(true);
+  });
+
+  it("expands one row's actions inline and resets them outside the queue", () => {
+    const { getByRole, getByText, queryByRole } = renderQueuedMessages([
+      makeQueuedMessage("q_one", "First queued message"),
+      makeQueuedMessage("q_two", "Second queued message"),
+    ]);
+    const firstActions = getByRole("button", {
+      name: "Queued message 1 actions",
+    });
+    const secondActions = getByRole("button", {
+      name: "Queued message 2 actions",
+    });
+
+    fireEvent.click(firstActions);
+    expect(firstActions.getAttribute("aria-expanded")).toBe("true");
+    expect(queryByRole("menu")).toBeNull();
+    expect(queryByRole("dialog")).toBeNull();
+
+    fireEvent.pointerDown(getByText("Second queued message"));
+    expect(firstActions.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(secondActions);
+    expect(firstActions.getAttribute("aria-expanded")).toBe("false");
+    expect(secondActions.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.pointerDown(document.body);
+    expect(secondActions.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(firstActions);
+    fireEvent.click(getByRole("button", { name: "Collapse queued messages" }));
+    fireEvent.click(getByRole("button", { name: "Show queued messages" }));
+    expect(firstActions.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it.each([
+    { sendDisabled: false, expectedAction: "Send queued message 1 now" },
+    { sendDisabled: true, expectedAction: "Edit queued message 1" },
+  ])(
+    "focuses $expectedAction after keyboard expansion",
+    ({ sendDisabled, expectedAction }) => {
+      const { getByRole } = render(
+        <QueuedMessagesList
+          queuedMessages={[makeQueuedMessage("q_one", "First queued message")]}
+          sendDisabled={sendDisabled}
+          actionDisabled={false}
+          processingMessageId={null}
+          processingAction={null}
+          onSend={noop}
+          onReorder={noop}
+          onSetGroupBoundary={noop}
+          onEdit={noop}
+          onDelete={noop}
+        />,
+      );
+      const trigger = getByRole("button", {
+        name: "Queued message 1 actions",
+      });
+
+      focusWithKeyboard(trigger);
+      fireEvent.click(trigger, { detail: 0 });
+
+      expect(document.activeElement).toBe(
+        getByRole("button", { name: expectedAction }),
+      );
+    },
+  );
+
+  it("does not move focus into actions after pointer expansion", () => {
+    const { getByRole } = renderQueuedMessages([
+      makeQueuedMessage("q_one", "First queued message"),
+    ]);
+    const reorderButton = getByRole("button", {
+      name: "Reorder queued message 1",
+    });
+    focusWithKeyboard(reorderButton);
+
+    fireEvent.click(getByRole("button", { name: "Queued message 1 actions" }), {
+      detail: 1,
+    });
+
+    expect(document.activeElement).toBe(reorderButton);
   });
 
   it("replaces the edited row with the real inline composer", () => {
@@ -1673,6 +1805,40 @@ describe("QueuedMessagesList", () => {
 });
 
 describe("queued row affordances", () => {
+  it("uses the holding plugin's registered icon without a generic fallback", () => {
+    setPluginLogoUrls(
+      new Map([
+        [
+          "drafts",
+          {
+            displayName: "Drafts",
+            icon: "EditFile",
+            compactIconUrl: null,
+            logoUrl: null,
+            logoDarkUrl: null,
+            icons: new Map(),
+          },
+        ],
+      ]),
+    );
+    const { container, getByText } = renderQueuedMessages([
+      {
+        ...makeQueuedMessage("q_draft", "Draft message"),
+        waitingOn: {
+          kind: "plugin",
+          pluginId: "drafts",
+          reason: "Draft",
+        },
+      },
+    ]);
+
+    const waitLine = getByText("Held by Drafts · Draft").closest(
+      "[data-queued-message-wait]",
+    );
+    expect(waitLine?.querySelector("[data-icon=EditFile]")).not.toBeNull();
+    expect(container.querySelector("[data-icon=Limitation]")).toBeNull();
+  });
+
   it("explains the waits a reader cannot infer, and stays quiet otherwise", () => {
     const { getByText, queryByText, container } = renderQueuedMessages([
       {
@@ -1756,7 +1922,7 @@ describe("queued row affordances", () => {
         waitingOn: { kind: "host-offline", hostName: "M4" },
       },
     ]);
-    expect(getByText("Waiting for M4 to reconnect")).toBeDefined();
+    expect(getByText("Waiting for M4 to be ready")).toBeDefined();
     expect(queryByLabelText("Send queued message 1 now")).toBeNull();
   });
 
@@ -1801,6 +1967,29 @@ describe("queued row affordances", () => {
       },
     ]);
     expect(getByText(/^Retry failed turn from /u)).toBeDefined();
+    expect(
+      getByText(/^Rate limited · retrying at .* · attempt 2$/u),
+    ).toBeDefined();
+  });
+
+  it("names no sender on a retry row even though the server calls it system", () => {
+    const { container, getByText } = renderQueuedMessages([
+      makeThreadQueuedMessage({
+        id: "q_retry_sender",
+        initiator: "system",
+        payload: {
+          kind: "retry",
+          retryOfTurnRequestId: "req_1",
+          attempt: 2,
+          reason: "Rate limited",
+        },
+        waitingOn: { kind: "time" },
+        sendAt: 0,
+      }),
+    ]);
+    expect(
+      container.querySelector("[data-queued-message-sender]"),
+    ).toBeNull();
     expect(
       getByText(/^Rate limited · retrying at .* · attempt 2$/u),
     ).toBeDefined();

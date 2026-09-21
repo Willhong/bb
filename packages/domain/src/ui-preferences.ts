@@ -22,6 +22,9 @@ export type SidebarChronologicalSort = z.infer<
   typeof sidebarChronologicalSortSchema
 >;
 
+const sidebarThreadGroupingSchema = z.union([z.literal("auto"), z.boolean()]);
+export type SidebarThreadGrouping = z.infer<typeof sidebarThreadGroupingSchema>;
+
 const collapsibleSidebarSectionIdSchema = z.enum(["pinned", "threads"]);
 
 const uiPreferenceStringSchema = z
@@ -31,20 +34,28 @@ const uiPreferenceStringSchema = z
 const uiPreferenceStringListSchema = z
   .array(uiPreferenceStringSchema)
   .max(UI_PREFERENCE_LIST_MAX_LENGTH);
+const sidebarHiddenGroupsSchema = z
+  .array(uiPreferenceStringSchema.regex(/^(project|section|machine):\S+$/))
+  .max(UI_PREFERENCE_LIST_MAX_LENGTH)
+  .transform((value) => [...new Set(value)]);
 
 export const UI_PREFERENCE_KEYS = [
   "sidebar.organizationMode",
+  "sidebar.threadGrouping.environment",
   "sidebar.chronologicalSort",
   "sidebar.sortDirection",
   "sidebar.sectionOrder",
   "sidebar.manualSectionOrder",
   "sidebar.machineSectionOrder",
+  "sidebar.hiddenGroups",
   "sidebar.collapsedSections",
   "sidebar.collapsedProjects",
   "sidebar.collapsedThreads",
   "sidebar.collapsedEnvironments",
   "sidebar.collapsedThreadSections",
   "sidebar.collapsedMachines",
+  "sidebar.footerOrder",
+  "sidebar.hiddenFooterItems",
   "sidebar.pluginPanelOrder",
   "sidebar.visiblePluginPanels",
   "sidebar.navigationProvider",
@@ -74,8 +85,13 @@ function defineUiPreference<Schema extends z.ZodTypeAny>(
 export const uiPreferenceDefinitions = {
   "sidebar.organizationMode": defineUiPreference(
     sidebarOrganizationModeSchema,
-    "project",
-    "How the sidebar groups threads: by project, chronologically, or by machine.",
+    "chronological",
+    "How the sidebar groups threads: by project, Custom (chronological), or by machine. New installations default to Custom; migrated installations with existing work or preferences fall back to By project.",
+  ),
+  "sidebar.threadGrouping.environment": defineUiPreference(
+    sidebarThreadGroupingSchema,
+    "auto",
+    "Whether sibling threads sharing a worktree environment collapse into one row. auto groups them in every organization mode except Custom.",
   ),
   "sidebar.chronologicalSort": defineUiPreference(
     sidebarChronologicalSortSchema,
@@ -101,6 +117,11 @@ export const uiPreferenceDefinitions = {
     uiPreferenceStringListSchema,
     ["pinned", "machines", "threads"],
     "Top-level section order when the sidebar is organized by machine.",
+  ),
+  "sidebar.hiddenGroups": defineUiPreference(
+    sidebarHiddenGroupsSchema,
+    [],
+    "Project, custom section, and machine groups moved into More, using project:<id>, section:<id>, or machine:<id>. Setting this list replaces the hidden groups across all sidebar organizations; reset shows every group.",
   ),
   "sidebar.collapsedSections": defineUiPreference(
     z
@@ -133,6 +154,16 @@ export const uiPreferenceDefinitions = {
     uiPreferenceStringListSchema,
     [],
     "Machine ids whose sidebar rows are collapsed.",
+  ),
+  "sidebar.footerOrder": defineUiPreference(
+    uiPreferenceStringListSchema,
+    [],
+    "Order of built-in and plugin sidebar footer actions.",
+  ),
+  "sidebar.hiddenFooterItems": defineUiPreference(
+    uiPreferenceStringListSchema,
+    [],
+    "Sidebar footer actions moved into the More menu.",
   ),
   "sidebar.pluginPanelOrder": defineUiPreference(
     uiPreferenceStringListSchema,

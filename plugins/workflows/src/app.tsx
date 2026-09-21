@@ -335,6 +335,18 @@ function buildSharedWorkflowView(run: WorkflowRunView): SharedWorkflowView {
   };
 }
 
+function activateWorkflowAgent(
+  agent: WorkflowProgressAgent,
+  callsById: ReadonlyMap<string, WorkflowCallView>,
+  toThread: (threadId: string) => void,
+): void {
+  const childThreadId =
+    agent.id === undefined
+      ? null
+      : (callsById.get(agent.id)?.childThreadId ?? null);
+  if (childThreadId !== null) toThread(childThreadId);
+}
+
 function useWorkflowRun(
   threadId: string,
   runId: string | null,
@@ -444,10 +456,7 @@ function useVisibleActivePolling(
   }, [enabled, refresh]);
 }
 
-function useActiveWorkflowRuns(threadId: string): {
-  state: ActiveRunsLoadState;
-  setRuns: (update: (runs: WorkflowRunView[]) => WorkflowRunView[]) => void;
-} {
+function useActiveWorkflowRuns(threadId: string): ActiveRunsLoadState {
   const rpc = useRpc<typeof workflowUiRpcContract>();
   const [state, setState] = useState<ActiveRunsLoadState>({
     status: "loading",
@@ -483,18 +492,7 @@ function useActiveWorkflowRuns(threadId: string): {
     (state.status === "ready" && state.runs.some(isRunActive));
   useVisibleActivePolling(refresh, shouldPoll);
 
-  const setRuns = useCallback(
-    (update: (runs: WorkflowRunView[]) => WorkflowRunView[]) => {
-      setState((current) =>
-        current.status === "ready"
-          ? { status: "ready", runs: update(current.runs) }
-          : current,
-      );
-    },
-    [],
-  );
-
-  return { state, setRuns };
+  return state;
 }
 
 export function EmptyOrError({ children }: { children: ReactNode }) {
@@ -653,7 +651,7 @@ function WorkflowComposerCard({ run }: { run: WorkflowRunView }) {
 }
 
 function WorkflowStatusBannerLoaded({ threadId }: { threadId: string }) {
-  const { state } = useActiveWorkflowRuns(threadId);
+  const state = useActiveWorkflowRuns(threadId);
 
   if (state.status !== "ready" || state.runs.length === 0) return null;
 
@@ -812,6 +810,11 @@ function WorkflowPreviewLoaded({
               collapsiblePhases
               currentPhaseIndex={shared.currentPhaseIndex}
               terminalState={runTerminalState(run)}
+              onAgentActivate={(agent) =>
+                activateWorkflowAgent(agent, shared.callsById, (threadId) =>
+                  navigate.toThread(threadId),
+                )
+              }
             />
           </div>
         </div>
@@ -981,13 +984,11 @@ function WorkflowRunPanelLoaded({
             collapsiblePhases
             currentPhaseIndex={shared.currentPhaseIndex}
             terminalState={runTerminalState(run)}
-            onAgentActivate={(agent) => {
-              const childThreadId =
-                agent.id === undefined
-                  ? null
-                  : (shared.callsById.get(agent.id)?.childThreadId ?? null);
-              if (childThreadId !== null) navigate.toThread(childThreadId);
-            }}
+            onAgentActivate={(agent) =>
+              activateWorkflowAgent(agent, shared.callsById, (threadId) =>
+                navigate.toThread(threadId),
+              )
+            }
           />
         </div>
         <div className="my-4 h-px bg-border-seam" />

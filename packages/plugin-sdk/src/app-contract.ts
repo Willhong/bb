@@ -1,4 +1,9 @@
-import type { ComponentPropsWithoutRef, ComponentType, ReactNode } from "react";
+import type {
+  ComponentPropsWithoutRef,
+  ComponentType,
+  CSSProperties,
+  ReactNode,
+} from "react";
 import type {
   PermissionMode,
   PromptInput,
@@ -227,6 +232,53 @@ export interface PluginThreadHeaderActionProps {
   isCompactViewport: boolean;
 }
 
+/** JavaScript world a Browser page expression runs in. */
+export type ExperimentalPluginBrowserPageWorld = "isolated" | "main";
+
+export interface ExperimentalPluginBrowserPageEvaluateOptions {
+  /**
+   * `isolated` (default) runs in a BB-owned world that shares the page DOM but
+   * not page globals, and binds `bb.postMessage(data)`. `main` runs beside the
+   * page's own scripts, where `bb` is `null`.
+   */
+  world?: ExperimentalPluginBrowserPageWorld;
+}
+
+/**
+ * Script access to the top-level document of one Browser tab. Independent of
+ * CDP control leases: it never attaches a debugger or shows a control banner.
+ */
+export interface ExperimentalPluginBrowserPage {
+  /**
+   * Evaluate a JavaScript expression and resolve its JSON-serialized value.
+   * Promises are awaited and `undefined` resolves to `null`. The expression
+   * can reference `bb`. Rejects when the tab is gone or the expression throws.
+   * Anything the expression installs is lost when the document navigates.
+   */
+  evaluate(
+    expression: string,
+    options?: ExperimentalPluginBrowserPageEvaluateOptions,
+  ): Promise<JsonValue>;
+  /**
+   * Subscribe to values this plugin's isolated-world scripts in this tab send
+   * with `bb.postMessage(data)`. Returns the unsubscribe function.
+   */
+  onMessage(listener: (data: JsonValue) => void): () => void;
+}
+
+export interface ExperimentalPluginBrowserToolbarActionProps {
+  /** Thread that owns the Browser tab. */
+  threadId: string;
+  /** Browser tab currently rendering the action. */
+  tabId: string;
+  /** Current top-level URL shown in the address bar. */
+  url: string;
+  /** True when the Browser chrome needs compact controls. */
+  isCompactViewport: boolean;
+  /** Script access to this tab's page; `null` outside the desktop app. */
+  experimental_page: ExperimentalPluginBrowserPage | null;
+}
+
 /**
  * Where a file being opened by a `fileOpener` lives. `path` semantics follow
  * the source: workspace paths are relative to the environment's worktree,
@@ -251,6 +303,18 @@ export interface PluginFileOpenerSource {
 export interface PluginFileOpenerProps {
   path: string;
   source: PluginFileOpenerSource;
+  /**
+   * One-based, inclusive lines requested by the latest file open, or null when
+   * untargeted. BB supplies a new object for each targeted open, including an
+   * identical target in the active tab. Observe object identity to navigate
+   * again; keep the editor model intact. Older hosts may omit this prop.
+   *
+   * @experimental Audit navigation, remount, and persistence semantics before stabilizing.
+   */
+  experimental_lineRange?: {
+    startLineNumber: number;
+    endLineNumber: number;
+  } | null;
   /**
    * BB's file preview, bound to this file. Render it to delegate conditionally
    * without re-entering plugin replacement resolution.
@@ -474,6 +538,24 @@ export interface ExperimentalAppOverlayRegistration {
 }
 
 /**
+ * A name the host resolves to a glyph, in this order: a name any plugin
+ * registered with `app.experimental_icons.register()`, then a built-in BB icon
+ * name (`"Zap"`), then a namespaced `"<pluginId>/<name>"` glyph naming an
+ * entry of that plugin's manifest `bb.branding.experimental_icons` map. A
+ * registration therefore shadows a built-in, and either shadows a declared
+ * icon of the same name. Names that resolve to none of the three fall back to
+ * the surface's generic icon.
+ *
+ * Declared icons and registrations are one vocabulary here: the same name
+ * works in `experimental_Icon`, in every field below, and — for a declared
+ * icon — in the tool, provider and bridge-row declarations that accept one.
+ * Declared icons need no frontend bundle and survive the plugin being stopped;
+ * registrations can be any React component but live only while the plugin's
+ * app bundle is loaded.
+ */
+type BbIconName = string;
+
+/**
  * Owner-defined validator for a fixed tab's transient target. The host first
  * verifies that the value is JSON-safe, then calls this validator before
  * selecting the tab or delivering the target.
@@ -504,8 +586,7 @@ export type ExperimentalPluginFixedTabReference<
 export type PluginFixedTabRegistration<Target extends JsonValue = never> =
   ExperimentalPluginFixedTabReference<Target> & {
     title: string;
-    /** Icon hint (BB icon name); unknown names fall back to a generic icon. */
-    icon: string;
+    icon: BbIconName;
     component: ComponentType<PluginNavPanelProps>;
     /** `flush` lets the component own padding and scrolling. */
     layout?: "padded" | "flush";
@@ -520,8 +601,7 @@ export interface PluginNavPanelRegistration {
   /** Unique within the plugin; letters, digits, `-`, `_`. */
   id: string;
   title: string;
-  /** Icon hint (BB icon name); unknown names fall back to a generic icon. */
-  icon: string;
+  icon: BbIconName;
   /** URL segment under `/plugins/<pluginId>/`; letters, digits, `-`, `_`. */
   path: string;
   component: ComponentType<PluginNavPanelProps>;
@@ -607,10 +687,10 @@ export interface PluginThreadPanelActionRegistration {
   /** Label of the action row in the panel's new-tab launcher. */
   title: string;
   /**
-   * Icon hint (BB icon name) used when the plugin ships no logo; the
-   * launcher row and opened tabs prefer the plugin's logo.
+   * Drawn only when the manifest declares no `bb.branding.icon`; the launcher
+   * row and opened tabs prefer that over this hint.
    */
-  icon?: string;
+  icon?: BbIconName;
   /** Rendered inside every panel tab this action opens. */
   component: ComponentType<PluginThreadPanelProps>;
   /**
@@ -649,8 +729,8 @@ export interface PluginNewThreadPanelActionRegistration {
   id: string;
   /** Label of the action row in the panel's new-tab launcher. */
   title: string;
-  /** Icon hint (BB icon name) used when the plugin ships no logo. */
-  icon?: string;
+  /** Drawn only when the manifest declares no `bb.branding.icon`. */
+  icon?: BbIconName;
   /** Rendered inside every panel tab this action opens. */
   component: ComponentType<PluginNewThreadPanelProps>;
   /** Host framing; matches `threadPanelAction`. */
@@ -697,8 +777,8 @@ export interface PluginSidebarFooterActionRegistration {
   id: string;
   /** Tooltip and accessible label for the icon button. */
   title: string;
-  /** Icon hint (BB icon name); unknown names fall back to a generic icon. */
-  icon: string;
+  /** Drawn only when the manifest declares no `bb.branding.icon`. */
+  icon: BbIconName;
   /**
    * Runs when the user activates the action (e.g. call `openSettings()`,
    * open a panel via other surfaces, toast). Errors (sync or async) are
@@ -719,8 +799,7 @@ export interface ExperimentalSidebarFooterItemBase {
   id: string;
   /** Tooltip and accessible label for the host-rendered icon button. */
   label: string;
-  /** BB icon-name hint; unknown names fall back to a generic icon. */
-  icon: string;
+  icon: BbIconName;
 }
 
 /** A sidebar-footer item that runs a callback when activated. */
@@ -1033,6 +1112,15 @@ export interface PluginThreadHeaderActionRegistration {
   component: ComponentType<PluginThreadHeaderActionProps>;
 }
 
+export interface ExperimentalPluginBrowserToolbarActionRegistration {
+  /** Unique within the plugin; letters, digits, `-`, `_`. */
+  id: string;
+  /** Accessible name for the host-wrapped control group. */
+  title: string;
+  /** Component rendered beside the Browser address bar. */
+  component: ComponentType<ExperimentalPluginBrowserToolbarActionProps>;
+}
+
 /** One pane's place in the split layout, as fractions of the split area. */
 export interface PluginSidebarSplitPane {
   paneId: string;
@@ -1241,8 +1329,7 @@ export interface PluginMessageActionRegistration {
   id: string;
   /** Tooltip / menu label for the action. */
   title: string;
-  /** Icon hint (BB icon name); unknown names fall back to a generic icon. */
-  icon?: string;
+  icon?: BbIconName;
   /**
    * Runs when the user activates the action. Errors (sync or async) are
    * contained and logged; they never break the timeline.
@@ -1250,8 +1337,8 @@ export interface PluginMessageActionRegistration {
   run(context: PluginMessageActionContext): void | Promise<void>;
 }
 
-/** Context handed to a `commandPaletteAction`'s `isAvailable` and `run`. */
-export interface PluginCommandPaletteActionContext {
+/** Current context for palette and keyboard command invocations. */
+export interface PluginCommandContext {
   /** The thread in view, or null on a surface without one. */
   threadId: string | null;
   projectId: string | null;
@@ -1268,44 +1355,65 @@ export interface PluginCommandPaletteActionContext {
   openPanel(options: PluginTargetedPanelActionOpenOptions): boolean;
 }
 
+/** A default keyboard shortcut. Omitted modifiers are false. */
+export interface PluginCommandShortcut {
+  key: string;
+  /** Command on macOS, Control elsewhere. */
+  mod?: boolean;
+  meta?: boolean;
+  control?: boolean;
+  alt?: boolean;
+  shift?: boolean;
+}
+
 /**
- * A row in bb's quick palette (Mod+Shift+P), listed under the plugin's name
+ * A command registered with `app.commands.register`, listed in bb's quick
+ * palette (Mod+Shift+P) under the plugin's name
  * beside bb's own commands. Host-rendered: the plugin supplies a title and
  * `run`, and the host owns matching, ordering, and recency.
  */
-export interface PluginCommandPaletteActionRegistration {
+export interface PluginCommandRegistration {
+  /** Initial keyboard binding. Users can rebind every command, including ones without a default. Conflicting defaults remain unbound. */
+  defaultShortcut?: PluginCommandShortcut;
   /** Unique within the plugin; letters, digits, `-`, `_`. */
   id: string;
   /** The row's label, e.g. "Linear: open issue for this thread". */
   title: string;
   /**
    * Hide the row when it cannot do anything — typically when it needs a thread
-   * and there is none. Called while the palette is open; keep it cheap and
-   * synchronous. Omitted means always listed.
+   * and there is none. Called before palette listing and keyboard invocation;
+   * keep it cheap and synchronous. Omitted means always listed.
    */
-  isAvailable?(context: PluginCommandPaletteActionContext): boolean;
+  isAvailable?(context: PluginCommandContext): boolean;
   /**
-   * Runs after the palette closes and focus is restored. Errors (sync or
-   * async) are contained and logged; they never break the palette.
+   * Runs on keyboard invocation, or after the palette closes and focus is
+   * restored. Errors (sync or async) are contained and logged; they never break the palette.
    */
-  run(context: PluginCommandPaletteActionContext): void | Promise<void>;
+  run(context: PluginCommandContext): void | Promise<void>;
+}
+
+/** Registers commands for bb's command palette. */
+export interface PluginAppCommands {
+  /** Register a command. IDs are unique within this plugin, including legacy slot registrations. */
+  register(registration: PluginCommandRegistration): void;
 }
 
 /**
- * Supply the inline React mark bb draws for one agent provider.
+ * Supply an inline React mark for a provider. Agent, machine, and environment
+ * icon renderers select the mark by provider kind and id.
+ * Only surfaces using the provider icon renderer consult this slot. Persistent
+ * machine labels use a laptop glyph directly.
  *
- * A manifest `branding.icon` (or a provider's `logoUrl`) is fetched and drawn
- * through `<img>`, a separate document where `currentColor` resolves to black
- * — invisible on dark themes and unreachable from app CSS. A component is
- * rendered inline, so it inherits the app's theme colors and the host's sizing
- * classes. Register a static color logo as a file and a theme-aware mark here.
+ * Provider logo assets use a currentColor mask. Inline components can also
+ * render multiple colors and inherit the app's theme and sizing classes.
  *
- * The host passes only `className` (sizing plus the provider's color class);
+ * The host passes `className` for sizing; color inherits from its wrapper.
  * the component must render an inline SVG (or other inline markup) and must
- * not fetch. One registration per provider id per plugin; when two plugins
- * claim the same provider id the host keeps the first by plugin id and warns.
+ * not fetch. One registration per provider kind and id per plugin; when two
+ * plugins claim the same pair the host keeps the first by plugin id and warns.
  */
 export interface PluginProviderIconRegistration {
+  providerKind: "agent" | "machine" | "environment";
   /**
    * The provider this mark is for — the id bb knows the provider by (the
    * provider declaration's id, e.g. `codex` or `acp-cursor`), not the plugin
@@ -1410,10 +1518,8 @@ export interface PluginTimelineRendererRegistration {
 export interface PluginEnvironmentProviderInputsProps {
   /** Project selected in the composer; null in projectless compose. */
   projectId: string | null;
-  /**
-   * The enrolled machine the selection names; null before one is picked.
-   */
-  hostId: string | null;
+  /** Whether setup uses an existing host or provisions a new host before create. */
+  target: { kind: "existing-host"; hostId: string } | { kind: "new-host" };
   /**
    * The `inputs` value the selection will carry: null until `onChange`
    * supplies one.
@@ -1445,6 +1551,33 @@ export interface PluginEnvironmentProviderInputsRegistration {
   /** The environment provider id this control supplies inputs for. */
   environmentProviderId: string;
   component: ComponentType<PluginEnvironmentProviderInputsProps>;
+}
+
+/**
+ * Props passed to an `experimental_machineProviderInputs` component. Machine
+ * inputs are persisted and readable by every plugin, so they must contain only
+ * non-secret configuration and references to credentials held in plugin
+ * settings.
+ */
+export interface PluginMachineProviderInputsProps {
+  /** The value persisted with the machine selection. */
+  value: JsonValue | null;
+  /** Replace the submitted value or block submission with a visible reason. */
+  onChange(next: PluginMachineProviderInputsChange): void;
+}
+
+export type PluginMachineProviderInputsChange =
+  | { status: "ready"; value: JsonValue }
+  | { status: "blocked"; reason: string };
+
+/**
+ * Supply the inputs control for one machine provider registered server-side
+ * through `bb.experimental_machines.register`.
+ */
+export interface PluginMachineProviderInputsRegistration {
+  /** The machine provider id this control supplies inputs for. */
+  machineProviderId: string;
+  component: ComponentType<PluginMachineProviderInputsProps>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1498,6 +1631,10 @@ export interface PluginAppSlots {
   experimental_threadHeaderAction(
     registration: PluginThreadHeaderActionRegistration,
   ): void;
+  /** Render a component beside each Browser tab's address bar. */
+  experimental_browserToolbarAction(
+    registration: ExperimentalPluginBrowserToolbarActionRegistration,
+  ): void;
   fileOpener(registration: PluginFileOpenerRegistration): void;
   /**
    * Replace BB's source-code renderer (see
@@ -1516,15 +1653,13 @@ export interface PluginAppSlots {
   messageDirective(registration: PluginMessageDirectiveRegistration): void;
   messageAction(registration: PluginMessageActionRegistration): void;
   /**
-   * Add a row to the quick palette (see
-   * {@link PluginCommandPaletteActionRegistration}).
+   * @deprecated Use `app.commands.register` with the same registration.
+   * Both entry points share the same command registry and ID namespace.
    */
-  commandPaletteAction(
-    registration: PluginCommandPaletteActionRegistration,
-  ): void;
+  commandPaletteAction(registration: PluginCommandRegistration): void;
   /**
-   * Draw one agent or environment provider's icon with an inline
-   * React component instead of its `<img>`-rendered logo file (see
+   * Draw one agent, environment, or machine provider's icon with an inline
+   * React component instead of its masked logo asset (see
    * {@link PluginProviderIconRegistration}). Experimental: see
    * docs/api_to_audit.md.
    */
@@ -1546,6 +1681,14 @@ export interface PluginAppSlots {
    */
   experimental_environmentProviderInputs(
     registration: PluginEnvironmentProviderInputsRegistration,
+  ): void;
+  /**
+   * Supply the non-secret machine inputs control rendered by machine creation
+   * surfaces (see {@link PluginMachineProviderInputsRegistration}).
+   * Experimental: see docs/api_to_audit.md.
+   */
+  experimental_machineProviderInputs(
+    registration: PluginMachineProviderInputsRegistration,
   ): void;
 }
 
@@ -1608,7 +1751,65 @@ export interface PluginAppContentScripts {
   register(registration: PluginContentScriptRegistration): void;
 }
 
+export interface ExperimentalIconProps {
+  name: string;
+  /** Used when the requested name is missing; defaults to the host Zap icon. */
+  fallback?: string;
+  className?: string;
+  style?: CSSProperties;
+  "aria-hidden"?: boolean | "true" | "false";
+  "aria-label"?: string;
+}
+
+/** Shared agent, machine, or environment artwork without fetching metadata. */
+export interface ExperimentalProviderIconProps {
+  /** Keeps same-id agent, machine, and environment providers distinct. */
+  providerKind: PluginProviderIconRegistration["providerKind"];
+  /**
+   * Existing agent, machine, or environment provider record. Reads id, logoUrl, icon and
+   * strings.iconTint; other fields are ignored. An id-only record is sufficient
+   * when only frontend registrations and fallback are needed. Does not fetch.
+   */
+  provider: {
+    id: string;
+    logoUrl?: string | null;
+    /** Agent providers use { glyph }; machine and environment providers use a string. */
+    icon?: { glyph: string } | string | null;
+    strings?: { iconTint?: { light: string; dark: string } | null } | null;
+  };
+  /** Used when no artwork is available; defaults to Code. */
+  fallback?: string;
+  className?: string;
+  "aria-hidden"?: boolean | "true" | "false";
+  "aria-label"?: string;
+}
+
+/**
+ * An app icon registered by a plugin. The registry is app-wide: a registered
+ * name is usable wherever a `BbIconName` is — `experimental_Icon`, and every
+ * host-rendered surface that takes one — by this plugin or any other.
+ */
+export interface ExperimentalIconRegistration {
+  /** Shared app name. Namespacing is recommended, but not required. */
+  name: string;
+  /** Inline artwork. Honor className for sizing; use currentColor for tint. */
+  component: ComponentType<{ className?: string }>;
+}
+
+export interface ExperimentalAppIcons {
+  /**
+   * Add or override an app icon during setup. A registered name shadows a
+   * built-in of the same name. Returns nothing; the host replaces
+   * registrations on reload and removes them on unload. Duplicate names within
+   * a plugin reject setup. Between plugins, the first plugin id in lexical
+   * order wins, independent of bundle load order.
+   */
+  register(registration: ExperimentalIconRegistration): void;
+}
+
 export interface PluginAppBuilder {
+  experimental_icons: ExperimentalAppIcons;
+  commands: PluginAppCommands;
   slots: PluginAppSlots;
   composer: PluginAppComposer;
   contentScripts: PluginAppContentScripts;
@@ -1704,9 +1905,11 @@ export interface ComposerCustomization {
 /** Host-rendered menu row in the composer's `+` menu. */
 export interface ComposerPlusMenuItem {
   id: string;
+  /** Also offer this action in the desktop send dropdown and mobile long-press menu. */
+  experimental_sendMenu?: boolean;
   label: string;
-  /** BB icon name; unknown names fall back to the generic plugin icon. */
-  icon?: string;
+  /** Drawn only when the manifest declares no `bb.branding.icon`. */
+  icon?: BbIconName;
   /** Accessible description for the host-rendered row. */
   description?: string;
   disabled?: boolean | ((view: ComposerView) => boolean);
@@ -1754,8 +1957,11 @@ export interface PluginComposerTextEffect {
 
 /** Host-rendered status that temporarily replaces a thread's draft glyph. */
 export interface PluginComposerThreadRowStatus {
-  /** BB icon-name hint; unknown names fall back to the generic plugin icon. */
-  icon: string;
+  /**
+   * Always drawn as given: unlike the plugin-badged surfaces, this one has no
+   * preference for the plugin's own `bb.branding.icon`.
+   */
+  icon: BbIconName;
   /** Accessible label for the status glyph. */
   label: string;
   /**
@@ -1826,11 +2032,15 @@ export interface PluginComposerApi {
    * content should be fetched fresh when the message is sent.
    */
   insertMention(mention: PluginComposerMention): void;
+  /** Remove this plugin's matching mention pills and their text from the current draft. */
+  experimental_removeMention(mention: { provider: string; id: string }): void;
+  /** Subscribe to successful local submissions in this composer scope, including accepted queued messages. Failed sends and draft clearing do not notify. Dispose on unmount. */
+  experimental_onSubmitted(listener: () => void): () => void;
   /** Focus the composer caret at the end of the draft. */
   focus(): void;
   /**
    * Submit this composer's draft through the composer's OWN submit pipeline,
-   * queued until `sendAt` instead of dispatched now.
+   * optionally scheduling it or attaching plugin-owned dispatch data.
    *
    * This is a real submission, not a plugin-issued send: the host builds the
    * request exactly as pressing Enter would, so the draft's attachments and
@@ -1840,12 +2050,11 @@ export interface PluginComposerApi {
    * tuple itself, which is why sending from the backend instead would silently
    * run the message with different settings than the ones in front of the user.
    *
-   * In a thread composer the message is queued as a row instead of being
-   * sent or queued for the next idle moment. In the new-thread composer the
-   * thread is created `pending` and its first message becomes the queued row.
-   * Either way the resulting row is core's: the queued card above the
-   * composer, the countdown, Send now and Delete all work with no further
-   * plugin involvement.
+   * `sendAt` queues the submission until that time. `experimental_data` is
+   * opaque JSON delivered to dispatch hooks together with the calling plugin's
+   * id on this initial attempt. Hooks run before operational core waits. If a
+   * hook queues the message, its existing plugin wait identifies the owner on
+   * later attempts; core does not persist or interpret the opaque data.
    *
    * Resolves once the host has accepted the submission and cleared the draft.
    * Rejects when the composer refused to submit — a scope with no submit
@@ -1860,23 +2069,97 @@ export interface PluginComposerApi {
   experimental_submit(
     options: ExperimentalComposerSubmitOptions,
   ): Promise<void>;
+  /**
+   * Set this composer's pickers as if each value had been picked by hand.
+   *
+   * Every field is optional. An omitted field is left alone. A field this
+   * composer has no picker for is ignored rather than rejected: a thread
+   * composer has no project or environment; a provider without service tiers
+   * has no tier; a fork draft locks its project, provider and environment.
+   * Values travel through the same paths the pickers use, so in the
+   * new-thread composer they become the remembered defaults for the next
+   * thread and are reported as the user's explicit choices, and in a thread
+   * composer a provider change starts the same handoff the picker starts:
+   * the handoff block is prepended to the draft and the next send creates a
+   * new thread. A same-provider model change in a thread does not start a
+   * handoff, exactly like the picker.
+   *
+   * In the new-thread composer the project is switched first and awaited
+   * (attachments are copied to the new project), then the environment and
+   * machine are applied to the new project, then provider, model, reasoning
+   * level, service tier and permission mode. A provider change reloads the
+   * model catalog before the model and reasoning level are applied to it.
+   * Because the project switch remounts plugin surfaces, the returned
+   * promise is owned by the composer and still resolves after the calling
+   * component has unmounted.
+   *
+   * Resolves with the composer's own selection once it has settled: the
+   * applied values have committed and the model catalog for the selected
+   * provider and machine has finished loading, so model, reasoning level and
+   * permission mode have reconciled against it. The catalog wait is bounded;
+   * if it has not finished after 15 seconds the promise resolves with the
+   * selection as it stands. The result carries only the fields this composer
+   * has, so a missing key means "no such picker here" and a value that
+   * differs from the one passed was reconciled (a reasoning level the model
+   * does not support, a permission mode above the machine's ceiling, a model
+   * the provider does not list). A provider the composer does not list is
+   * ignored together with the model and reasoning level meant for it, so the
+   * stored provider preference never names something the picker could not
+   * have chosen. `environment` is absent while the composer
+   * has no submittable environment; `providerId` and `model` are absent
+   * while nothing is selected; `serviceTier` is present only when the
+   * selected provider has tiers and one is chosen.
+   *
+   * Rejects, with a message safe to show to the user, in a composer with no
+   * pickers at all (a queued-message editor, a side chat, a plugin surface
+   * mounted outside any composer), when the calling surface is no longer
+   * active, and when a value is not a known reasoning level, service tier or
+   * permission mode.
+   *
+   * Experimental: see docs/api_to_audit.md.
+   */
+  experimental_setSelection(
+    selection: ExperimentalComposerSelection,
+  ): Promise<ExperimentalComposerSelection>;
+}
+
+/**
+ * Picker values for `experimental_setSelection`, and the shape it resolves
+ * with. Field names match `NewThreadRequest` and the `default*` props of
+ * `experimental_NewThreadComposer`, so one routed decision can feed the
+ * composer, the embedded composer and `bb.sdk.threads.spawn` alike.
+ */
+export interface ExperimentalComposerSelection {
+  /** New-thread composers only. BB's personal-project id means "Don't work in a project". */
+  projectId?: string;
+  /**
+   * New-thread composers only. `{ type: "project-default" }` and a `host`
+   * environment without a `hostId` seed nothing and are ignored. Provider
+   * `inputs` are not applied; the provider's own inputs control keeps its
+   * value, and the result reports what the composer would submit.
+   */
+  environment?: CreateThreadEnvironmentArgs;
+  /** A provider the composer does not list is ignored, and `model` and `reasoningLevel` with it. */
+  providerId?: string;
+  /** Applied only when the composer ends up on the requested provider (or none was requested). */
+  model?: string;
+  /** Applied only when the composer ends up on the requested provider (or none was requested). */
+  reasoningLevel?: ReasoningLevel;
+  /** Ignored by a provider with no service tiers. */
+  serviceTier?: ServiceTier;
+  permissionMode?: PermissionMode;
 }
 
 /**
  * What `experimental_submit` does differently from pressing Enter.
  *
- * There is deliberately no zero-argument overload and no "submit now" arm: a
- * plugin that wants a draft sent immediately is asking for the affordance the
- * user already has, and handing plugins an unconditional "send this draft"
- * button is a much larger surface than scheduling needs.
+ * `experimental_data` is opaque JSON delivered to dispatch hooks. The runtime
+ * associates it with the calling plugin automatically for the initial
+ * dispatch attempt.
  */
-export interface ExperimentalComposerSubmitOptions {
-  /**
-   * Epoch ms the submission should dispatch at. Must be in the future; the
-   * host does not second-guess how far ahead it is.
-   */
-  sendAt: number;
-}
+export type ExperimentalComposerSubmitOptions =
+  | { sendAt: number; experimental_data?: JsonValue }
+  | { experimental_data: JsonValue; sendAt?: never };
 
 // ---------------------------------------------------------------------------
 // ThreadChat — the host-owned chat component.
@@ -1893,8 +2176,7 @@ export interface ThreadChatMessageAction {
   id: string;
   /** Tooltip / menu label for the action. */
   title: string;
-  /** Icon hint (BB icon name); unknown names fall back to a generic icon. */
-  icon?: string;
+  icon?: BbIconName;
   /**
    * Message roles the action applies to. Omitted = both user and assistant
    * messages.
@@ -1999,9 +2281,8 @@ export interface ExperimentalProviderModelPickerProps {
 /**
  * Props of the host-owned `experimental_BranchPicker` component — bb's branch
  * picker bundled with its branch-options loading for the given host and
- * project, the control bb's own New Thread composer renders as "Branch from".
- * The host owns fetching, searching, and refreshing the branch list; the
- * caller owns only the selection.
+ * project. The host owns fetching, searching, and refreshing the branch list;
+ * the caller owns the selection and its meaning.
  */
 export interface BranchPickerProps {
   /**
@@ -2012,21 +2293,21 @@ export interface BranchPickerProps {
   /** The project whose source on `hostId` is listed; null disables loading. */
   projectId: string | null;
   /**
-   * The selected branch name, or null when no branch is chosen (the host
-   * shows its placeholder and the consumer falls back to its own default).
+   * The selected branch name, or null when no branch is chosen. A null value
+   * shows the placeholder without selecting or implying a default branch.
    */
   value: string | null;
   /** Called with the picked branch name, or null when the pick is cleared. */
   onChange(next: string | null): void;
   /**
-   * Text placed before the branch on the trigger, e.g. "Base:". Omitted, the
-   * trigger is the branch alone.
+   * Text placed before the branch on the trigger and used as the menu heading,
+   * e.g. "Compare with:". Omitted, the trigger is the branch alone and the menu
+   * uses the neutral "Branches" heading.
    */
   label?: string;
   /**
-   * The trigger while nothing is picked. Omitted, the host shows the resolved
-   * default worktree base branch muted, or a neutral `default` placeholder
-   * when the base cannot be resolved.
+   * The complete trigger text while nothing is picked, without the label
+   * prefix. Defaults to "Select branch".
    */
   placeholder?: string;
   /** Render the current selection without allowing changes. */
@@ -2206,7 +2487,13 @@ export interface NewThreadComposerProps {
    *   the original `default` submission would have created from.
    */
   defaultEnvironment?: CreateThreadEnvironmentArgs;
-  /** Seeds the draft, only while the draft is still empty. */
+  /**
+   * Seeds the draft, only while the draft is still empty. Serialized
+   * `@thread:<id>`, `@project:<id>`, and `@section:<id>` tokens become mention
+   * pills with host-resolved titles/names. Missing projects/sections use their
+   * IDs; unavailable generated thread IDs use "Unavailable thread" ("Thread"
+   * if lookup fails). Other unknown thread IDs use the ID as their label.
+   */
   initialPrompt?: string;
   placeholder?: string;
   /**
@@ -2342,7 +2629,8 @@ export interface BbNavigate {
   ): void;
   /**
    * Navigate to the root compose surface (the new-thread screen). Pass
-   * `initialPrompt` to seed the composer draft and `focusPrompt` to focus the
+   * `initialPrompt` to seed the composer draft (serialized thread, project,
+   * and section mention tokens become pills) and `focusPrompt` to focus the
    * composer on arrival — the pairing behind "Create via chat" style entry
    * points that drop the user into chat with a prefilled prompt.
    */
@@ -2388,6 +2676,15 @@ export interface BbNavigate {
  * shims the specifier to that object on `globalThis.__bbPluginRuntime`.
  */
 export interface PluginSdkApp {
+  experimental_Icon: ComponentType<ExperimentalIconProps>;
+  /**
+   * Render provider slot override, then its logo, then its glyph, then fallback.
+   * Pass a record from agent, machine, or environment provider queries;
+   * an id-only record resolves frontend registrations, without fetching metadata.
+   * Updates on plugin load, reload and unload. Throwing or recursive overrides
+   * fall back to declared artwork. Logo assets render as currentColor masks.
+   */
+  experimental_ProviderIcon: ComponentType<ExperimentalProviderIconProps>;
   definePluginApp(setup: PluginAppSetup): PluginAppDefinition;
   useRpc<
     Contract extends PluginRpcContract = PluginRpcContract,

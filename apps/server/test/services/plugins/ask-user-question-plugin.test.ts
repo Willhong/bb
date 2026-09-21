@@ -2,8 +2,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { encodeClientTurnRequestIdNumber } from "@bb/domain";
 import { builtinPluginSource } from "../../../src/services/plugins/builtin-registry.js";
-import { buildThreadStartCommand } from "../../../src/services/threads/thread-commands.js";
-import { resolveExecutionOptions } from "../../../src/services/threads/thread-runtime-config.js";
+import {
+  buildExecutionOptions,
+  buildThreadStartCommand,
+} from "../../../src/services/threads/thread-commands.js";
 import { textInput } from "../../helpers/prompt-input.js";
 import {
   seedEnvironment,
@@ -59,13 +61,11 @@ describe("ask-user-question builtin plugin", () => {
       environmentId: environment.id,
       providerId: args.providerId,
     });
-    const execution = await resolveExecutionOptions(harness.deps, {
-      threadId: thread.id,
-      requestedExecution: {
-        model: args.model,
-        source: "client/turn/requested",
-      },
-    });
+    const execution = await buildExecutionOptions(
+      harness.deps,
+      { model: args.model },
+      { threadId: thread.id },
+    );
     const command = await buildThreadStartCommand(harness.deps, {
       environment,
       execution,
@@ -83,7 +83,7 @@ describe("ask-user-question builtin plugin", () => {
     return command.dynamicTools;
   }
 
-  it("advertises the tool to codex with Claude's exact schema", async () => {
+  it("advertises the tool to codex with the Zod-derived schema", async () => {
     const tools = await dynamicToolsFor({
       providerId: "codex",
       model: "gpt-5.6",
@@ -124,7 +124,6 @@ describe("ask-user-question builtin plugin", () => {
       "question",
       "header",
       "options",
-      "multiSelect",
     ]);
     expect(
       schema.properties.questions.items.properties.multiSelect.default,

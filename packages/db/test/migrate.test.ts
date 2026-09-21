@@ -409,6 +409,8 @@ const branchLocalThreadSearchRowidFtsMigrationWhen = 1781403656071;
 const rowidThreadSearchMigrationHash =
   "025358fe89253aec7f5bd970dc3eb88d0e834f0d58fb9d75329a5d39899340f4";
 const legacyExperimentsMigrationWhen = 1781299832942;
+const environmentProvisioningMigrationWhen = 1789075667774;
+const machineProvidersMigrationWhen = 1789081162875;
 const eventLargeValuesMigrationWhen = 1781403656069;
 const eventLargeValuesRestoreMigrationWhen = 1781557200000;
 const cleanupModeDropMigrationWhen = 1781557300000;
@@ -528,6 +530,12 @@ const eventLargeValuesMigrationPath = resolve(
   "..",
   "drizzle",
   "0031_mysterious_zaran.sql",
+);
+const machineProvidersMigrationPath = resolve(
+  __dirname,
+  "..",
+  "drizzle",
+  "0117_machine_providers.sql",
 );
 function closeConnection(db: DbConnection): void {
   db.$client.close();
@@ -668,6 +676,8 @@ function dropMarketplaceCatalogSchema(db: DbConnection): void {
 }
 
 function dropEventToolNameColumn(db: DbConnection): void {
+  db.$client.prepare("DROP TABLE IF EXISTS provider_model_catalogs").run();
+  db.$client.prepare("DROP TABLE IF EXISTS ui_preference_defaults").run();
   db.$client.prepare("DROP TABLE IF EXISTS ui_preferences").run();
   db.$client.prepare("DROP TABLE IF EXISTS retained_event_outputs").run();
   dropThreadConversationOutlinesTable(db);
@@ -728,6 +738,19 @@ function dropMarketplaceStatsColumn(db: DbConnection): void {
  * 0108's, so the replay recreates the table before 0110 drops it again.
  */
 function rewindEnvironmentProvisioningMigration(db: DbConnection): void {
+  db.$client.exec("DROP TRIGGER IF EXISTS threads_lifecycle_owner_insert");
+  db.$client.exec("DROP TRIGGER IF EXISTS threads_lifecycle_owner_immutable");
+  db.$client.exec("DROP INDEX IF EXISTS threads_lifecycle_owner_idx");
+  if (
+    db.$client
+      .prepare<[], TableInfoRow>("PRAGMA table_info(threads)")
+      .all()
+      .some((column) => column.name === "lifecycle_owner_thread_id")
+  ) {
+    db.$client.exec(
+      "ALTER TABLE threads DROP COLUMN lifecycle_owner_thread_id",
+    );
+  }
   const columns = db.$client
     .prepare<[], TableInfoRow>("PRAGMA table_info(environments)")
     .all();
@@ -758,7 +781,20 @@ function rewindEnvironmentProvisioningMigration(db: DbConnection): void {
     );
 }
 
+function dropQueuedMessageAttemptColumns(db: DbConnection): void {
+  const columns = db.$client
+    .prepare<[], TableInfoRow>("PRAGMA table_info(queued_thread_messages)")
+    .all();
+  for (const name of ["failure_count", "next_attempt_at"]) {
+    if (!columns.some((column) => column.name === name)) continue;
+    db.$client
+      .prepare(`ALTER TABLE queued_thread_messages DROP COLUMN ${name}`)
+      .run();
+  }
+}
+
 function dropQueueReworkSchema(db: DbConnection): void {
+  dropQueuedMessageAttemptColumns(db);
   rewindEnvironmentProvisioningMigration(db);
   // Indexes first: SQLite refuses to drop a column an existing index names.
   for (const index of [
@@ -780,6 +816,10 @@ function dropQueueReworkSchema(db: DbConnection): void {
     "retry_of_turn_request_id",
     "retry_attempt",
     "retry_reason",
+    "origin",
+    "origin_plugin_id",
+    "requested_by_initiator",
+    "requested_by_thread_id",
   ]) {
     if (!queuedColumns.some((column) => column.name === name)) continue;
     db.$client
@@ -831,11 +871,99 @@ function rewindEnvironmentRowFactsMigration(db: DbConnection): void {
   }
 }
 
-function rewindEnvironmentProvidersMigration(db: DbConnection): void {
-  rewindEnvironmentProvisioningMigration(db);
+function rewindMachineProvidersMigration(db: DbConnection): void {
+  db.$client.exec("DROP TABLE IF EXISTS ui_preference_defaults");
+  const queuedDispatchOrigin = db.$client
+    .prepare<[], TableInfoRow>("PRAGMA table_info(queued_thread_messages)")
+    .all();
+  for (const name of [
+    "origin",
+    "origin_plugin_id",
+    "requested_by_initiator",
+    "requested_by_thread_id",
+  ]) {
+    if (!queuedDispatchOrigin.some((column) => column.name === name)) continue;
+    db.$client.exec(`ALTER TABLE queued_thread_messages DROP COLUMN ${name}`);
+  }
+  db.$client.exec("DROP TABLE IF EXISTS thread_pruning_cursors");
+  db.$client.exec("DROP TABLE IF EXISTS project_attachment_threads");
+  db.$client.exec("DROP TABLE IF EXISTS project_attachments");
+  db.$client.exec("DROP TABLE IF EXISTS project_attachment_backfills");
+  db.$client.exec("DROP INDEX IF EXISTS threads_project_id_idx");
+  db.$client.exec("DROP TABLE IF EXISTS environment_variables");
+  db.$client.exec("DROP TABLE IF EXISTS thread_plugin_metadata");
+  db.$client.exec("DROP TABLE IF EXISTS provider_model_catalogs");
   db.$client.exec("DROP TABLE IF EXISTS environment_hook_operations");
+  if (
+    db.$client
+      .prepare<[], TableInfoRow>("PRAGMA table_info(project_sources)")
+      .all()
+      .some((column) => column.name === "owns_path")
+  ) {
+    db.$client.exec("ALTER TABLE project_sources DROP COLUMN owns_path");
+  }
+  db.$client.exec("DROP INDEX IF EXISTS hosts_live_launch_key_idx");
+  for (const column of [
+    "machine_provider_id",
+    "launch_key",
+    "machine_inputs",
+    "machine_attempt",
+    "pending_log",
+    "machine_operation_id",
+    "server_access_provider_id",
+    "server_access_grant_id",
+    "resource",
+    "phase",
+    "suspended_at",
+    "status_message",
+    "suspend_retry_at",
+    "idle_since",
+    "remove_retry_at",
+    "teardown_attempt",
+    "teardown_status",
+  ]) {
+    const columns = db.$client
+      .prepare<[], TableInfoRow>("PRAGMA table_info(hosts)")
+      .all();
+    if (columns.some((entry) => entry.name === column)) {
+      db.$client.exec(`ALTER TABLE hosts DROP COLUMN ${column}`);
+    }
+  }
+  const sessionColumns = db.$client
+    .prepare<[], TableInfoRow>("PRAGMA table_info(host_daemon_sessions)")
+    .all();
+  if (!sessionColumns.some((column) => column.name === "host_type")) {
+    db.$client
+      .prepare(
+        "ALTER TABLE host_daemon_sessions ADD COLUMN host_type text NOT NULL DEFAULT 'persistent'",
+      )
+      .run();
+  }
+  db.$client
+    .prepare<[number]>("DELETE FROM __drizzle_migrations WHERE created_at >= ?")
+    .run(machineProvidersMigrationWhen);
+}
+
+function rewindEnvironmentProvidersMigration(db: DbConnection): void {
+  rewindMachineProvidersMigration(db);
+  rewindEnvironmentProvisioningMigration(db);
+  db.$client.exec("DROP TABLE IF EXISTS machine_workspace_setups");
+  db.$client.exec("DROP TABLE IF EXISTS environment_setup_outcomes");
   db.$client.exec("DROP TABLE IF EXISTS environment_launches");
   db.$client.exec("DROP INDEX IF EXISTS environments_project_host_path_idx");
+  const hostColumns = new Set(
+    db.$client
+      .prepare<[], TableInfoRow>("PRAGMA table_info(hosts)")
+      .all()
+      .map((column) => column.name),
+  );
+  if (!hostColumns.has("type")) {
+    db.$client
+      .prepare(
+        "ALTER TABLE hosts ADD COLUMN type text NOT NULL DEFAULT 'persistent'",
+      )
+      .run();
+  }
   const lifecycleColumns = [
     "environment_provider_plugin_id",
     "canonical_path",
@@ -1621,7 +1749,6 @@ describe("migrate", () => {
       const host = upsertHost(db, noopNotifier, {
         id: "host-retained-output-migration",
         name: "Migration Host",
-        type: "persistent",
       });
       const { project } = createProject(db, noopNotifier, {
         name: "Migration Project",
@@ -1637,6 +1764,8 @@ describe("migrate", () => {
       });
       const eventData = JSON.stringify({ message: "existing event" });
 
+      db.$client.prepare("DROP TABLE provider_model_catalogs").run();
+      db.$client.prepare("DROP TABLE IF EXISTS ui_preference_defaults").run();
       db.$client.prepare("DROP TABLE ui_preferences").run();
       db.$client.prepare("DROP TABLE retained_event_outputs").run();
       db.$client
@@ -1859,7 +1988,12 @@ describe("migrate", () => {
         showDiagnosticEvents: true,
         providerOrder: [],
         defaultProviderId: null,
+        providerCompletedTurnDisplay: {},
+        machineServerUrl: null,
+        defaultMachineAccess: null,
+        machineGitCredentialsEnabled: true,
         streamerMode: false,
+        telemetryEnabled: true,
         managedBranchPrefix: "bb/",
       });
       expect(
@@ -2177,7 +2311,6 @@ describe("migrate", () => {
       migrate(db);
       const host = upsertHost(db, noopNotifier, {
         name: "side-chat-adoption-host",
-        type: "persistent",
       });
       const { project } = createProject(db, noopNotifier, {
         name: "side-chat-adoption-project",
@@ -2257,7 +2390,6 @@ describe("migrate", () => {
       migrate(db);
       const host = upsertHost(db, noopNotifier, {
         name: "permission-migration-host",
-        type: "persistent",
       });
       const { project } = createProject(db, noopNotifier, {
         name: "permission-migration-project",
@@ -4462,6 +4594,7 @@ describe("migrate", () => {
         "events_item_lifecycle_thread_item_sequence_idx",
         "events_parent_tool_call_thread_parent_sequence_idx",
         "events_plan_steps_thread_sequence_idx",
+        "events_provider_identity_idx",
         "events_thread_sequence_idx",
         "events_thread_state_thread_sequence_idx",
         "events_thread_turn_type_item_sequence_idx",
@@ -5407,7 +5540,6 @@ describe("migrate", () => {
       const host = upsertHost(db, noopNotifier, {
         id: "host-side-chat-visibility",
         name: "Migration Host",
-        type: "persistent",
       });
       const { project } = createProject(db, noopNotifier, {
         name: "Migration Project",
@@ -5476,7 +5608,6 @@ describe("migrate", () => {
       migrate(db);
       const host = upsertHost(db, noopNotifier, {
         name: "event-parent-migration-host",
-        type: "persistent",
       });
       const { project } = createProject(db, noopNotifier, {
         name: "event-parent-migration-project",
@@ -5587,10 +5718,13 @@ describe("environment providers migration", () => {
   const environmentProvidersMigrationWhen = 1788386943764;
 
   function seedPreProviderEnvironments(db: DbConnection): void {
+    db.$client.prepare("DROP TABLE provider_model_catalogs").run();
+    db.$client.prepare("DROP TABLE IF EXISTS ui_preference_defaults").run();
     db.$client.prepare("DROP TABLE ui_preferences").run();
     db.$client.prepare("DROP TABLE retained_event_outputs").run();
     rewindEnvironmentRowFactsMigration(db);
     rewindEnvironmentProvidersMigration(db);
+    dropQueuedMessageAttemptColumns(db);
     db.$client
       .prepare<[number]>(
         "DELETE FROM __drizzle_migrations WHERE created_at >= ?",
@@ -5955,13 +6089,56 @@ describe("environment providers migration", () => {
   });
 });
 
+describe("machine providers migration", () => {
+  it("backfills server access for machines with a legacy access identity", () => {
+    const db = createConnection(":memory:");
+    try {
+      db.$client.exec(`
+        CREATE TABLE hosts (
+          id text PRIMARY KEY NOT NULL,
+          name text NOT NULL,
+          type text NOT NULL,
+          connect_machine_id text,
+          destroyed_at integer
+        );
+        CREATE TABLE project_sources (id text PRIMARY KEY NOT NULL);
+        CREATE TABLE host_daemon_sessions (
+          id text PRIMARY KEY NOT NULL,
+          host_type text NOT NULL
+        );
+        CREATE TEMP TABLE bb_migration_local_host (id text PRIMARY KEY NOT NULL);
+        INSERT INTO hosts VALUES
+          ('legacy', 'Legacy', 'persistent', 'cloud-machine', NULL),
+          ('direct', 'Direct', 'persistent', NULL, NULL);
+      `);
+
+      runMigrationFile({ db, migrationPath: machineProvidersMigrationPath });
+
+      expect(
+        db.$client
+          .prepare<[], { id: string; providerId: string | null; type: string }>(
+            "SELECT id, server_access_provider_id AS providerId, type FROM hosts ORDER BY id",
+          )
+          .all(),
+      ).toEqual([
+        { id: "direct", providerId: null, type: "persistent" },
+        { id: "legacy", providerId: "connect", type: "persistent" },
+      ]);
+    } finally {
+      closeConnection(db);
+    }
+  });
+});
+
 describe("environment and thread startup ownership migration", () => {
   it.each(["creating", "cancelled"])(
     "preserves %s allocation checkpoints and keeps attached environment resources authoritative",
     (phase) => {
       const db = createMigratedConnection();
       try {
+        rewindMachineProvidersMigration(db);
         rewindEnvironmentProvisioningMigration(db);
+        dropQueuedMessageAttemptColumns(db);
         const legacySchema = readFileSync(
           resolve(
             dirname(fileURLToPath(import.meta.url)),
@@ -5970,9 +6147,12 @@ describe("environment and thread startup ownership migration", () => {
           "utf8",
         ).split("--> statement-breakpoint")[0]!;
         db.$client.exec(legacySchema);
-        db.$client.exec(
-          "DELETE FROM __drizzle_migrations WHERE created_at = (SELECT MAX(created_at) FROM __drizzle_migrations)",
-        );
+        db.$client.exec("DROP TABLE IF EXISTS environment_hook_operations");
+        db.$client
+          .prepare<[number]>(
+            "DELETE FROM __drizzle_migrations WHERE created_at >= ?",
+          )
+          .run(environmentProvisioningMigrationWhen);
         db.$client.exec(`
         INSERT INTO hosts (id, name, type, created_at, updated_at) VALUES ('host_ownership', 'test', 'persistent', 1, 1);
         INSERT INTO projects (id, name, created_at, updated_at) VALUES ('proj_ownership', 'test', 1, 1);

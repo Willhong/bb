@@ -1,7 +1,12 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { experimental_createBridgeJsonRpcTestHarness as createBridgeJsonRpcTestHarness } from "@get-bb/plugin-sdk/provider-bridge/testing";
 import { handleLine } from "./bridge.js";
@@ -11,18 +16,16 @@ import {
   waitForAppServerProcessStep,
 } from "./bridge-process.test-support.js";
 
+import {
+  FULL_ACCESS_SESSION_OPTIONS,
+  stubFakeCodexAppServer,
+} from "./fake-codex-app-server-harness.js";
+
 const THREAD_ID = "thr_writer_lock_1";
 const PROVIDER_THREAD_ID = "codex-writer-lock-1";
 
-const fakeAppServerPath = fileURLToPath(
-  new URL("./fake-codex-app-server.mjs", import.meta.url),
-);
-
 const sessionOptions = {
-  permissionMode: "full",
-  permissionScope: "full",
-  approvalReviewer: null,
-  permissionEscalation: null,
+  ...FULL_ACCESS_SESSION_OPTIONS,
   reasoningLevel: "low",
 } as const;
 
@@ -46,14 +49,10 @@ beforeEach(() => {
     JSON.stringify({
       processLogPath,
       writerLockPath,
-      sigtermDelayMs: 500,
+      stdinCloseDelayMs: 500,
     }),
   );
-  vi.stubEnv("BB_CODEX_BRIDGE_APP_SERVER_COMMAND", process.execPath);
-  vi.stubEnv(
-    "BB_CODEX_BRIDGE_APP_SERVER_ARGS",
-    JSON.stringify([fakeAppServerPath, scriptPath]),
-  );
+  stubFakeCodexAppServer(scriptPath);
   harness = createBridgeJsonRpcTestHarness(handleLine);
 });
 
@@ -121,7 +120,7 @@ it("does not install a replacement after a concurrent release is acknowledged", 
     input: [{ type: "text", text: "hello", mentions: [] }],
     options: changedSessionOptions,
   });
-  await waitForAppServerProcessStep(processLogPath, "sigterm");
+  await waitForAppServerProcessStep(processLogPath, "stdin-close");
 
   harness.sendRequest(3, "thread/stop", {
     threadId: THREAD_ID,
@@ -150,7 +149,7 @@ it("does not install a replacement after concurrent discard maintenance settles"
     input: [{ type: "text", text: "hello", mentions: [] }],
     options: changedSessionOptions,
   });
-  await waitForAppServerProcessStep(processLogPath, "sigterm");
+  await waitForAppServerProcessStep(processLogPath, "stdin-close");
 
   harness.sendRequest(3, "thread/discard", {
     threadId: THREAD_ID,
@@ -210,10 +209,42 @@ it("explains persistent writer contention and resumes after the owner closes", a
     options: sessionOptions,
   });
   const blocked = await harness.waitForResponse(1);
+  expect(
+    readFileSync(processLogPath, "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith("writer-conflict:")),
+  ).toHaveLength(4);
+  expect(readFileSync(writerLockPath, "utf8")).toBe(String(process.pid));
   rmSync(writerLockPath, { force: true });
 
   expect(blocked.error?.message).toBe(
     `thread ${PROVIDER_THREAD_ID} already has an active writer. Another Codex process still owns this thread. Close any other Codex session using it; if none is open, wait for a previous Codex process to finish shutting down or stop the leftover codex app-server process, then retry.`,
   );
   await resumeThread(2);
+}, 30_000);
+
+it("stops a pending writer retry without starting a replacement", async () => {
+  writeFileSync(writerLockPath, String(process.pid));
+  harness.sendRequest(1, "thread/resume", {
+    threadId: THREAD_ID,
+    providerThreadId: PROVIDER_THREAD_ID,
+    cwd: workspaceDir,
+    instructionMode: "append",
+    options: sessionOptions,
+  });
+  await waitForAppServerProcessStep(processLogPath, "writer-conflict");
+
+  harness.sendRequest(2, "thread/stop", {
+    threadId: THREAD_ID,
+    providerThreadId: PROVIDER_THREAD_ID,
+    intent: "release",
+    activeTurnId: null,
+  });
+  expect((await harness.waitForResponse(2)).error).toBeUndefined();
+  expect((await harness.waitForResponse(1)).error).toBeDefined();
+  expect(spawnedAppServerPids(processLogPath)).toHaveLength(1);
+  expect(readFileSync(writerLockPath, "utf8")).toBe(String(process.pid));
+
+  rmSync(writerLockPath);
+  await resumeThread(3);
 }, 30_000);

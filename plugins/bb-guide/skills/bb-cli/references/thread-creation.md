@@ -3,28 +3,48 @@
 ## Spawning Threads
 
 - Use `bb thread spawn --project <project-id> --prompt "..."` to create another
-  thread. Pass the intended project explicitly; the CLI does not infer it from
-  context variables. Omitted execution flags use remembered project defaults;
+  thread. For a multi-line or Markdown prompt use `--prompt-file <path>` (`-`
+  reads stdin) instead of quoting it inline; `bb thread fork` takes it too.
+  Pass the intended project explicitly; the CLI does not infer it from
+  context variables, and when `--project` is missing the error prints the
+  current thread's project ID to add. Omitted execution flags use remembered project defaults;
   without a remembered model, bb resolves the selected provider and its reported
   default model on the target machine.
 - Select a target with `--environment`, `--new-environment`, `--base-branch`,
   or `--machine`. Select execution with `--provider`, `--model`,
   `--reasoning-level`, `--service-tier`, and `--permission-mode`.
-- List plugin-provisioned environment choices with `bb environment providers`. Add `--project <id>` and optionally `--machine <id>` to omit providers whose declared requirements are unmet. Without a machine, the project listing includes providers structurally eligible on any persistent machine. Git inspection and plugin availability run only for the selected provider and machine during thread creation. `--json` includes each provider's `requires` facts and its `inputs` JSON Schema or null.
+- List plugin-provisioned environment choices with `bb environment providers`. Add `--project <id>` and optionally `--machine <id>` to omit providers whose declared requirements are unmet. Without a machine, the project listing includes providers structurally eligible on any persistent machine. Git inspection and plugin availability run only for the selected provider and machine during thread creation. `--json` includes each provider's `description` and `icon`, its `requires` facts and its `inputs` JSON Schema or null.
   Pass the selected ID to `--environment-provider`. Add
   `--environment-inputs <json>` only when the provider's schema does not accept
   an empty object; otherwise the CLI supplies `{}` when the flag is omitted.
   `--machine` picks the existing machine.
+- List machine providers with `bb machine providers`. Create a
+  new provider machine with
+  `bb thread spawn --new-machine <provider-id> --environment-provider <id>`.
+  For Modal's composed environment, use `--environment-provider modal-sandbox`
+  without machine selectors; `--machine-inputs <json>` configures that composed
+  machine with optional configured names such as
+  `{"preset":"Large","image":"Node 22"}`. These inputs are persisted and
+  readable by plugins, so keep credentials in plugin settings and send only
+  non-secret configuration or references.
 - Omit `--base-branch` for bb's default. Explicit values are exact; use
   `origin/<branch>` for a remote ref. It applies to `--new-environment
 worktree` only; a provider takes its branch through `--environment-inputs`.
 - Spawn also accepts `--title`, `--origin-kind`, `--source-thread`,
   `--source-seq-end`, `--agent-context-seed`, and `--json`.
 - Add repeatable `--file <path>` / `--image <path>` flags for structured prompt
-  attachments, and `--section <id>` to add the new thread to a section. These
-  flags pass host-readable absolute paths (or relative server-upload tokens)
-  through to the runtime; they do not read files on the CLI machine.
+  attachments, and `--section <id>` to add the new thread to a section.
+  Both flags upload absolute paths and `file:` URLs from the CLI machine
+  before sending and pass relative server-upload tokens through unchanged.
+  Use an absolute path (for example, `--file "$PWD/report.pdf"`) for local files.
 - Spawn creates a root thread unless you pass `--parent-thread`.
+- Handoff can target any model, including one from the source provider. In
+  the follow-up picker, choose **Handoff to new thread**; **Exit handoff** in
+  the picker or composer restores the source execution settings and retains
+  draft edits without the automatic source reference. Closing the picker
+  keeps handoff active. Use `bb thread spawn --provider PROVIDER --model MODEL
+--environment ENV_ID --prompt 'Continue from @thread:THREAD_ID ...'` for the
+  same thread creation through the CLI, or `threads.spawn` through the SDK.
 - Use `bb thread fork <source-thread-id>` to clone a provider session. The
   fork inherits the source conversation in its timeline. It creates an idle
   fork in the source environment by default; add `--prompt`, select an existing
@@ -60,8 +80,10 @@ worktree` only; a provider takes its branch through `--environment-inputs`.
   launchd/systemd restart the daemon. Auto-update never downgrades. To bypass a
   transient backoff, use `bb machine retry-update <id-or-name>`. Remove
   `--auto-update` from the service definition and reload it to opt out.
-- Run `bb machine list` to see machine names, IDs, connection status, and last
-  seen time (`--json` returns the raw host list). Use `--machine <id-or-name>`
+- Run `bb machine list` to see machine names, the server role, IDs, type,
+  connection status, and last seen time (`--json` returns the raw host list). It shows persistent
+  machines; pass `--all` to include the disposable sandboxes environment
+  providers create per thread. Use `--machine <id-or-name>`
   (alias `--host`) on `bb thread spawn` to run in a personal or unmanaged
   workspace, or combine it with `--new-environment worktree`. Do not combine a
   machine selector with an existing environment ID, which already owns its
@@ -74,8 +96,8 @@ worktree` only; a provider takes its branch through `--environment-inputs`.
   surface that sets it, and machine credentials are refused — so read it from
   `bb machine list --json` or `bb machine show` and ask the user to change it
   in the app.
-- `bb machine list`, `show`, `join-code`, `rename`, `retry-update`,
-  and `remove` cover the Settings →
+- `bb machine providers`, `show`, `rename`, `retry-update`,
+  `suspend`, `resume`, `retry-cleanup`, and `remove` cover the Settings →
   Machines lifecycle. Use `bb machine provider-cli status|install` to inspect
   or install provider CLIs on a selected machine.
 - `bb updates` runs the default `bb updates status` action. It aggregates BB and provider
@@ -96,7 +118,7 @@ worktree` only; a provider takes its branch through `--environment-inputs`.
 - `bb project paths|files|content|commands` accept `--machine <id-or-name>`
   (`--host` alias) or `--environment <id>`, but not both. An environment uses
   its owning machine and workspace; an explicit machine uses that machine's
-  project source; omitting both intentionally uses the primary machine source.
+  project source; omitting both intentionally uses the server machine's source.
   `bb project content --json` returns UTF-8 text or base64 binary content with
   an explicit `contentEncoding`.
   Project/environment file and path searches honor Git ignore rules, retaining
@@ -108,12 +130,14 @@ worktree` only; a provider takes its branch through `--environment-inputs`.
   different hosts. It reads locally and sends multipart bytes through the
   configured `BB_SERVER_URL` (and its enrolled-machine authentication proxy),
   returning the stable server attachment DTO. Optional `--filename` and
-  `--mime-type` override inferred metadata. Pass the returned relative `path`
-  to thread `--file` or `--image`; image MIME types are capped at 10MB and
-  other files at 25MB, and image/heic or image/heif uploads are rejected
-  (convert them to JPEG or PNG first). `bb project attachment download <project-id>
-<attachment-path> --client-file <path>` writes existing attachment bytes on
-  the CLI machine. There is no project-attachment list or per-file remove API.
+  `--mime-type` override inferred metadata. Thread `--file` and `--image` perform this
+  upload automatically for absolute paths and `file:` URLs; use the explicit
+  command when a reusable attachment token is needed. Image MIME types are
+  capped at 10MB and other files at 25MB, and image/heic or image/heif uploads
+  are rejected (convert them to JPEG or PNG first). `bb project attachment
+download <project-id> <attachment-path> --client-file <path>` writes existing
+  attachment bytes on the CLI machine. There is no project-attachment list or
+  per-file remove API.
 - `bb project history|reorder` exposes project prompt recall and sidebar order.
 - Use `bb project show|update|delete` for one project. Use `bb project source
 update|delete` for one source. Use `bb project branches` for branch data.
@@ -146,7 +170,10 @@ environment pull-request show <id>`. Diff commands require an explicit target
   and `bb provider models <provider-id>`. Both accept `--machine <id-or-name>`
   (alias `--host`) or `--environment <id>` to inspect the machine where work
   will run; the selectors cannot be combined. With neither selector they
-  intentionally inspect the primary machine.
+  intentionally inspect the server machine. Model lists answer from the
+  machine's last stored list while a background refresh runs, so a list can be
+  hours old. A provider whose refresh keeps failing or timing out keeps
+  answering from its last stored list.
 - Top-level `customModels` in the same `config.json` registers extra picker
   models. Use a provider ID returned by the target host's catalog. Acceptance
   of unlisted models is provider-specific; consult that provider's skill.
@@ -162,9 +189,124 @@ or artifacts, validation performed, and blockers.
 
 `bb environment show <id>` includes the core-owned lifecycle phase, retirement deadline, and teardown status/attempt/message. Archive or delete the last live thread to begin its provider's retirement grace; unarchive cancels pending retirement. Teardown failures retry automatically. Checkout policy keeps its directory indefinitely.
 
+### Standalone machine creation
+
+`bb machine create --provider <id> [--key <idempotency-key>] [--inputs <JSON>]
+[--no-wait] [--json]` creates a machine without a thread. Omitted
+inputs are null and must satisfy the provider schema; omitted key is generated
+by the server. Supply a stable key to recover the same creation across retries.
+Creation is durable. `--no-wait` returns the host ID; `bb machine show
+<host-id>` inspects it and `bb machine remove <host-id>` cancels it. SIGINT
+stops following and exits with status 130 while creation continues.
+
+`bb machine show <id-or-name> --json` includes `providerDetails` inventory and
+estimates when available. Suspend requires idle threads and no open terminals;
+empty machines use the provider’s opt-in idle timeout. Resume waits for pending
+suspension and leaves an already-active machine active.
+
+### Local machine lifecycle
+
+`install-machine.sh --start|--stop|--uninstall --host-id <id>` operates on that machine's local
+installation. Optional `--server-url` and `--data-dir` assert its identity and
+installation location; BB_DATA_DIR is also an assertion, never permission to
+remove another installation. Uninstall checks ownership before stopping its
+service, releasing its port reservation and deleting its private files.
+
+### Moving the server
+
+Moving the server needs the default-off `serverMove` experiment:
+`bb settings experiment serverMove true`. Without it the server refuses
+`bb server move`, `bb server export`, and old-copy deletion with
+`server_move_experiment_disabled`.
+
+Run `bb server move --to <machine> --check` first. It prints blockers,
+warnings, and notes and exits nonzero while the move is blocked. A
+direct-address server also needs `--address <url>`: the URL every machine and
+app will use to reach the new server. When the target already has bb server
+data, pass `--archive-existing-data` to move it aside; it is never merged.
+Without `--check`, the command confirms (pass `--yes` in a non-interactive
+shell), stops all running work, and follows the steps. It exits 0 once the
+server has moved, 1 when the move fails or is cancelled, and 2 when the target
+never confirmed the switch; `--json` prints the final status. SIGINT stops
+following while the move continues. `bb server move status` shows the steps or
+the last move and also exits 2 while a move needs recovery.
+`bb server move cancel` cancels before the switch starts. While a move needs
+recovery (`recovery_required`: the old server stays up read-only and keeps
+retrying activation and checking `<serverUrl>/health`), cancel abandons it,
+rolling back the lock and `config.json` and keeping the server here; it warns
+and asks first because a target that already took over would leave two
+servers, and `--yes` skips the question.
+
+`bb server export --out <file>` writes a gzip archive of a running server with
+file mode 0600 and keeps it only when it matches the SHA-256 digest the server
+sent. The archive is not encrypted and holds the server's credentials and
+plugin secrets; the command warns about that, and `--json` prints `path`,
+`sizeBytes`, `sha256`, and `warning`.
+`bb server import <file> [--data-dir <dir>]` installs an export into a local
+data directory without calling a server. It refuses when that directory has a
+`bb.db` or bb is running from it, refuses an export made by a newer bb or by a
+server with the `serverMove` experiment off, and asks you to re-export an
+archive encrypted by an older bb. A rerun rolls back an interrupted import from
+`server-import-journal.json` before importing again (`--json` reports
+`rolledBackInterruptedImport: true`), and bb refuses to start a
+server on an interrupted import until then. Stop the original server before
+you start the imported one: both hold the same connect credential and would
+take each other's tunnel.
+
+An import also writes `server-connect-hold.json`, so the imported server starts
+without its connect tunnel. After the original server is stopped,
+`bb server allow-connect [--data-dir <dir>] [--yes] [--json]` removes the hold
+(`--json` prints `dataDir` and `connectHoldRemoved`); the tunnel starts the next
+time that server starts.
+
+The old computer's data directory keeps a `server-moved.json` lock, so bb runs
+there as a regular machine. `bb server delete-old-copy` deletes the server files
+the move left behind and keeps the lock. `bb server unlock` removes the lock so
+the old copy can start again; everything since the move is lost there, and the
+new server must be stopped first. It probes `<serverUrl>/health` (connect
+mode: `/api/v1/system/version` with the machine grant in `config.json`) and
+refuses while the new server answers, unless you pass `--force`; bb on that computer
+then starts the old server within a few seconds. Unlock also removes the new server's
+`serverUrl`, `serverHeaders`, `machineCredential`, and `connectMachineId` from
+that directory's `config.json`. These two commands also act on the local data
+directory only.
+
+### Private machine enrollment
+
+For an existing machine, use `bb machine create --provider manual` and run the
+printed command on the target. That command installs bb if needed and enrolls
+the machine with this server.
+
+Use `bb machine enroll --bootstrap-file <path>` or `--bootstrap-env <NAME>` on a machine that already has the CLI. Core prepares the versioned bundle; transport it through a private file or environment/stdin, never command arguments, logs, resource JSON, or a transcript. Enrollment refuses a different existing host/server identity and succeeds without another exchange when the same identity is already enrolled. The installer accepts `--bootstrap-env <NAME>` and invokes this command after installing bb. Machine state defaults to `~/.bb-machines/<server-host>`; an explicit `BB_DATA_DIR` must be isolated from the default BB instance. For remote non-login commands, discover `bb` on PATH and fall back to `~/.local/bin/bb`.
+
+Delivered enrollment bundles from v1 remain valid until their expiry. The CLI accepts both file and environment forms, upgrades the bundle to v2 headers locally, and persists legacy Connect redemption before enrollment so a retry reuses it. The installer upgrades v1 environment bundles before authenticated artifact downloads.
+
+The core `manual` provider appears as Manual machine setup. `bb machine create --provider manual` waits for the enrollment command to become ready, prints it once, and follows; `--no-wait` returns the creating host ID. Commands are no longer available after enrollment or removal. Manual machines never suspend or retire automatically. Removal revokes access; run the original installer with `--uninstall --host-id <id>` on the target using its original data directory.
+
 For paths a provider owns, bb runs `.bb-env-setup.sh` after create and
 `.bb-env-teardown.sh` before remove on that machine, with separate 15-minute
 timeouts. Setup failure fails the launch with output in provisioning progress;
-teardown script failure is logged and removal continues. Attaching a project
-checkout or personal workspace skips both hooks. Providers do not run these
+teardown script failure is logged and removal continues. Attaching a user-maintained project checkout or personal workspace skips both
+hooks. A fresh core clone on a new machine is owned and runs the hooks. Providers do not run these
 core hooks themselves.
+Thread startup does not validate agent credentials, fingerprint the checkout, or install agent CLIs.
+
+`bb machine list --json` includes lifecycle phase, progress, and any suspension or resume error.
+Maintenance interrupts active turns and closes terminals before saving. Submit a
+new continuation turn after restore; interrupted turns are never reported successful.
+
+Resuming a machine restores its provider state without rerunning environment setup.
+
+Personal file access: `bb project paths|files|content proj_personal` requires
+an explicit `--environment <id>` belonging to Personal. Personal has no default
+project source; the selected environment must be ready.
+
+## Lifecycle ownership
+
+Use `--lifecycle-owner-thread <id>` on spawn or fork only when the new thread
+should archive or delete with that owner. SDK spawn/fork use
+`lifecycleOwnerThreadId`. Responses return null for independent threads. The
+owner must be live; other projects, environments and hosts are allowed.
+Ownership is immutable. Stop does not cascade. Archive retains history; delete
+waits for dependent storage cleanup with durable retries. Unarchive the owner
+before explicitly unarchiving dependents.

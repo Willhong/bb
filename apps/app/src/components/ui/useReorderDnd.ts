@@ -16,8 +16,10 @@ import {
   type CollisionDetection,
   type DndContextProps,
   type DragEndEvent,
+  type DragMoveEvent,
   type DragOverEvent,
   type DragStartEvent,
+  type MeasuringConfiguration,
   type Modifier,
   type Sensor,
   type TouchSensorOptions,
@@ -43,10 +45,13 @@ const REORDER_MODIFIERS: Modifier[] = [restrictDragToVerticalAxis];
 export interface UseReorderDndArgs {
   onDragEnd: (event: DragEndEvent) => void;
   onDragStart?: (event: DragStartEvent) => void;
+  onDragMove?: (event: DragMoveEvent) => void;
   onDragOver?: (event: DragOverEvent) => void;
   onDragCancel?: () => void;
   collisionDetection?: CollisionDetection;
   touchSensor?: Sensor<TouchSensorOptions>;
+  axis?: "vertical" | "free";
+  measuring?: MeasuringConfiguration;
 }
 
 export type ReorderDndContextProps = Pick<
@@ -54,10 +59,12 @@ export type ReorderDndContextProps = Pick<
   | "sensors"
   | "collisionDetection"
   | "onDragStart"
+  | "onDragMove"
   | "onDragOver"
   | "onDragCancel"
   | "onDragEnd"
   | "modifiers"
+  | "measuring"
 >;
 
 export interface UseReorderDndResult {
@@ -69,10 +76,13 @@ export interface UseReorderDndResult {
 export function useReorderDnd({
   onDragEnd,
   onDragStart,
+  onDragMove,
   onDragOver,
   onDragCancel,
   collisionDetection = reorderCollisionDetection,
   touchSensor = TouchSensor,
+  axis = "vertical",
+  measuring,
 }: UseReorderDndArgs): UseReorderDndResult {
   const {
     beginDragClickSuppression,
@@ -140,17 +150,22 @@ export function useReorderDnd({
     () => ({
       sensors,
       collisionDetection,
-      modifiers: REORDER_MODIFIERS,
+      measuring,
+      modifiers: axis === "vertical" ? REORDER_MODIFIERS : [],
       onDragStart: handleDragStart,
+      onDragMove,
       onDragOver,
       onDragCancel: handleDragCancel,
       onDragEnd: handleDragEnd,
     }),
     [
+      axis,
       collisionDetection,
       handleDragCancel,
       handleDragEnd,
       handleDragStart,
+      measuring,
+      onDragMove,
       onDragOver,
       sensors,
     ],

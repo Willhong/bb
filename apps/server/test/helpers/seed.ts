@@ -82,7 +82,6 @@ export function seedHost(
   } = {},
 ) {
   return upsertHost(deps.db, deps.hub, {
-    type: "persistent",
     ...(args.connectMachineId !== undefined
       ? { connectMachineId: args.connectMachineId }
       : {}),
@@ -112,7 +111,6 @@ export function seedSession(deps: Pick<AppDeps, "db" | "hub">, hostId: string) {
     hostId,
     instanceId: "instance-1",
     hostName: "Test Host",
-    hostType: "persistent",
     dataDir: `/tmp/bb-host-data/${hostId}`,
     protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
     heartbeatIntervalMs: 5_000,
@@ -198,6 +196,7 @@ export function seedThread(
     title?: string | null;
     parentThreadId?: string | null;
     sourceThreadId?: string | null;
+    lifecycleOwnerThreadId?: string | null;
     originKind?: ThreadOriginKind | null;
     originPluginId?: string | null;
     titleFallback?: string | null;
@@ -213,6 +212,7 @@ export function seedThread(
     titleFallback: args.titleFallback ?? "Test Thread",
     parentThreadId: args.parentThreadId ?? null,
     sourceThreadId: args.sourceThreadId ?? null,
+    lifecycleOwnerThreadId: args.lifecycleOwnerThreadId ?? null,
     originKind: args.originKind ?? null,
     originPluginId: args.originPluginId ?? null,
     visibility: args.visibility ?? "visible",
@@ -293,19 +293,7 @@ export function seedEvent<TType extends ThreadEventType>(
     threadId: args.threadId,
     type: args.type,
   });
-  insertEvents(deps.db, deps.hub, [
-    {
-      createdAt: args.createdAt,
-      threadId: args.threadId,
-      environmentId: args.environmentId ?? null,
-      providerThreadId: args.providerThreadId ?? null,
-      scope: args.scope,
-      sequence: args.sequence,
-      type: args.type,
-      ...deriveStoredEventItemFields(event),
-      data: JSON.stringify(args.data),
-    },
-  ]);
+  seedStoredEvent(deps, { ...args, ...deriveStoredEventItemFields(event) });
 }
 
 export function seedTurnStarted(
@@ -332,6 +320,30 @@ export function seedTurnStarted(
     type: "turn/started",
     scope: turnScope(args.turnId),
     data: { providerThreadId },
+  });
+}
+
+export function seedThreadIdentity(
+  deps: Pick<AppDeps, "db" | "hub">,
+  args: {
+    createdAt?: number;
+    environmentId?: string | null;
+    providerThreadId: string;
+    sequence?: number;
+    threadId: string;
+  },
+): void {
+  seedEvent(deps, {
+    threadId: args.threadId,
+    environmentId: args.environmentId ?? null,
+    providerThreadId: args.providerThreadId,
+    createdAt: args.createdAt,
+    sequence:
+      args.sequence ??
+      getLatestThreadSequence(deps.db, { threadId: args.threadId }) + 1,
+    type: "thread/identity",
+    scope: threadScope(),
+    data: {},
   });
 }
 

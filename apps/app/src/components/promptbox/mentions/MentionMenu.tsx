@@ -12,26 +12,26 @@ import {
 } from "@bb/server-contract";
 import { directoryFromPath } from "@bb/thread-view";
 import { promptMentionResourceFromSuggestion } from "@/components/promptbox/editor/prompt-editor-serialization";
-import {
-  promptCommandIconName,
-  promptMentionIconName,
-} from "@/components/promptbox/mentions/prompt-mention-display";
+import { promptCommandIconName } from "@/components/promptbox/mentions/prompt-mention-display";
+import { PromptMentionIcon } from "@/components/promptbox/mentions/PromptMentionIcon";
 import { shouldLoadMoreCommandResults } from "@/components/promptbox/mentions/mention-menu-scroll";
 import { PluginIcon } from "@/components/plugin/PluginIcon";
 import { Icon } from "@bb/shared-ui/icon";
+import { Pill } from "@bb/shared-ui/pill";
 import { TruncateStart } from "@/components/ui/truncate-start.js";
 import { cn } from "@bb/shared-ui/lib/utils";
 import {
   EMPTY_ORDERED_MENTION_SUGGESTIONS,
-  type ComposerCommandSuggestion,
   type OrderedMentionSuggestions,
   type PromptMentionSuggestion,
+  type ProviderCommandSuggestion,
+  type ThreadMentionRelation,
   type TypeaheadMenuState,
 } from "@bb/client-core";
 
 export type TypeaheadSuggestion =
   | PromptMentionSuggestion
-  | ComposerCommandSuggestion;
+  | ProviderCommandSuggestion;
 
 interface MentionMenuProps {
   state: TypeaheadMenuState;
@@ -50,7 +50,7 @@ interface MentionResultsProps {
 }
 
 interface CommandResultsProps {
-  suggestions: readonly ComposerCommandSuggestion[];
+  suggestions: readonly ProviderCommandSuggestion[];
   selectedIndex: number;
   onApply: (item: TypeaheadSuggestion) => void;
   onDismiss?: () => void;
@@ -102,10 +102,55 @@ function getPathSectionLabel(item: PathMentionSuggestion): string {
   return "Workspace";
 }
 
+const THREAD_MENTION_RELATION_LABEL: Record<ThreadMentionRelation, string> = {
+  parent: "parent",
+  child: "child",
+  "same-parent": "same parent",
+  "same-environment": "same environment",
+};
+
+const THREAD_MENTION_RELATION_COMPACT_LABEL: Record<
+  ThreadMentionRelation,
+  string
+> = {
+  parent: "parent",
+  child: "child",
+  "same-parent": "same parent",
+  "same-environment": "same env",
+};
+
+function threadMentionRelationLabel(
+  relation: ThreadMentionRelation | null,
+): string | null {
+  return relation === null ? null : THREAD_MENTION_RELATION_LABEL[relation];
+}
+
+function ThreadRelationPill({ relation }: { relation: ThreadMentionRelation }) {
+  const label = THREAD_MENTION_RELATION_LABEL[relation];
+  const compactLabel = THREAD_MENTION_RELATION_COMPACT_LABEL[relation];
+  return (
+    <Pill variant="secondary" size="sm">
+      {label === compactLabel ? (
+        label
+      ) : (
+        <>
+          <span className="@max-[26rem]/mention-menu:hidden">{label}</span>
+          <span className="hidden @max-[26rem]/mention-menu:inline">
+            {compactLabel}
+          </span>
+        </>
+      )}
+    </Pill>
+  );
+}
+
 function getMentionTitle(item: PromptMentionSuggestion): string {
   if (item.kind === "thread") {
     const title = item.title || item.path;
-    return item.projectName ? `${title} · ${item.projectName}` : title;
+    const relationLabel = threadMentionRelationLabel(item.relation);
+    return [title, item.projectName, relationLabel]
+      .filter((part): part is string => part !== undefined && part !== null)
+      .join(" · ");
   }
 
   if (item.kind === "project") {
@@ -158,7 +203,7 @@ function getCommandSectionLabel(kind: CommandSectionKind): string {
 
 const ROW_ICON_CLASS = "size-3.5 shrink-0 text-muted-foreground";
 
-function getCommandIcon(item: ComposerCommandSuggestion): ReactNode {
+function getCommandIcon(item: ProviderCommandSuggestion): ReactNode {
   if (item.pluginId !== undefined) {
     return (
       <PluginIcon
@@ -177,26 +222,7 @@ function getCommandIcon(item: ComposerCommandSuggestion): ReactNode {
   );
 }
 
-function getMentionIcon(item: PromptMentionSuggestion): ReactNode {
-  if (item.kind === "plugin") {
-    return (
-      <PluginIcon
-        pluginId={item.pluginId}
-        icon={item.icon}
-        className={ROW_ICON_CLASS}
-      />
-    );
-  }
-  return (
-    <Icon
-      name={promptMentionIconName(promptMentionResourceFromSuggestion(item))}
-      className={ROW_ICON_CLASS}
-      aria-hidden
-    />
-  );
-}
-
-function getCommandKey(item: ComposerCommandSuggestion): string {
+function getCommandKey(item: ProviderCommandSuggestion): string {
   return JSON.stringify([
     item.kind,
     item.source,
@@ -232,8 +258,8 @@ interface SuggestionRowProps {
   icon: ReactNode;
   primary: string;
   trailing: ReactNode;
+  badge?: ReactNode;
   title: string;
-  rowKey: string;
   onApply: () => void;
   itemRefs: React.MutableRefObject<Array<HTMLButtonElement | null>>;
 }
@@ -244,15 +270,14 @@ function SuggestionRow({
   icon,
   primary,
   trailing,
+  badge,
   title,
-  rowKey,
   onApply,
   itemRefs,
 }: SuggestionRowProps) {
   const isSelected = index === selectedIndex;
   return (
     <button
-      key={rowKey}
       ref={(element) => {
         itemRefs.current[index] = element;
       }}
@@ -271,6 +296,9 @@ function SuggestionRow({
         {icon}
         <span className="truncate text-foreground">{primary}</span>
         {trailing}
+        {badge === undefined ? null : (
+          <span className="ml-auto shrink-0">{badge}</span>
+        )}
       </div>
     </button>
   );
@@ -393,7 +421,12 @@ function MentionResults({
                   key={getMentionKey(item)}
                   index={index}
                   selectedIndex={selectedIndex}
-                  icon={getMentionIcon(item)}
+                  icon={
+                    <PromptMentionIcon
+                      resource={promptMentionResourceFromSuggestion(item)}
+                      className={ROW_ICON_CLASS}
+                    />
+                  }
                   primary={primary}
                   trailing={
                     secondaryContext === null ? null : secondaryContextKind ===
@@ -403,8 +436,12 @@ function MentionResults({
                       <MutedTrailing>{secondaryContext}</MutedTrailing>
                     )
                   }
+                  badge={
+                    item.kind === "thread" && item.relation !== null ? (
+                      <ThreadRelationPill relation={item.relation} />
+                    ) : undefined
+                  }
                   title={getMentionTitle(item)}
-                  rowKey={getMentionKey(item)}
                   onApply={() => onApply(item)}
                   itemRefs={itemRefs}
                 />
@@ -467,7 +504,6 @@ function CommandResults({
                   </>
                 }
                 title={item.description ?? item.name}
-                rowKey={getCommandKey(item)}
                 onApply={() => onApply(item)}
                 itemRefs={itemRefs}
               />
@@ -496,7 +532,7 @@ function mentionResults(state: TypeaheadMenuState): OrderedMentionSuggestions {
 
 function commandSuggestions(
   state: TypeaheadMenuState,
-): readonly ComposerCommandSuggestion[] {
+): readonly ProviderCommandSuggestion[] {
   return state.trigger === "command" && state.state.kind === "results"
     ? state.state.suggestions
     : [];
@@ -545,7 +581,7 @@ export function MentionMenu({
   }, [resultsLength, selectedIndex]);
 
   return (
-    <div className="overflow-hidden rounded-md border border-border bg-popover text-popover-foreground">
+    <div className="@container/mention-menu overflow-hidden rounded-md border border-border bg-popover text-popover-foreground">
       <div className="max-h-48 overflow-y-auto" onScroll={handleScroll}>
         {innerState.kind === "hint" ? (
           <MenuStatusRow

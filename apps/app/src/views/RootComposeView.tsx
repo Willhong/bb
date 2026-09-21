@@ -1,3 +1,4 @@
+import { useInitialPromptDraft } from "@/components/promptbox/mentions/initial-prompt-draft";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -88,10 +89,6 @@ import {
   FORK_THREAD_CREATE_SEED_LOCATION_STATE_KEY,
   type ForkThreadCreateSeed,
 } from "@bb/client-core";
-import {
-  buildThreadHandoffPromptDraft,
-  readThreadHandoffCreateSeedFromLocationState,
-} from "@bb/client-core";
 import { useNavigateToThreadAfterCreatePreference } from "@/lib/root-compose-create-preference";
 import {
   readInitialPromptFromSearch,
@@ -181,6 +178,10 @@ import {
   useAppCommandShortcut,
 } from "@/components/commands/AppCommandProvider";
 import { useOptionalPaneContext } from "./thread-detail/PaneContext";
+import {
+  PluginDetailPanelContext,
+  usePluginDetailPanelState,
+} from "@/components/plugin/plugin-detail-navigation";
 import { RootComposePanelCommandHandlers } from "./RootComposePanelCommandHandlers";
 import {
   ROOT_COMPOSE_FIXED_PANEL_STATE_ID,
@@ -399,8 +400,7 @@ export function hasSingleUseRootComposeTargetState(state: unknown): boolean {
   return (
     readRootComposeSectionTargetFromLocationState(state) !== null ||
     readReuseEnvironmentIdFromLocationState(state) !== null ||
-    readForkThreadCreateSeedFromLocationState(state) !== null ||
-    readThreadHandoffCreateSeedFromLocationState(state) !== null
+    readForkThreadCreateSeedFromLocationState(state) !== null
   );
 }
 
@@ -548,6 +548,7 @@ export function RootComposeView() {
               input: request.input,
               model: request.model,
               permissionMode: request.permissionMode,
+              pluginSubmission: request.pluginSubmission,
               providerSupportsFork:
                 findCachedProviderInfo(queryClient, forkSeed.providerId)
                   ?.capabilities.supportsFork ?? false,
@@ -556,7 +557,12 @@ export function RootComposeView() {
             });
       if (createRequest === null) return;
       const thread = await createThread.mutateAsync(
-        sendAt === undefined ? createRequest : { ...createRequest, sendAt },
+        sendAt === undefined
+          ? createRequest
+          : {
+              ...createRequest,
+              ...(sendAt === undefined ? {} : { sendAt }),
+            },
       );
       setLastCreatedThreadId(thread.id);
       setForkSeed(null);
@@ -650,6 +656,10 @@ function RootComposeSurface({
 }: RootComposeSurfaceProps) {
   const paneContext = useOptionalPaneContext();
   const isFocusedPane = paneContext?.isFocused ?? true;
+  const pluginDetails = usePluginDetailPanelState(
+    ROOT_COMPOSE_FIXED_PANEL_STATE_ID,
+    isFocusedPane,
+  );
   const location = useLocation();
   const navigate = useNavigate();
   const isPointerCoarse = usePointerCoarse();
@@ -669,7 +679,7 @@ function RootComposeSurface({
     panelThreadId: rootPanelThreadId,
     selectedProviderId,
     promptDraft,
-    promptBoxRef,
+    focusPromptBox,
     pluginComposerHost: sharedPluginComposerHost,
     textEffects: promptTextEffects,
     isSubmitting,
@@ -700,27 +710,31 @@ function RootComposeSurface({
     () =>
       subscribeComposerFocusRequests(promptDraft.storageKey, () => {
         setStartedComposing(true);
-        window.requestAnimationFrame(() => promptBoxRef.current?.focusEnd());
+        window.requestAnimationFrame(focusPromptBox);
       }),
-    [promptBoxRef, promptDraft.storageKey, setStartedComposing],
+    [focusPromptBox, promptDraft.storageKey, setStartedComposing],
   );
   const handleRootPanelSelectionAddToChat = useCallback(
     (text: string, attachments?: readonly PromptDraftAttachment[]) => {
       promptDraft.addQuote(text, attachments);
       setStartedComposing(true);
-      window.requestAnimationFrame(() => promptBoxRef.current?.focusEnd());
+      window.requestAnimationFrame(focusPromptBox);
     },
-    [promptBoxRef, promptDraft, setStartedComposing],
+    [focusPromptBox, promptDraft, setStartedComposing],
   );
 
+  const searchInitialPrompt = readInitialPromptFromSearch(location.search);
+  const stateInitialPrompt = readInitialPromptFromLocationState(location.state);
+  const searchInitialDraft = useInitialPromptDraft(searchInitialPrompt);
+  const stateInitialDraft = useInitialPromptDraft(stateInitialPrompt);
   const setPromptDraft = promptDraft.setDraft;
   const restorePromptDraftIfEmpty = promptDraft.restoreIfEmpty;
 
   useEffect(() => {
     const initialPrompt = readInitialPromptFromSearch(location.search);
-    if (initialPrompt === null) return;
+    if (initialPrompt === null || searchInitialDraft === undefined) return;
     setStartedComposing(true);
-    setPromptDraft({ text: initialPrompt, mentions: [], attachments: [] });
+    setPromptDraft(searchInitialDraft);
     navigate(
       getRootComposeRoutePath() + stripInitialPromptFromSearch(location.search),
       { replace: true, state: location.state },
@@ -731,8 +745,10 @@ function RootComposeSurface({
     navigate,
     setPromptDraft,
     setStartedComposing,
+    searchInitialDraft,
   ]);
   useEffect(() => {
+    if (stateInitialPrompt !== null && stateInitialDraft === undefined) return;
     const sectionTarget = readRootComposeSectionTargetFromLocationState(
       location.state,
     );
@@ -740,9 +756,6 @@ function RootComposeSurface({
       location.state,
     );
     const nextForkSeed = readForkThreadCreateSeedFromLocationState(
-      location.state,
-    );
-    const nextHandoffSeed = readThreadHandoffCreateSeedFromLocationState(
       location.state,
     );
     if (!hasSingleUseRootComposeTargetState(location.state)) return;
@@ -757,7 +770,7 @@ function RootComposeSurface({
     if (reuseEnvironmentId !== null) {
       seedEnvironmentSelectionValue(encodeReuseValue(reuseEnvironmentId));
     }
-    if (nextForkSeed !== null && nextHandoffSeed === null) {
+    if (nextForkSeed !== null) {
       setForkSeed(nextForkSeed);
       setRootComposeProjectId(nextForkSeed.projectId);
       setProviderModelReasoning(nextForkSeed);
@@ -766,17 +779,6 @@ function RootComposeSurface({
       seedEnvironmentSelectionValue(
         encodeReuseValue(nextForkSeed.environmentId),
       );
-    }
-    if (nextHandoffSeed !== null) {
-      setStartedComposing(true);
-      setRootComposeProjectId(nextHandoffSeed.projectId);
-      setForkSeed(null);
-      if (nextHandoffSeed.environmentId !== null) {
-        seedEnvironmentSelectionValue(
-          encodeReuseValue(nextHandoffSeed.environmentId),
-        );
-      }
-      setPromptDraft(buildThreadHandoffPromptDraft(nextHandoffSeed));
     }
     navigate(getRootComposeRoutePath() + location.search, {
       replace: true,
@@ -789,17 +791,18 @@ function RootComposeSurface({
     seedEnvironmentSelectionValue,
     setForkSeed,
     setPermissionMode,
-    setPromptDraft,
     setProviderModelReasoning,
     setRootComposeProjectId,
     setRootComposeSectionId,
     setServiceTier,
     setStartedComposing,
+    stateInitialPrompt,
+    stateInitialDraft,
   ]);
   useEffect(() => {
     const initialPrompt = readInitialPromptFromLocationState(location.state);
-    if (initialPrompt === null) return;
-    const nextDraft = { text: initialPrompt, mentions: [], attachments: [] };
+    if (initialPrompt === null || stateInitialDraft === undefined) return;
+    const nextDraft = stateInitialDraft;
     if (shouldReplaceInitialPromptFromLocationState(location.state)) {
       setPromptDraft(nextDraft);
     } else {
@@ -815,6 +818,7 @@ function RootComposeSurface({
     navigate,
     restorePromptDraftIfEmpty,
     setPromptDraft,
+    stateInitialDraft,
   ]);
   const shouldFocusPrompt =
     typeof location.state === "object" &&
@@ -823,11 +827,9 @@ function RootComposeSurface({
     location.state.focusPrompt === true;
   useEffect(() => {
     if (!shouldFocusPrompt || isPointerCoarse) return;
-    const handle = window.requestAnimationFrame(() => {
-      promptBoxRef.current?.focusEnd();
-    });
+    const handle = window.requestAnimationFrame(focusPromptBox);
     return () => window.cancelAnimationFrame(handle);
-  }, [isPointerCoarse, location.key, promptBoxRef, shouldFocusPrompt]);
+  }, [focusPromptBox, isPointerCoarse, location.key, shouldFocusPrompt]);
 
   const mobileRecentThreads = useMemo(
     () => buildMobileRecentThreads({ sidebarNavigation }),
@@ -910,9 +912,11 @@ function RootComposeSurface({
       isCompactViewport,
       threadId: ROOT_COMPOSE_FIXED_PANEL_STATE_ID,
     });
-  const isSecondaryPanelOpen = isCompactViewport
+  const isWorkspacePanelOpen = isCompactViewport
     ? secondaryPanelDrawerVisibility.isDrawerVisible
     : isPersistedSecondaryPanelOpen;
+  const isSecondaryPanelOpen =
+    isWorkspacePanelOpen || pluginDetails.activePluginId !== null;
   const touchFixedPanelTabsState = useTouchFixedPanelTabsState(
     ROOT_COMPOSE_FIXED_PANEL_STATE_ID,
     null,
@@ -1138,7 +1142,7 @@ function RootComposeSurface({
     openTab({ kind: "new-tab" });
   }, [closeRootSecondaryPanel, isPersistedSecondaryPanelOpen, openTab]);
   const {
-    closePanel: closeSecondaryPanel,
+    closePanel: closeWorkspacePanel,
     openCompactDrawer,
     openHostFile,
     openStorageFile,
@@ -1157,6 +1161,11 @@ function RootComposeSurface({
     openPersistedWorkspaceFile,
     togglePersistedPanel: toggleRootPersistedSecondaryPanel,
   });
+  const dismissPluginDetails = pluginDetails.dismiss;
+  const closeSecondaryPanel = useCallback(() => {
+    dismissPluginDetails();
+    closeWorkspacePanel();
+  }, [dismissPluginDetails, closeWorkspacePanel]);
   const handleOpenLiveFilePreview = useCallback(
     (intent: AppFilePreviewIntent): boolean => {
       const normalized = normalizeExperimentalFileOpenOptions(intent);
@@ -1505,6 +1514,10 @@ function RootComposeSurface({
     ],
   );
   const handleCloseWindowRequest = useCallback(() => {
+    if (pluginDetails.activePluginId !== null) {
+      pluginDetails.close(pluginDetails.activePluginId);
+      return true;
+    }
     if (!isSecondaryPanelOpen) {
       return false;
     }
@@ -1527,6 +1540,7 @@ function RootComposeSurface({
     closeTab,
     handleCloseTerminalTab,
     isSecondaryPanelOpen,
+    pluginDetails,
   ]);
   const [openLinksInAppBrowser] = useOpenLinksInAppBrowserPreference();
   const desktopBrowserAvailable = isDesktopBrowserAvailable();
@@ -1797,14 +1811,12 @@ function RootComposeSurface({
     if (!startedComposing) return;
     if (isProviderCliVersionBlocked) return;
     if (isPointerCoarse) return;
-    const handle = window.requestAnimationFrame(() => {
-      promptBoxRef.current?.focusEnd();
-    });
+    const handle = window.requestAnimationFrame(focusPromptBox);
     return () => window.cancelAnimationFrame(handle);
   }, [
     isProviderCliVersionBlocked,
     isPointerCoarse,
-    promptBoxRef,
+    focusPromptBox,
     startedComposing,
   ]);
   const [machineSetupTarget, setMachineSetupTarget] =
@@ -1843,10 +1855,8 @@ function RootComposeSurface({
   );
   const handleCancelForkDraft = useCallback(() => {
     setForkSeed(null);
-    window.requestAnimationFrame(() => {
-      promptBoxRef.current?.focusEnd();
-    });
-  }, [promptBoxRef, setForkSeed]);
+    window.requestAnimationFrame(focusPromptBox);
+  }, [focusPromptBox, setForkSeed]);
 
   const promptHeader = useMemo(() => {
     if (forkSeed === null) {
@@ -1854,7 +1864,6 @@ function RootComposeSurface({
     }
     return (
       <div className="flex">
-        {}
         <div
           aria-label={`Forking ${forkSeed.sourceThreadTitle}`}
           className="-ml-1.5 inline-flex h-7 max-w-full items-center gap-1.5 rounded-full bg-muted py-0 pl-2.5 pr-1 text-xs font-medium text-muted-foreground"
@@ -1930,10 +1939,13 @@ function RootComposeSurface({
     />
   );
 
+  const isCompactHomeLayout = isCompactViewport && !showEmptyWelcome;
+
   const promptBox = renderPromptBox({
     id: "root-compose-prompt",
     autoFocus: !isProviderCliVersionBlocked,
     allowSoftKeyboardAutoFocus: isCompactViewport,
+    mentionMenuPlacement: isCompactHomeLayout ? "top" : "bottom",
     banner: promptBanner,
     header: promptHeader,
     blockedReason: isProviderCliVersionBlocked
@@ -1958,7 +1970,7 @@ function RootComposeSurface({
   });
 
   return (
-    <>
+    <PluginDetailPanelContext.Provider value={pluginDetails}>
       <RootComposePanelCommandHandlers
         isFocused={isFocusedPane}
         onClose={handleCloseWindowRequest}
@@ -1981,6 +1993,7 @@ function RootComposeSurface({
                   ? ROOT_COMPOSE_EMPTY_WELCOME_CONTENT_CLASS
                   : ROOT_COMPOSE_SIDEBAR_ACTION_ALIGNED_TOP_PADDING_CLASS
               }
+              isCompactHomeLayout={isCompactHomeLayout}
               compactScrollContent={
                 showEmptyWelcome ? null : (
                   <RootComposeMobileRecents
@@ -2035,6 +2048,6 @@ function RootComposeSurface({
           </AppNavigationHostProvider>
         </UrlOpenRoutingProvider>
       </PluginComposerHostProvider>
-    </>
+    </PluginDetailPanelContext.Provider>
   );
 }

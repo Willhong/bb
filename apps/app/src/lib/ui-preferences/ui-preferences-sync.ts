@@ -1,11 +1,10 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { SetStateAction, WritableAtom } from "jotai";
 import { getDefaultStore } from "jotai";
-import {
-  getUiPreferenceDefault,
-  type UiPreferenceEntry,
-  type UiPreferenceKey,
-  type UiPreferenceValue,
+import type {
+  UiPreferenceEntry,
+  UiPreferenceKey,
+  UiPreferenceValue,
 } from "@bb/domain";
 import type { UiPreferencesResponse } from "@bb/server-contract";
 import { appToast } from "@/components/ui/app-toast";
@@ -137,21 +136,22 @@ function reconcileUiPreference<Key extends UiPreferenceKey>(
   const state = getSyncState(key);
   if (state.pending !== null || state.inFlight !== null) return;
   const entry = response.preferences[key];
+  if (entry === undefined) return;
+  const cachedEntry = getCachedUiPreferences(activeContext.queryClient)
+    ?.preferences[key];
+  if (cachedEntry !== undefined && cachedEntry.revision > entry.revision)
+    return;
   if (entry.revision === 0 && !state.migrationAttempted) {
     state.migrationAttempted = true;
     const legacy = readLegacyLocalUiPreference(key);
     clearLegacyLocalUiPreference(key);
-    if (
-      legacy !== undefined &&
-      !areUiPreferenceValuesEqual(legacy, getUiPreferenceDefault(key))
-    ) {
+    if (legacy !== undefined) {
       activeContext.store.set(valueAtom, legacy);
       state.pending = [{ source: "migration", update: legacy }];
       void flushUiPreference(key);
       return;
     }
   }
-  if (entry.revision === 0) return;
   clearLegacyLocalUiPreference(key);
   if (
     areUiPreferenceValuesEqual(activeContext.store.get(valueAtom), entry.value)
@@ -202,7 +202,7 @@ function recordServerEntry<Key extends UiPreferenceKey>(
   const cached = getCachedUiPreferences(queryClient);
   if (
     cached === undefined ||
-    cached.preferences[key].revision >= entry.revision
+    (cached.preferences[key]?.revision ?? -1) >= entry.revision
   ) {
     return;
   }
@@ -218,12 +218,18 @@ async function writeUiPreference<Key extends UiPreferenceKey>(
 ): Promise<void> {
   let base = (await readCurrentUiPreferences(queryClient)).preferences[key];
   for (let attempt = 1; attempt <= MAX_WRITE_ATTEMPTS; attempt++) {
+    if (base === undefined) return;
     const applicable =
       base.revision === 0
         ? operations
         : operations.filter((operation) => operation.source === "user");
     const value = applyOperations(applicable, base.value);
-    if (areUiPreferenceValuesEqual(value, base.value)) return;
+    if (
+      applicable.length === 0 ||
+      (base.revision > 0 && areUiPreferenceValuesEqual(value, base.value))
+    ) {
+      return;
+    }
     try {
       const response = await sdk.system.uiPreferences.set({
         expectedRevision: base.revision,

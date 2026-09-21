@@ -17,45 +17,15 @@ import {
 } from "@bb/shared-ui/resource-list";
 import type { PluginCatalogSearchEntry } from "@/hooks/queries/plugin-catalog-queries";
 import { PluginOverviewMarkdown } from "@/components/plugin/management/PluginOverviewMarkdown";
-import { CatalogEntryIconChip, PluginCategoryLabel } from "./plugin-ui";
-import { PluginAuthorAvatar } from "./PluginAuthorAvatar";
-import { PluginAuthorLink } from "./PluginAuthorLink";
+import {
+  CatalogEntryIconChip,
+  formatUrlLabel,
+  PluginCategoryLabel,
+} from "./plugin-ui";
 import {
   entriesByMarketplaceAuthor,
-  pluginAuthorGithub,
   pluginMarketplaceAuthorKey,
 } from "./plugin-marketplace-author";
-
-function repositoryLinkLabel(url: string): string {
-  return url.replace(/^https?:\/\//u, "").replace(/\/+$/u, "");
-}
-
-export function PluginMarketplaceHeaderMetadata({
-  entry,
-}: {
-  entry: PluginCatalogSearchEntry;
-}) {
-  if (entry.author === null) return null;
-  const author = entry.author;
-  return (
-    <span className="inline-flex min-w-0 items-center gap-1.5">
-      <PluginAuthorAvatar
-        name={author.name}
-        github={pluginAuthorGithub(author)}
-        size="detail"
-      />
-      <span className="min-w-0">
-        By{" "}
-        <PluginAuthorLink
-          entry={entry}
-          className="rounded-sm underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          {author.name}
-        </PluginAuthorLink>
-      </span>
-    </span>
-  );
-}
 
 export function PluginMarketplaceCategoryPill({
   entry,
@@ -109,10 +79,10 @@ function PluginMarketplaceDetails({
   );
 }
 
-function PluginMarketplaceSource({
+export function PluginMarketplaceSource({
   entry,
 }: {
-  entry: PluginCatalogSearchEntry;
+  entry: Pick<PluginCatalogSearchEntry, "repositoryUrl">;
 }) {
   if (entry.repositoryUrl === null) return null;
   return (
@@ -123,9 +93,14 @@ function PluginMarketplaceSource({
         rel="noreferrer"
         className="inline-flex max-w-full items-center gap-1.5 rounded-sm text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
-        <span className="truncate">
-          {repositoryLinkLabel(entry.repositoryUrl)}
-        </span>
+        {entry.repositoryUrl.startsWith("https://github.com/") ? (
+          <Icon
+            name="GithubLogo"
+            className="size-4.5 shrink-0 fill-current [&_*]:stroke-0"
+            aria-hidden
+          />
+        ) : null}
+        <span className="truncate">{formatUrlLabel(entry.repositoryUrl)}</span>
         <Icon name="ExternalLink" className="size-3.5 shrink-0" aria-hidden />
         <span className="sr-only">Opens in a new tab</span>
       </a>

@@ -6,7 +6,7 @@ import { ApiError } from "../../errors.js";
 import type { ThreadTimelinePageRequest } from "./timeline-pagination.js";
 
 const snapshotSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(3),
   threadId: z.string(),
   maxSeq: z.number().int().nonnegative(),
   status: threadStatusSchema,
@@ -19,12 +19,20 @@ export const timelineContentCursorSchema = z.object({
 export type TimelineContentCursor = z.infer<typeof timelineContentCursorSchema>;
 const cursorSchema = z.object({
   snapshot: snapshotSchema,
-  anchorSeq: z.number().int().positive(),
+  anchorSeq: z.number().int().nonnegative(),
   anchorId: z.string().min(1),
   content: timelineContentCursorSchema.optional(),
 });
 export type TimelineSnapshot = z.infer<typeof snapshotSchema>;
-const PREFIX = "timeline-v1:";
+const PREFIX = "timeline-v3:";
+
+function decodeTimelineCursor(anchorId: string): z.infer<typeof cursorSchema> {
+  return cursorSchema.parse(
+    JSON.parse(
+      Buffer.from(anchorId.slice(PREFIX.length), "base64url").toString("utf8"),
+    ),
+  );
+}
 
 export function resolveTimelineSnapshot(
   db: DbConnection,
@@ -36,7 +44,7 @@ export function resolveTimelineSnapshot(
   if (page.kind === "latest") {
     const maxSeq = getLatestThreadSequence(db, { threadId: thread.id });
     return {
-      version: 1,
+      version: 3,
       threadId: thread.id,
       maxSeq: Math.min(requestedMaxSeq ?? maxSeq, maxSeq),
       status: thread.status,
@@ -46,14 +54,7 @@ export function resolveTimelineSnapshot(
   try {
     if (!page.beforeCursor.anchorId.startsWith(PREFIX))
       throw new Error("Legacy cursor");
-    const decoded = cursorSchema.parse(
-      JSON.parse(
-        Buffer.from(
-          page.beforeCursor.anchorId.slice(PREFIX.length),
-          "base64url",
-        ).toString("utf8"),
-      ),
-    );
+    const decoded = decodeTimelineCursor(page.beforeCursor.anchorId);
     const { snapshot } = decoded;
     if (
       decoded.anchorSeq !== page.beforeCursor.anchorSeq ||
@@ -84,14 +85,7 @@ export function readTimelineContentCursor(
   page: ThreadTimelinePageRequest,
 ): TimelineContentCursor | undefined {
   if (page.kind === "latest") return undefined;
-  return cursorSchema.parse(
-    JSON.parse(
-      Buffer.from(
-        page.beforeCursor.anchorId.slice(PREFIX.length),
-        "base64url",
-      ).toString("utf8"),
-    ),
-  ).content;
+  return decodeTimelineCursor(page.beforeCursor.anchorId).content;
 }
 
 export function bindTimelineCursor(

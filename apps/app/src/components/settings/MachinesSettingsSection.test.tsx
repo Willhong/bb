@@ -7,14 +7,19 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import type { Host } from "@bb/domain";
 import { makeHost } from "@bb/test-helpers/domain-fixtures";
 import { RETRY_ACTION_ICON } from "@bb/domain/update-state";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@bb/host-daemon-contract";
-import type { SystemConfigResponse } from "@bb/server-contract";
+import type {
+  ServerMoveStatus,
+  SystemConfigResponse,
+  SystemMachineProvider,
+} from "@bb/server-contract";
 import { MemoryRouter, useLocation } from "react-router-dom";
+import { defaultExperiments, type Host } from "@bb/domain";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sdk } from "@/lib/sdk";
+import { serverMoveStatusQueryKey } from "@/hooks/queries/query-keys";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import { makeSystemConfig } from "@/test/fixtures/system-config";
 import { MachinesSettingsSection } from "./MachinesSettingsSection";
@@ -22,10 +27,19 @@ import { focusWithKeyboard } from "@/test/keyboard-focus";
 
 vi.mock("@/lib/sdk", () => ({
   sdk: {
+    experimental_server: {
+      checkMove: vi.fn(),
+      moveStatus: vi.fn(),
+      startMove: vi.fn(),
+    },
     hosts: {
       delete: vi.fn(),
       list: vi.fn(),
+      experimental_listProviders: vi.fn(),
+      experimental_resume: vi.fn(),
+      experimental_retryCleanup: vi.fn(),
       retryUpdate: vi.fn(),
+      experimental_suspend: vi.fn(),
       update: vi.fn(),
     },
     system: { config: vi.fn() },
@@ -64,11 +78,29 @@ const offlineHost = host({
   status: "disconnected",
   lastSeenAt: NOW - 2 * 60 * 60 * 1000,
 });
+const sandboxHost = host({
+  id: "host_sandbox",
+  name: "Modal sandbox 3f9a",
+  type: "ephemeral",
+  machineProviderId: "modal-sandbox",
+});
+const modalMachineProvider: SystemMachineProvider = {
+  id: "modal-sandbox",
+  displayName: "Modal Sandbox",
+  description: "Create a sandbox in your Modal account.",
+  icon: "Box",
+  logoUrl: null,
+  pluginId: "environment-modal-sandbox",
+  inputs: null,
+  acceptsEmptyInputs: true,
+  supportsSuspend: true,
+};
 
 function systemConfig(): SystemConfigResponse {
   return makeSystemConfig({
     primaryHostId: "host_primary",
     primaryHostPlatform: "darwin",
+    experiments: { ...defaultExperiments, serverMove: true },
   });
 }
 
@@ -105,15 +137,20 @@ function LocationProbe() {
   return <div data-testid="location">{location.pathname}</div>;
 }
 
-function renderSection() {
-  const { wrapper } = createQueryClientTestHarness();
-  return render(
+function renderSectionWithClient() {
+  const { queryClient, wrapper } = createQueryClientTestHarness();
+  render(
     <MemoryRouter>
       <MachinesSettingsSection />
       <LocationProbe />
     </MemoryRouter>,
     { wrapper },
   );
+  return { queryClient };
+}
+
+function renderSection() {
+  renderSectionWithClient();
 }
 
 async function openHostMenu(hostName: string): Promise<void> {
@@ -123,9 +160,33 @@ async function openHostMenu(hostName: string): Promise<void> {
   );
 }
 
+function preparingMove(): ServerMoveStatus {
+  return {
+    moveId: "move_1",
+    state: "preparing",
+    mode: "connect",
+    targetHostId: "host_desk",
+    targetHostName: "desk",
+    serverUrl: "https://sawyer.getbb.app",
+    destinationStatusUrl: null,
+    startedAt: NOW,
+    finishedAt: null,
+    error: null,
+    steps: [{ id: "stop-work", status: "running", message: null }],
+    cancellable: true,
+  };
+}
+
+const deskHost = host({ id: "host_desk", name: "desk" });
+
 beforeEach(() => {
   hostDaemon.localDaemonHostId = "host_primary";
   hostDaemon.platform = "darwin";
+  vi.mocked(sdk.hosts.experimental_listProviders).mockResolvedValue([]);
+  vi.mocked(sdk.experimental_server.moveStatus).mockResolvedValue({
+    move: null,
+    lastMove: null,
+  });
 });
 
 afterEach(() => {
@@ -135,6 +196,57 @@ afterEach(() => {
 });
 
 describe("MachinesSettingsSection", () => {
+  it("reveals sandboxes in the machine list behind Show all machines", async () => {
+    vi.mocked(sdk.system.config).mockResolvedValue(systemConfig());
+    vi.mocked(sdk.hosts.list).mockResolvedValue([primaryHost, sandboxHost]);
+    vi.mocked(sdk.hosts.experimental_listProviders).mockResolvedValue([
+      modalMachineProvider,
+    ]);
+    stubSidebarBootstrapFetch();
+
+    renderSection();
+
+    const persistentName = await screen.findByText(primaryHost.name);
+    expect(
+      persistentName.parentElement?.querySelector('[data-icon="Laptop"]'),
+    ).not.toBeNull();
+    expect(screen.queryByText(sandboxHost.name)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all machines" }));
+
+    const sandboxName = screen.getByText(sandboxHost.name);
+    expect(sandboxName.parentElement?.querySelector("svg")).not.toBeNull();
+    expect(
+      sandboxName.parentElement?.querySelector('[data-icon="Laptop"]'),
+    ).toBeNull();
+    expect(screen.queryByText(modalMachineProvider.displayName)).toBeNull();
+    await openHostMenu(sandboxHost.name);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Suspend" }));
+    await waitFor(() => {
+      expect(vi.mocked(sdk.hosts.experimental_suspend)).toHaveBeenCalledWith({
+        hostId: sandboxHost.id,
+      });
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show fewer machines" }),
+    );
+    expect(screen.queryByText(sandboxHost.name)).toBeNull();
+  });
+
+  it("offers no reveal when every machine is already listed", async () => {
+    vi.mocked(sdk.system.config).mockResolvedValue(systemConfig());
+    vi.mocked(sdk.hosts.list).mockResolvedValue([primaryHost]);
+    stubSidebarBootstrapFetch();
+
+    renderSection();
+
+    await screen.findByText(primaryHost.name);
+    expect(
+      screen.queryByRole("button", { name: "Show all machines" }),
+    ).toBeNull();
+  });
+
   it("renders machine status, project, and permission metadata as visible text", async () => {
     vi.mocked(sdk.system.config).mockResolvedValue(systemConfig());
     vi.mocked(sdk.hosts.list).mockResolvedValue([primaryHost, offlineHost]);
@@ -145,7 +257,7 @@ describe("MachinesSettingsSection", () => {
     expect(await screen.findByText("MacBook Pro")).toBeDefined();
     expect(screen.getByText("dev-vm")).toBeDefined();
     expect(screen.getByText("this machine")).toBeDefined();
-    expect(screen.getByText("primary")).toBeDefined();
+    expect(screen.getByText("server")).toBeDefined();
     expect(screen.getByText("Online")).toBeDefined();
     expect(screen.getByText(/^Offline · last seen/u)).toBeDefined();
     expect(await screen.findByText("2 projects")).toBeDefined();
@@ -155,11 +267,11 @@ describe("MachinesSettingsSection", () => {
     expect(
       screen
         .getByRole("link", { name: "Open MacBook Pro" })
-        .querySelector("[data-icon]"),
-    ).toBeNull();
+        .querySelector('[data-icon="Laptop"]'),
+    ).not.toBeNull();
   });
 
-  it("distinguishes the client-local daemon from the primary machine", async () => {
+  it("distinguishes the client-local daemon from the server machine", async () => {
     hostDaemon.localDaemonHostId = "host_remote";
     hostDaemon.platform = "linux";
     vi.mocked(sdk.system.config).mockResolvedValue(systemConfig());
@@ -170,12 +282,18 @@ describe("MachinesSettingsSection", () => {
 
     const primaryName = await screen.findByText("MacBook Pro");
     const localName = screen.getByText("dev-vm");
-    expect(primaryName.parentElement?.textContent).toContain("primary");
-    expect(primaryName.parentElement?.textContent).not.toContain(
+    expect(primaryName.parentElement?.parentElement?.textContent).toContain(
+      "server",
+    );
+    expect(primaryName.parentElement?.parentElement?.textContent).not.toContain(
       "this machine",
     );
-    expect(localName.parentElement?.textContent).toContain("this machine");
-    expect(localName.parentElement?.textContent).not.toContain("primary");
+    expect(localName.parentElement?.parentElement?.textContent).toContain(
+      "this machine",
+    );
+    expect(localName.parentElement?.parentElement?.textContent).not.toContain(
+      "server",
+    );
     expect(screen.getByText("Linux")).toBeDefined();
   });
 
@@ -190,10 +308,10 @@ describe("MachinesSettingsSection", () => {
 
     await screen.findByText("MacBook Pro");
     expect(screen.queryByText("this machine")).toBeNull();
-    expect(screen.getByText("primary")).toBeDefined();
+    expect(screen.getByText("server")).toBeDefined();
   });
 
-  it("does not promote a fallback host to primary policy", async () => {
+  it("does not promote a fallback host to the server badge", async () => {
     hostDaemon.localDaemonHostId = null;
     vi.mocked(sdk.system.config).mockResolvedValue({
       ...systemConfig(),
@@ -206,7 +324,40 @@ describe("MachinesSettingsSection", () => {
     renderSection();
 
     await screen.findByText("MacBook Pro");
-    expect(screen.queryByText("primary")).toBeNull();
+    expect(screen.queryByText("server")).toBeNull();
+    await openHostMenu("MacBook Pro");
+    expect(
+      screen
+        .getByRole("menuitem", { name: "Remove machine" })
+        .getAttribute("aria-disabled"),
+    ).toBeNull();
+  });
+
+  it("badges a lone server machine without marking it as this machine", async () => {
+    vi.mocked(sdk.system.config).mockResolvedValue(systemConfig());
+    vi.mocked(sdk.hosts.list).mockResolvedValue([primaryHost, sandboxHost]);
+    stubSidebarBootstrapFetch();
+
+    renderSection();
+
+    await screen.findByText("MacBook Pro");
+    expect(screen.getByText("server")).toBeDefined();
+    expect(screen.queryByText("this machine")).toBeNull();
+  });
+
+  it("keeps the server badge off a lone machine when the server machine is unknown", async () => {
+    vi.mocked(sdk.system.config).mockResolvedValue({
+      ...systemConfig(),
+      primaryHostId: null,
+      primaryHostPlatform: null,
+    });
+    vi.mocked(sdk.hosts.list).mockResolvedValue([primaryHost]);
+    stubSidebarBootstrapFetch();
+
+    renderSection();
+
+    await screen.findByText("MacBook Pro");
+    expect(screen.queryByText("server")).toBeNull();
     await openHostMenu("MacBook Pro");
     expect(
       screen
@@ -299,7 +450,12 @@ describe("MachinesSettingsSection", () => {
     expect(action?.parentElement?.className).toContain("sm:flex-row");
     fireEvent.click(addMachine);
     expect(
-      await screen.findByRole("heading", { name: "Add a machine" }),
+      await screen.findByRole("heading", { name: "Set up machine access" }),
+    ).toBeDefined();
+    expect(
+      screen.getByText(
+        "A new machine has to reach this server over the network. Choose the address it should use.",
+      ),
     ).toBeDefined();
   });
 
@@ -415,6 +571,21 @@ describe("MachinesSettingsSection", () => {
     expect(screen.getByTestId("location").textContent).toBe("/");
   });
 
+  it("stays on the machines list when a row menu item is selected", async () => {
+    vi.mocked(sdk.system.config).mockResolvedValue(systemConfig());
+    vi.mocked(sdk.hosts.list).mockResolvedValue([primaryHost, offlineHost]);
+    stubSidebarBootstrapFetch();
+
+    renderSection();
+
+    await screen.findByText("dev-vm");
+    await openHostMenu("dev-vm");
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
+
+    expect(await screen.findByLabelText("Machine name")).toBeDefined();
+    expect(screen.getByTestId("location").textContent).toBe("/");
+  });
+
   it("renames a machine through the row menu", async () => {
     vi.mocked(sdk.system.config).mockResolvedValue(systemConfig());
     vi.mocked(sdk.hosts.list).mockResolvedValue([primaryHost, offlineHost]);
@@ -467,7 +638,7 @@ describe("MachinesSettingsSection", () => {
     });
   });
 
-  it("disables removal of the primary machine", async () => {
+  it("disables removal of the server machine", async () => {
     vi.mocked(sdk.system.config).mockResolvedValue(systemConfig());
     vi.mocked(sdk.hosts.list).mockResolvedValue([primaryHost, offlineHost]);
     stubSidebarBootstrapFetch();
@@ -485,7 +656,7 @@ describe("MachinesSettingsSection", () => {
     focusWithKeyboard(removeItem);
     expect(
       await screen.findByRole("tooltip", {
-        name: "bb's primary machine can't be removed.",
+        name: "The server machine can't be removed. Move the server to another machine first.",
       }),
     ).toBeDefined();
     fireEvent.click(removeItem);
@@ -493,5 +664,169 @@ describe("MachinesSettingsSection", () => {
       screen.queryByRole("heading", { name: "Remove MacBook Pro?" }),
     ).toBeNull();
     expect(vi.mocked(sdk.hosts.delete)).not.toHaveBeenCalled();
+  });
+
+  it("points the explainer at Move server here", async () => {
+    vi.mocked(sdk.system.config).mockResolvedValue(systemConfig());
+    vi.mocked(sdk.hosts.list).mockResolvedValue([primaryHost]);
+    stubSidebarBootstrapFetch();
+
+    renderSection();
+
+    expect(
+      await screen.findByText(/To change which machine runs the server/u),
+    ).toBeDefined();
+  });
+
+  it("keeps Move server here and its explainer hidden while the serverMove experiment is off", async () => {
+    vi.mocked(sdk.system.config).mockResolvedValue({
+      ...systemConfig(),
+      experiments: defaultExperiments,
+    });
+    vi.mocked(sdk.hosts.list).mockResolvedValue([primaryHost, deskHost]);
+    stubSidebarBootstrapFetch();
+
+    renderSection();
+
+    await screen.findByText("desk");
+    expect(
+      screen.getByText(/awake and online to run the server\.$/u),
+    ).toBeDefined();
+    expect(
+      screen.queryByText(/To change which machine runs the server/u),
+    ).toBeNull();
+    await openHostMenu("desk");
+    await screen.findByRole("menuitem", { name: "Rename" });
+    expect(
+      screen.queryByRole("menuitem", { name: "Move server here" }),
+    ).toBeNull();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("menu")).toBeNull();
+    });
+    await openHostMenu("MacBook Pro");
+    focusWithKeyboard(
+      await screen.findByRole("menuitem", { name: "Remove machine" }),
+    );
+    expect(
+      await screen.findByRole("tooltip", {
+        name: "The server machine can't be removed.",
+      }),
+    ).toBeDefined();
+  });
+
+  it("offers Move server here only on connected, active persistent machines other than the server", async () => {
+    vi.mocked(sdk.system.config).mockResolvedValue(systemConfig());
+    vi.mocked(sdk.hosts.list).mockResolvedValue([
+      primaryHost,
+      deskHost,
+      offlineHost,
+      host({
+        id: "host_paused",
+        name: "paused-vm",
+        machineProviderId: "modal-sandbox",
+        lifecycle: {
+          phase: "suspending",
+          suspendedAt: null,
+          message: null,
+          pendingLog: "",
+          teardown: null,
+        },
+      }),
+      sandboxHost,
+    ]);
+    stubSidebarBootstrapFetch();
+
+    renderSection();
+
+    await screen.findByText("desk");
+    await waitFor(() => {
+      expect(vi.mocked(sdk.experimental_server.moveStatus)).toHaveBeenCalled();
+    });
+
+    await openHostMenu("desk");
+    expect(
+      await screen.findByRole("menuitem", { name: "Move server here" }),
+    ).toBeDefined();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+
+    for (const name of ["MacBook Pro", "dev-vm", "paused-vm"]) {
+      await openHostMenu(name);
+      await screen.findByRole("menuitem", { name: "Rename" });
+      expect(
+        screen.queryByRole("menuitem", { name: "Move server here" }),
+      ).toBeNull();
+      fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+      await waitFor(() => {
+        expect(screen.queryByRole("menu")).toBeNull();
+      });
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all machines" }));
+    await openHostMenu(sandboxHost.name);
+    await screen.findByRole("menuitem", { name: "Rename" });
+    expect(
+      screen.queryByRole("menuitem", { name: "Move server here" }),
+    ).toBeNull();
+  });
+
+  it("hides Move server here while a move is underway", async () => {
+    vi.mocked(sdk.system.config).mockResolvedValue(systemConfig());
+    vi.mocked(sdk.hosts.list).mockResolvedValue([primaryHost, deskHost]);
+    vi.mocked(sdk.experimental_server.moveStatus).mockResolvedValue({
+      move: preparingMove(),
+      lastMove: null,
+    });
+    stubSidebarBootstrapFetch();
+
+    const { queryClient } = renderSectionWithClient();
+
+    await screen.findByText("desk");
+    await waitFor(() => {
+      expect(queryClient.getQueryData(serverMoveStatusQueryKey())).toEqual({
+        move: preparingMove(),
+        lastMove: null,
+      });
+    });
+    await openHostMenu("desk");
+    await screen.findByRole("menuitem", { name: "Rename" });
+    expect(
+      screen.queryByRole("menuitem", { name: "Move server here" }),
+    ).toBeNull();
+  });
+
+  it("opens the move dialog and checks the machine without an address", async () => {
+    vi.mocked(sdk.system.config).mockResolvedValue(systemConfig());
+    vi.mocked(sdk.hosts.list).mockResolvedValue([primaryHost, deskHost]);
+    vi.mocked(sdk.experimental_server.checkMove).mockResolvedValue({
+      targetHostId: "host_desk",
+      targetHostName: "desk",
+      mode: "connect",
+      serverUrl: null,
+      requiresServerUrl: false,
+      targetDataDir: "/home/sawyer/.bb-machines/macbook-pro",
+      existingTargetServerData: null,
+      items: [],
+      canMove: true,
+    });
+    stubSidebarBootstrapFetch();
+
+    renderSection();
+
+    await screen.findByText("desk");
+    await openHostMenu("desk");
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Move server here" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Move the server to desk" }),
+    ).toBeDefined();
+    expect(screen.getByTestId("location").textContent).toBe("/");
+    await waitFor(() => {
+      expect(vi.mocked(sdk.experimental_server.checkMove)).toHaveBeenCalledWith(
+        { targetHostId: "host_desk", serverUrl: null },
+      );
+    });
   });
 });

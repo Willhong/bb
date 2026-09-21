@@ -1,3 +1,4 @@
+import { fuzzyMatchText } from "@bb/fuzzy-match";
 import {
   providerCommandSection,
   providerCommandSectionRank,
@@ -12,6 +13,15 @@ import type { OrderedMentionSuggestions } from "./mention-candidates.js";
 
 type PromptPathMentionSource = "workspace" | "thread-storage";
 type PromptPathMentionEntryKind = "file" | "directory";
+
+export const threadMentionRelationValues = [
+  "parent",
+  "child",
+  "same-parent",
+  "same-environment",
+] as const;
+export type ThreadMentionRelation =
+  (typeof threadMentionRelationValues)[number];
 
 export type PromptMentionSuggestion =
   | {
@@ -30,6 +40,7 @@ export type PromptMentionSuggestion =
       projectName?: string;
       threadId: string;
       title?: string;
+      relation: ThreadMentionRelation | null;
     }
   | {
       kind: "project";
@@ -81,17 +92,44 @@ export function toProviderCommandSuggestion(
   };
 }
 
-export type ComposerCommandSuggestion = ProviderCommandSuggestion;
+function matchingCommandNames(
+  suggestions: readonly ProviderCommandSuggestion[],
+  query: string,
+): Set<ProviderCommandSuggestion> {
+  return new Set(
+    fuzzyMatchText({
+      items: suggestions,
+      query,
+      getText: (suggestion) => suggestion.name,
+      limit: suggestions.length,
+    }).map((match) => match.item),
+  );
+}
+
+export function filterCommandSuggestions(
+  suggestions: readonly ProviderCommandSuggestion[],
+  query: string,
+): ProviderCommandSuggestion[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  const nameMatches = matchingCommandNames(suggestions, normalizedQuery);
+  return suggestions.filter(
+    (suggestion) =>
+      nameMatches.has(suggestion) ||
+      [suggestion.description ?? "", suggestion.argumentHint ?? ""].some(
+        (text) => text.toLowerCase().includes(normalizedQuery),
+      ),
+  );
+}
 
 function compareCommandSuggestionSections(
-  left: ComposerCommandSuggestion,
-  right: ComposerCommandSuggestion,
+  left: ProviderCommandSuggestion,
+  right: ProviderCommandSuggestion,
 ): number {
   return providerCommandSectionRank(left) - providerCommandSectionRank(right);
 }
 
 function commandSuggestionSearchNames(
-  suggestion: ComposerCommandSuggestion,
+  suggestion: ProviderCommandSuggestion,
 ): string[] {
   const name = suggestion.name.toLowerCase();
   if (suggestion.source !== "skill") {
@@ -102,8 +140,9 @@ function commandSuggestionSearchNames(
 }
 
 function commandSuggestionMatchRank(
-  suggestion: ComposerCommandSuggestion,
+  suggestion: ProviderCommandSuggestion,
   normalizedQuery: string,
+  nameMatches: ReadonlySet<ProviderCommandSuggestion>,
 ): number {
   const canonicalName = suggestion.name.toLowerCase();
   if (canonicalName === normalizedQuery) {
@@ -113,34 +152,42 @@ function commandSuggestionMatchRank(
   if (names.includes(normalizedQuery)) {
     return 1;
   }
-  return names.some((name) => name.startsWith(normalizedQuery)) ? 2 : 3;
+  if (names.some((name) => name.startsWith(normalizedQuery))) {
+    return 2;
+  }
+  if (names.some((name) => name.includes(normalizedQuery))) {
+    return 3;
+  }
+  return nameMatches.has(suggestion) ? 4 : 5;
 }
 
 function compareCommandSuggestions(
-  left: ComposerCommandSuggestion,
-  right: ComposerCommandSuggestion,
+  left: ProviderCommandSuggestion,
+  right: ProviderCommandSuggestion,
   normalizedQuery: string,
+  nameMatches: ReadonlySet<ProviderCommandSuggestion>,
 ): number {
   const byMatch =
-    commandSuggestionMatchRank(left, normalizedQuery) -
-    commandSuggestionMatchRank(right, normalizedQuery);
+    commandSuggestionMatchRank(left, normalizedQuery, nameMatches) -
+    commandSuggestionMatchRank(right, normalizedQuery, nameMatches);
   return byMatch !== 0
     ? byMatch
     : compareCommandSuggestionSections(left, right);
 }
 
 export function orderCommandSuggestions(
-  suggestions: readonly ComposerCommandSuggestion[],
+  suggestions: readonly ProviderCommandSuggestion[],
   query: string,
-): ComposerCommandSuggestion[] {
+): ProviderCommandSuggestion[] {
   const normalizedQuery = query.trim().toLowerCase();
+  const nameMatches = matchingCommandNames(suggestions, normalizedQuery);
   const ranked = [...suggestions].sort((left, right) =>
-    compareCommandSuggestions(left, right, normalizedQuery),
+    compareCommandSuggestions(left, right, normalizedQuery, nameMatches),
   );
 
   const bySection = new Map<
     ProviderCommandSection,
-    ComposerCommandSuggestion[]
+    ProviderCommandSuggestion[]
   >();
   for (const suggestion of ranked) {
     const section = providerCommandSection(suggestion);
@@ -188,7 +235,7 @@ export type CommandMenuState =
   | { kind: "error" }
   | {
       kind: "results";
-      suggestions: readonly ComposerCommandSuggestion[];
+      suggestions: readonly ProviderCommandSuggestion[];
     };
 
 export type TypeaheadMenuState =
