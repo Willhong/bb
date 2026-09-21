@@ -328,12 +328,6 @@ function archivedSessionHint(message: string): ProviderRecoveryHint | null {
     : null;
 }
 
-function withActiveWriterGuidance(message: string): string {
-  return CODEX_ACTIVE_WRITER_ERROR_PATTERN.test(message)
-    ? `${message}. Another Codex process still owns this thread. Close any other Codex session using it; if none is open, wait for a previous Codex process to finish shutting down or stop the leftover codex app-server process, then retry.`
-    : message;
-}
-
 async function delay(ms: number): Promise<void> {
   await new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
@@ -1418,9 +1412,8 @@ function sendConstructionError(
   error: unknown,
   resumable: boolean,
 ): void {
-  const providerMessage = describeCodexLaunchError(error);
-  const recovery = archivedSessionHint(providerMessage);
-  const message = withActiveWriterGuidance(providerMessage);
+  const message = describeCodexLaunchError(error);
+  const recovery = archivedSessionHint(message);
   sendError(
     id,
     resumable && recovery !== null
@@ -2057,9 +2050,8 @@ async function handleThreadMaintenance(
 }
 
 function rejectWithCodexError(id: string | number, error: unknown): void {
-  const providerMessage = describeCodexLaunchError(error);
-  const recovery = archivedSessionHint(providerMessage);
-  const message = withActiveWriterGuidance(providerMessage);
+  const message = describeCodexLaunchError(error);
+  const recovery = archivedSessionHint(message);
   if (recovery !== null) {
     sendError(id, BRIDGE_JSON_RPC_ERRORS.BRIDGE_ERROR, message, { recovery });
     return;

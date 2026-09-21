@@ -198,7 +198,7 @@ it("retries a resume while another Codex process is releasing the writer", async
   }
 }, 30_000);
 
-it("explains persistent writer contention and resumes after the owner closes", async () => {
+it("exhausts its retries on persistent writer contention and resumes after the owner closes", async () => {
   writeFileSync(writerLockPath, String(process.pid));
 
   harness.sendRequest(1, "thread/resume", {
@@ -218,7 +218,7 @@ it("explains persistent writer contention and resumes after the owner closes", a
   rmSync(writerLockPath, { force: true });
 
   expect(blocked.error?.message).toBe(
-    `thread ${PROVIDER_THREAD_ID} already has an active writer. Another Codex process still owns this thread. Close any other Codex session using it; if none is open, wait for a previous Codex process to finish shutting down or stop the leftover codex app-server process, then retry.`,
+    `thread ${PROVIDER_THREAD_ID} already has an active writer`,
   );
   await resumeThread(2);
 }, 30_000);
