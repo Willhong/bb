@@ -173,6 +173,13 @@ import {
   type AcpMcpServerConfig,
 } from "./tool-proxy-mcp.js";
 
+import {
+  InstructionStateStore,
+  instructionHash,
+  instructionStateKey,
+  type InstructionState,
+} from "./instruction-state.js";
+
 interface AcpSessionPolicy {
   permissionMode: "accept-edits" | "full";
   workspaceWriteRoots: string[];
@@ -214,6 +221,8 @@ interface AcpThreadSession {
   supportsLoadSession: boolean;
   policy: AcpSessionPolicy;
   pendingInstructions: string | undefined;
+  instructionState: InstructionState | undefined;
+  instructionStateKey: string;
   activePromptKind: "turn" | "compaction" | "agent" | null;
   compactionAgentMessage: string;
   queuedInputs: AcpPendingTurnInput[];
@@ -224,6 +233,8 @@ interface AcpThreadSession {
   loading: boolean;
   loadingSessionId: string | undefined;
   pendingLoadUsageUpdate: AcpUsageUpdate | undefined;
+  loadedInstructions: string | undefined;
+  loadingInstructionText: string;
   grokContextWindowSize: number | undefined;
   stopping: boolean;
   turnSettled: Promise<void> | undefined;
@@ -271,8 +282,14 @@ const pendingRuntimeRequests = new Map<
 >();
 let runtimeRequestIdCounter = 0;
 let dynamicToolBridgePromise: Promise<AcpDynamicToolBridge> | null = null;
+let instructionStates = new InstructionStateStore();
 
 const THREAD_STOP_CANCEL_TIMEOUT_MS = 4_000;
+const acpUserMessageChunkUpdateSchema = acpAgentMessageChunkUpdateSchema.extend(
+  {
+    sessionUpdate: z.literal("user_message_chunk"),
+  },
+);
 const SHUTDOWN_CANCEL_TIMEOUT_MS = 1_500;
 const AGENT_TURN_QUIET_MS = 5_000;
 const SESSION_BUSY_QUIET_MS = 2_000;
@@ -1808,7 +1825,6 @@ function buildPromptContentBlocks(
 
   const instructions = session.pendingInstructions;
   if (instructions) {
-    session.pendingInstructions = undefined;
     blocks.push({
       type: "text",
       text: `<system_instructions>\n${instructions}\n</system_instructions>`,
@@ -2296,6 +2312,12 @@ async function startAgentSession(
   const bbThreadId = params.threadId;
 
   const existing = sessionsByBbThreadId.get(bbThreadId);
+  const restoredSession =
+    request.kind === "resume"
+      ? getSessionByProviderThreadId(request.resumeProviderThreadId)
+      : request.kind === "fork"
+        ? getSessionByProviderThreadId(request.sourceProviderThreadId)
+        : undefined;
   if (existing) {
     await stopSession(existing);
   }
@@ -2407,6 +2429,8 @@ async function startAgentSession(
       workspaceWriteRoots: params.workspaceWriteRoots,
     },
     pendingInstructions: params.instructions,
+    instructionState: undefined,
+    instructionStateKey: "",
     activePromptKind: null,
     compactionAgentMessage: "",
     queuedInputs: [],
@@ -2417,6 +2441,8 @@ async function startAgentSession(
     loading: false,
     loadingSessionId: undefined,
     pendingLoadUsageUpdate: undefined,
+    loadedInstructions: undefined,
+    loadingInstructionText: "",
     grokContextWindowSize: undefined,
     stopping: false,
     turnSettled: undefined,
@@ -2597,6 +2623,66 @@ async function startAgentSession(
         `ACP session for thread "${bbThreadId}" was released during construction`,
       );
     }
+    session.instructionStateKey = instructionStateKey(
+      params.agent,
+      params.cwd,
+      sessionId,
+      params.envVars,
+    );
+    const sourceId =
+      request.kind === "fork" ? request.sourceProviderThreadId : sessionId;
+    const sourceParams =
+      request.kind === "fork" &&
+      restoredSession !== undefined &&
+      isDeepStrictEqual(restoredSession.construction.agent, params.agent) &&
+      isDeepStrictEqual(
+        restoredSession.construction.envVars ?? {},
+        params.envVars ?? {},
+      )
+        ? restoredSession.construction
+        : params;
+    const sourceKey = instructionStateKey(
+      sourceParams.agent,
+      sourceParams.cwd,
+      sourceId,
+      sourceParams.envVars,
+    );
+    const matchingRestoredSession =
+      restoredSession?.instructionStateKey === sourceKey
+        ? restoredSession
+        : undefined;
+    const priorState = createdFreshSession
+      ? undefined
+      : instructionStates.read(sourceKey);
+    session.instructionState = createdFreshSession
+      ? { version: 1, promptAttempted: false, instructionHash: null }
+      : session.loadedInstructions !== undefined
+        ? {
+            version: 1,
+            promptAttempted: true,
+            instructionHash: instructionHash(session.loadedInstructions),
+          }
+        : (priorState ?? matchingRestoredSession?.instructionState);
+    if (!createdFreshSession) {
+      const previous = session.instructionState;
+      session.pendingInstructions =
+        previous !== undefined
+          ? !previous.promptAttempted ||
+            previous.instructionHash !== instructionHash(params.instructions)
+            ? params.instructions
+            : undefined
+          : matchingRestoredSession?.pendingInstructions !== undefined
+            ? params.instructions
+            : undefined;
+    }
+    if (session.instructionState !== undefined) {
+      instructionStates.write(
+        session.instructionStateKey,
+        session.instructionState,
+      );
+    }
+    session.loadedInstructions = undefined;
+    session.loadingInstructionText = "";
     session.providerThreadId = sessionId;
     bbThreadIdByProviderThreadId.set(sessionId, bbThreadId);
     sendNotification(BRIDGE_NOTIFICATION_METHODS.threadIdentity, {
@@ -3127,6 +3213,21 @@ function runTurn(
         session.turnSettled = previousSession.turnSettled;
         session.awaitingFirstPrompt = false;
         const prompt = buildPromptContentBlocks(session, pending.input);
+        if (
+          session.pendingInstructions ||
+          session.instructionState?.promptAttempted === false
+        ) {
+          const state: InstructionState = {
+            version: 1,
+            promptAttempted: true,
+            instructionHash: session.pendingInstructions
+              ? instructionHash(session.pendingInstructions)
+              : (session.instructionState?.instructionHash ?? null),
+          };
+          instructionStates.write(session.instructionStateKey, state);
+          session.instructionState = state;
+        }
+        session.pendingInstructions = undefined;
         let inputAccepted = false;
         let busyRetries = 0;
         session.turnStartedAtMs ??= Date.now();
@@ -3527,6 +3628,31 @@ function handleAgentNotification(
   if (session.loading) {
     if (parsed.data.sessionId === session.loadingSessionId) {
       session.model.applySessionUpdate(rawUpdate);
+      const userChunk = acpUserMessageChunkUpdateSchema.safeParse(
+        parsed.data.update,
+      );
+      if (userChunk.success) {
+        const text = extractAcpContentText(userChunk.data.content);
+        if (text !== undefined) {
+          const prefix = "<system_instructions>\n";
+          const candidate = session.loadingInstructionText + text;
+          if (candidate.startsWith(prefix)) {
+            const end = candidate.indexOf("\n</system_instructions>");
+            if (end !== -1) {
+              session.loadedInstructions = candidate.slice(prefix.length, end);
+              session.loadingInstructionText = "";
+            } else {
+              session.loadingInstructionText = candidate;
+            }
+          } else {
+            session.loadingInstructionText = prefix.startsWith(candidate)
+              ? candidate
+              : "";
+          }
+        }
+      } else if (parsed.data.update.sessionUpdate !== "usage_update") {
+        session.loadingInstructionText = "";
+      }
       if (parsed.data.update.sessionUpdate === "usage_update") {
         const usageUpdate = acpUsageUpdateSchema.safeParse(parsed.data.update);
         if (usageUpdate.success) {
@@ -4133,6 +4259,9 @@ if (process.argv.includes("--mcp-stdio")) {
 }
 
 export const experimental_providerBridge = experimental_defineProviderBridge({
+  start: ({ dataDir }) => {
+    instructionStates = new InstructionStateStore(dataDir);
+  },
   handleLine,
   onClose: shutdownBridge,
   onSigterm: shutdownBridge,
