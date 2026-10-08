@@ -1208,6 +1208,11 @@ async function handleMessage(message) {
           });
         } else {
           activeSessionId = message.params?.sessionId;
+          for (const update of JSON.parse(
+            process.env.FAKE_ACP_LOAD_UPDATES ?? "[]",
+          )) {
+            notifyUpdate(update);
+          }
           send({ jsonrpc: "2.0", id: message.id, result: configState() });
         }
       } else {

@@ -52,7 +52,7 @@ import type {
   CapturedBridgeJsonRpcOutput,
 } from "@bb/provider-bridge-protocol/testing";
 
-import { handleLine } from "./bridge.js";
+import { handleLine, experimental_providerBridge } from "./bridge.js";
 import { ACP_BRIDGE_MCP_SERVER_NAME } from "./tool-proxy-mcp.js";
 
 const modelListResultSchema = z.object({
@@ -680,6 +680,11 @@ beforeEach(({ signal }) => {
   testSignal = signal;
   bbThreadIdByProviderThreadId.clear();
   workspaceDir = mkdtempSync(join(tmpdir(), "bb-acp-bridge-test-"));
+  experimental_providerBridge.start?.({
+    pluginId: "provider-acp",
+    dataDir: join(workspaceDir, "bridge-data"),
+    tempDir: workspaceDir,
+  });
   output = captureBridgeJsonRpcOutput();
 });
 
@@ -3348,7 +3353,325 @@ describe("acp bridge", () => {
     expect(texts.at(-1)).toBe(
       "echo:<system_instructions>\nBe terse.\n</system_instructions>\nhi",
     );
+    await waitForResponse(
+      sendTurnRequest("turn/start", providerThreadId, {
+        input: [{ type: "text", text: "again", mentions: [] }],
+      }),
+    );
+    await waitFor(
+      () => agentMessageTexts().includes("echo:again") || undefined,
+      "second prompt without instructions",
+    );
   });
+
+  it.each([
+    {
+      name: "same instructions",
+      replay: ["<system_instructions>\nBe terse.\n</system_instructions>\nhi"],
+      instructions: "Be terse.",
+      expected: "again",
+    },
+    {
+      name: "split instruction block",
+      replay: [
+        "<system_instr",
+        "uctions>\nBe terse.\n</system_instructions>\nhi",
+      ],
+      instructions: "Be terse.",
+      expected: "again",
+    },
+    {
+      name: "changed instructions",
+      replay: ["<system_instructions>\nBe terse.\n</system_instructions>\nhi"],
+      instructions: "Use Korean.",
+      expected:
+        "<system_instructions>\nUse Korean.\n</system_instructions>\nagain",
+    },
+    {
+      name: "latest instruction version",
+      replay: [
+        "<system_instructions>\nBe terse.\n</system_instructions>\nhi",
+        "<system_instructions>\nUse Korean.\n</system_instructions>\nchange",
+      ],
+      instructions: "Use Korean.",
+      expected: "again",
+    },
+    {
+      name: "history without instruction replay",
+      replay: [],
+      instructions: "Be terse.",
+      expected: "again",
+    },
+  ])(
+    "preserves session instructions on resume: $name",
+    async ({ replay, instructions, expected }) => {
+      const promptLog = join(workspaceDir, "instruction-prompts.jsonl");
+      const envVars = {
+        FAKE_ACP_LOAD_SESSION: "1",
+        FAKE_ACP_PROMPT_LOG: promptLog,
+        FAKE_ACP_LOAD_UPDATES: JSON.stringify(
+          replay.map((text) => ({
+            sessionUpdate: "user_message_chunk",
+            content: { type: "text", text },
+          })),
+        ),
+      };
+      const first = await startThread({ instructions: "Be terse.", envVars });
+      await waitForResponse(
+        sendTurnRequest("turn/start", first.providerThreadId, {
+          input: [{ type: "text", text: "hi", mentions: [] }],
+        }),
+      );
+      await waitForTurnCompleted();
+      await stopThread(first.providerThreadId);
+      const response = await waitForResponse(
+        sendRequest("thread/resume", {
+          threadId: first.bbThreadId,
+          providerThreadId: first.providerThreadId,
+          cwd: workspaceDir,
+          instructionMode: "append",
+          options: executionOptions({
+            instructions,
+            providerOptions: { acpLaunchSpec: acpLaunchSpec({ envVars }) },
+          }),
+        }),
+      );
+      expect(response.error).toBeUndefined();
+      expect(providerThreadIdOf(response)).toBe(first.providerThreadId);
+      for (const text of ["again", "next"]) {
+        const completedBefore = threadEventsOfType("turn/completed").length;
+        const turnResponse = await waitForResponse(
+          sendTurnRequest("turn/start", first.providerThreadId, {
+            input: [{ type: "text", text, mentions: [] }],
+          }),
+        );
+        expect(turnResponse.error).toBeUndefined();
+        await waitFor(
+          () =>
+            threadEventsOfType("turn/completed").length > completedBefore ||
+            undefined,
+          "instruction prompt completion",
+        );
+      }
+      expect(loggedPrompts(promptLog)).toEqual([
+        "<system_instructions>\nBe terse.\n</system_instructions>\nhi",
+        expected,
+        "next",
+      ]);
+    },
+  );
+
+  it.each(["Be terse.", "Use Korean."])(
+    "delivers initial instructions after an empty session is stopped and restored: %s",
+    async (instructions) => {
+      const promptLog = join(workspaceDir, "empty-instruction-prompts.jsonl");
+      const envVars = {
+        FAKE_ACP_LOAD_SESSION: "1",
+        FAKE_ACP_PROMPT_LOG: promptLog,
+      };
+      const first = await startThread({ instructions: "Be terse.", envVars });
+      await stopThread(first.providerThreadId);
+      experimental_providerBridge.start?.({
+        pluginId: "provider-acp",
+        dataDir: join(workspaceDir, "bridge-data"),
+        tempDir: workspaceDir,
+      });
+      const response = await waitForResponse(
+        sendRequest("thread/resume", {
+          threadId: first.bbThreadId,
+          providerThreadId: first.providerThreadId,
+          cwd: workspaceDir,
+          instructionMode: "append",
+          options: executionOptions({
+            instructions,
+            providerOptions: { acpLaunchSpec: acpLaunchSpec({ envVars }) },
+          }),
+        }),
+      );
+      expect(response.error).toBeUndefined();
+      for (const text of ["first", "second"]) {
+        const completedBefore = threadEventsOfType("turn/completed").length;
+        await waitForResponse(
+          sendTurnRequest("turn/start", first.providerThreadId, {
+            input: [{ type: "text", text, mentions: [] }],
+          }),
+        );
+        await waitFor(
+          () =>
+            threadEventsOfType("turn/completed").length > completedBefore ||
+            undefined,
+          "empty restored session prompt completion",
+        );
+      }
+      expect(loggedPrompts(promptLog)).toEqual([
+        `<system_instructions>\n${instructions}\n</system_instructions>\nfirst`,
+        "second",
+      ]);
+    },
+  );
+
+  it("does not reuse an unprompted record from another environment-selected agent", async () => {
+    const promptLog = join(workspaceDir, "other-profile-prompts.jsonl");
+    const envVars = {
+      FAKE_ACP_LOAD_SESSION: "1",
+      FAKE_ACP_PROMPT_LOG: promptLog,
+      AGENT_PROFILE: "a",
+    };
+    const first = await startThread({ instructions: "Be terse.", envVars });
+    await stopThread(first.providerThreadId);
+    const response = await waitForResponse(
+      sendRequest("thread/resume", {
+        threadId: first.bbThreadId,
+        providerThreadId: first.providerThreadId,
+        cwd: workspaceDir,
+        instructionMode: "append",
+        options: executionOptions({
+          instructions: "Be terse.",
+          providerOptions: {
+            acpLaunchSpec: acpLaunchSpec({
+              envVars: { ...envVars, AGENT_PROFILE: "b" },
+            }),
+          },
+        }),
+      }),
+    );
+    expect(response.error).toBeUndefined();
+    await waitForResponse(
+      sendTurnRequest("turn/start", first.providerThreadId, {
+        input: [{ type: "text", text: "first", mentions: [] }],
+      }),
+    );
+    await waitForTurnCompleted();
+    expect(loggedPrompts(promptLog)).toEqual(["first"]);
+  });
+
+  it.each(["unsupported", "failed"])(
+    "initializes instructions after a %s resume creates a fresh session",
+    async (mode) => {
+      const promptLog = join(workspaceDir, "fresh-prompts.jsonl");
+      const envVars = {
+        FAKE_ACP_PROMPT_LOG: promptLog,
+        ...(mode === "failed" ? { FAKE_ACP_FAIL_LOAD: "1" } : {}),
+      };
+      const response = await waitForResponse(
+        sendRequest("thread/resume", {
+          threadId: "instruction-fresh-fallback",
+          providerThreadId: "missing-old-session",
+          cwd: workspaceDir,
+          instructionMode: "append",
+          options: executionOptions({
+            instructions: "Be terse.",
+            providerOptions: { acpLaunchSpec: acpLaunchSpec({ envVars }) },
+          }),
+        }),
+      );
+      expect(response.error).toBeUndefined();
+      const providerThreadId = providerThreadIdOf(response);
+      expect(providerThreadId).not.toBe("missing-old-session");
+      await waitForResponse(
+        sendTurnRequest("turn/start", providerThreadId, {
+          input: [{ type: "text", text: "hi", mentions: [] }],
+        }),
+      );
+      await waitForTurnCompleted();
+      expect(loggedPrompts(promptLog)).toEqual([
+        "<system_instructions>\nBe terse.\n</system_instructions>\nhi",
+      ]);
+    },
+  );
+
+  it.each([
+    {
+      mode: "resume",
+      initial: "Be terse.",
+      instructions: "Be terse.",
+      expected: "again",
+    },
+    {
+      mode: "fork",
+      initial: "Be terse.",
+      instructions: "Be terse.",
+      expected: "again",
+    },
+    {
+      mode: "environment",
+      initial: "Be terse.",
+      instructions: "Be terse.",
+      expected: "again",
+    },
+    {
+      mode: "resume",
+      initial: "Be terse.",
+      instructions: "Use Korean.",
+      expected:
+        "<system_instructions>\nUse Korean.\n</system_instructions>\nagain",
+    },
+    {
+      mode: "resume",
+      initial: undefined,
+      instructions: "Be terse.",
+      expected:
+        "<system_instructions>\nBe terse.\n</system_instructions>\nagain",
+    },
+  ])(
+    "preserves or updates live instructions on a $mode rebuild: $initial → $instructions",
+    async ({ mode, initial, instructions, expected }) => {
+      const promptLog = join(workspaceDir, "rebuild-prompts.jsonl");
+      const envVars = {
+        FAKE_ACP_LOAD_SESSION: "1",
+        FAKE_ACP_FORK_SESSION: "1",
+        FAKE_ACP_PROMPT_LOG: promptLog,
+      };
+      const first = await startThread({ instructions: initial, envVars });
+      await waitForResponse(
+        sendTurnRequest("turn/start", first.providerThreadId, {
+          input: [{ type: "text", text: "hi", mentions: [] }],
+        }),
+      );
+      await waitForTurnCompleted();
+      let providerThreadId = first.providerThreadId;
+      if (mode !== "environment") {
+        const response = await waitForResponse(
+          sendRequest(`thread/${mode}`, {
+            threadId: mode === "fork" ? "instruction-fork" : first.bbThreadId,
+            cwd: workspaceDir,
+            instructionMode: "append",
+            options: executionOptions({
+              instructions,
+              providerOptions: { acpLaunchSpec: acpLaunchSpec({ envVars }) },
+            }),
+            ...(mode === "fork"
+              ? { sourceProviderThreadId: first.providerThreadId }
+              : { providerThreadId: first.providerThreadId }),
+          }),
+        );
+        expect(response.error).toBeUndefined();
+        providerThreadId = providerThreadIdOf(response);
+      }
+      await waitForResponse(
+        sendTurnRequest("turn/start", providerThreadId, {
+          input: [{ type: "text", text: "again", mentions: [] }],
+          ...(mode === "environment"
+            ? {
+                options: executionOptions({
+                  envVars: { ...envVars, REBUILT: "1" },
+                }),
+              }
+            : {}),
+        }),
+      );
+      await waitFor(
+        () => loggedPrompts(promptLog).length === 2 || undefined,
+        "rebuilt prompt",
+      );
+      expect(loggedPrompts(promptLog)).toEqual([
+        initial
+          ? `<system_instructions>\n${initial}\n</system_instructions>\nhi`
+          : "hi",
+        expected,
+      ]);
+    },
+  );
 
   it("auto-allows permission requests in full mode", async () => {
     const { providerThreadId } = await startThread({ permissionMode: "full" });
