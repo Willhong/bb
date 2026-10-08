@@ -19,6 +19,33 @@ one does, with no bb-side code. The plugin is forkable
 (`docs/forkable-plugins.md`): its lint rule and the fork check prove it takes
 no shortcut — no file here may import a workspace package.
 
+## Session instructions
+
+The bridge prepends BB instructions to the first prompt of a fresh ACP session.
+A successful load or fork preserves the existing instructions instead of adding
+another copy merely because the connection changed. If replayed history or the
+live source session exposes different instructions, the next prompt carries the
+updated instructions once. The bridge also persists a prompt-attempt marker and
+an instruction hash under its host-local data directory, keyed by agent launch
+identity (including explicitly configured environment variables), working directory
+and native session ID. Environment values are hashed, not stored as plaintext.
+No instruction text is stored.
+This preserves initial delivery when a new session is closed before its first
+prompt, including across bridge process restarts. A fork inherits known source
+state when its source identity can be resolved.
+
+For older sessions with neither a local record nor replayed instructions, the
+bridge leaves restored history unchanged rather than assuming instructions are
+missing. A failed or unsupported load that creates a fresh session initializes
+its instructions normally. Compaction alone does not trigger reinjection.
+
+The attempt marker is written atomically before sending a prompt. A crash between
+the marker write and agent receipt is ambiguous: without replay evidence the
+bridge favors avoiding duplicate delivery, not an exactly-once guarantee.
+Unreadable or invalid state fails construction rather than silently guessing.
+A changed working directory or agent launch identity has a separate record;
+legacy fallback applies if that identity cannot replay its previous instructions.
+
 What lives here:
 
 - `server.ts` — the plugin's runtime: it reconciles one registration per
