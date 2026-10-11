@@ -684,6 +684,33 @@ export function requestEnvironmentRemoval(
   return true;
 }
 
+function recordEnvironmentRemoved(
+  deps: Deps,
+  environmentId: string,
+  row: EnvironmentRow,
+): void {
+  deps.db.transaction(() => {
+    writeEnvironment(deps, environmentId, {
+      teardownStatus: "removed",
+      teardownMessage: null,
+      claimPath: null,
+      resource: null,
+      retireAt: null,
+    });
+    applyLoggedEnvironmentLifecycleEvent(deps, {
+      environmentId,
+      event: { type: "destroy.recorded" },
+    });
+  });
+  emitPluginEnvironmentRemoved({
+    environmentId,
+    removedAt: Date.now(),
+    hostId: row.hostId,
+    path: row.path,
+    providerOwnedPath: row.providerOwnsPath,
+  });
+}
+
 async function runRemove(
   deps: Deps,
   environmentId: string,
@@ -698,6 +725,14 @@ async function runRemove(
     row.teardownStatus !== "running"
   )
     return;
+  if (
+    row.resource === null &&
+    row.hostId !== null &&
+    getHost(deps.db, row.hostId)?.destroyedAt
+  ) {
+    recordEnvironmentRemoved(deps, environmentId, row);
+    return;
+  }
   const record = getEnvironmentProvider(row.environmentProviderId);
   if (
     record === undefined ||
@@ -756,26 +791,7 @@ async function runRemove(
         writeEnvironmentTeardownFailure(deps, environmentId, result.message);
         return;
       }
-      deps.db.transaction(() => {
-        writeEnvironment(deps, environmentId, {
-          teardownStatus: "removed",
-          teardownMessage: null,
-          claimPath: null,
-          resource: null,
-          retireAt: null,
-        });
-        applyLoggedEnvironmentLifecycleEvent(deps, {
-          environmentId,
-          event: { type: "destroy.recorded" },
-        });
-      });
-      emitPluginEnvironmentRemoved({
-        environmentId,
-        removedAt: Date.now(),
-        hostId: row.hostId,
-        path: row.path,
-        providerOwnedPath: row.providerOwnsPath,
-      });
+      recordEnvironmentRemoved(deps, environmentId, row);
     } catch (error) {
       writeEnvironmentTeardownFailure(deps, environmentId, errorMessage(error));
     }

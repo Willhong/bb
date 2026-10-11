@@ -46,6 +46,7 @@ import {
   reserveEnvironment,
   updatePreparingEnvironment,
   threads,
+  updateHost,
   updateThread,
 } from "@bb/db";
 import type { JsonValue } from "@bb/domain";
@@ -1673,6 +1674,60 @@ describe("core environment orchestration", () => {
         .toBe("removed");
       expect(getEnvironment(harness.db, environmentId)?.status).toBe(
         "destroyed",
+      );
+    }));
+
+  it("records removal without the provider once its machine is removed", async () =>
+    withTestHarness(async (harness) => {
+      const remove = vi.fn(async () => {
+        throw new Error("Host is not connected");
+      });
+      const fixture = setup(harness, {
+        policy: { retireGraceMs: 0 },
+        remove,
+      });
+      fixture.ask();
+      await fixture.settled();
+      const environmentId = fixture.attach();
+      updateHost(harness.db, harness.hub, fixture.host.id, {
+        destroyedAt: Date.now(),
+      });
+      await sweepProviderEnvironment(harness.deps, environmentId);
+      expect(remove).not.toHaveBeenCalled();
+      expect(getEnvironment(harness.db, environmentId)).toMatchObject({
+        teardownStatus: "removed",
+        teardownMessage: null,
+        retireAt: null,
+        status: "destroyed",
+      });
+    }));
+
+  it("still asks the provider to remove a resource after its machine is removed", async () =>
+    withTestHarness(async (harness) => {
+      const resources: JsonValue[] = [];
+      const fixture = setup(harness, {
+        create: async () => ({
+          status: "created",
+          path: "/tmp/resource-after-machine",
+          ownsPath: true,
+          resource: { sandbox: "sb_1" },
+        }),
+        remove: async (context) => {
+          resources.push(context.resource);
+          return { status: "removed" };
+        },
+        policy: { retireGraceMs: 0 },
+      });
+      fixture.ask();
+      await fixture.settled();
+      const environmentId = fixture.attach();
+      updateHost(harness.db, harness.hub, fixture.host.id, {
+        destroyedAt: Date.now(),
+      });
+      await sweepProviderEnvironment(harness.deps, environmentId);
+      expect(resources).toEqual([{ sandbox: "sb_1" }]);
+      expect(getEnvironment(harness.db, environmentId)?.teardownStatus).toBe(
+        "removed",
       );
     }));
 
