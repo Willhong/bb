@@ -2045,6 +2045,66 @@ describe("pi delta translation equivalence", () => {
     );
   });
 
+  it("carries the per-category context snapshot into the meter event", () => {
+    const harness = createHarness();
+    harness.translate(loadFixture("agent-start.json"));
+    const turnId = harness.openTurnId();
+    harness.translate(loadFixture("agent-end-with-message.json"));
+    const snapshot = {
+      capturedAt: "2026-10-25T00:00:00.000Z",
+      providerSessionId: "session-1",
+      providerTurnId: "leaf-1",
+      model: "llmproxy/gpt-6-luna",
+      usedTokens: 1000,
+      contextWindowTokens: 272_000,
+      autoCompactAtTokens: 255_616,
+      estimated: true,
+      categories: [
+        {
+          id: '["pi","skills"]',
+          label: "Skills",
+          kind: "used" as const,
+          tokens: 1000,
+          entries: [{ id: '["pi","skills","alpha",0]', label: "alpha", tokens: 900 }],
+        },
+        {
+          id: '["pi","free"]',
+          label: "Free space",
+          kind: "free" as const,
+          tokens: 254_616,
+          entries: [],
+        },
+      ],
+    };
+
+    const events = harness.translate({
+      jsonrpc: "2.0",
+      method: "thread/contextWindowUsage/updated",
+      params: {
+        threadId: THREAD_ID,
+        contextWindowUsage: {
+          usedTokens: 1000,
+          modelContextWindow: 272_000,
+          estimated: true,
+          snapshot,
+        },
+      },
+    });
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "thread/contextWindowUsage/updated",
+        scope: turnScope(turnId),
+        contextWindowUsage: {
+          usedTokens: 1000,
+          modelContextWindow: 272_000,
+          estimated: true,
+          snapshot,
+        },
+      }),
+    );
+  });
+
   it("clears stale tool state when a turn ends without tool results", () => {
     const harness = createHarness();
 

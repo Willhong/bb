@@ -182,6 +182,347 @@ function buildParameters(inputSchema) {
   return schema ? toTypeBoxSchema(schema) : Type.Object({});
 }
 
+// ---- context window breakdown ----
+
+function buildContextSnapshot(input) {
+  const IMAGE_TOKENS = 1200;
+  const SECTION_LABELS = {
+    preamble: "Base instructions",
+    tools: "Tool list",
+    rules: "Rules",
+    docs: "Pi docs pointer",
+    cwd: "Working directory",
+    other: "Other",
+  };
+  const TOOL_GROUPS = [
+    ["builtin", "Built-in tools"],
+    ["extension", "Extension tools"],
+    ["mcp", "MCP tools"],
+  ];
+  const MESSAGE_BUCKETS = [
+    ["toolResults", "Tool results"],
+    ["toolCalls", "Tool calls"],
+    ["assistant", "Assistant messages"],
+    ["thinking", "Thinking"],
+    ["user", "User messages"],
+    ["images", "Images"],
+    ["shell", "Shell commands"],
+    ["extension", "Extension messages"],
+    ["compaction", "Compaction summary"],
+    ["branch", "Branch summary"],
+  ];
+
+  function isCjk(code) {
+    return (
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0x1100 && code <= 0x11ff) ||
+      (code >= 0x3130 && code <= 0x318f) ||
+      (code >= 0x3040 && code <= 0x30ff) ||
+      (code >= 0x4e00 && code <= 0x9fff) ||
+      (code >= 0x3400 && code <= 0x4dbf)
+    );
+  }
+  function weight(text) {
+    let ascii = 0;
+    let cjk = 0;
+    let other = 0;
+    for (let index = 0; index < text.length; index++) {
+      const code = text.charCodeAt(index);
+      if (code < 0x80) ascii++;
+      else if (isCjk(code)) cjk++;
+      else if (code >= 0xd800 && code <= 0xdbff) {
+        other++;
+        index++;
+      } else other++;
+    }
+    return ascii / 4 + cjk + other / 2;
+  }
+  function tokens(text) {
+    return Math.ceil(weight(text));
+  }
+  function json(value) {
+    try {
+      return JSON.stringify(value === undefined ? {} : value) || "";
+    } catch {
+      return "";
+    }
+  }
+  function shorten(path) {
+    return input.home && path.startsWith(input.home) ? "~" + path.slice(input.home.length) : path;
+  }
+
+  function splitPrompt(prompt) {
+    const open = /<([a-z][a-z0-9_-]*)>\n/g;
+    const sections = [];
+    let cursor = 0;
+    let other = "";
+    for (;;) {
+      open.lastIndex = cursor;
+      const match = open.exec(prompt);
+      if (!match) break;
+      if (match.index > 0 && prompt[match.index - 1] !== "\n") {
+        cursor = match.index + 1;
+        continue;
+      }
+      const closeTag = "\n</" + match[1] + ">";
+      let close = prompt.indexOf(closeTag, match.index + match[0].length - 1);
+      while (close !== -1) {
+        const after = close + closeTag.length;
+        if (after === prompt.length || prompt[after] === "\n") break;
+        close = prompt.indexOf(closeTag, close + 1);
+      }
+      if (close === -1) {
+        cursor = match.index + 1;
+        continue;
+      }
+      const gap = prompt.slice(cursor, match.index);
+      if (cursor === 0 && sections.length === 0) {
+        if (gap.trim()) sections.push({ name: "preamble", text: gap, body: gap });
+      } else {
+        other += gap;
+      }
+      const end = close + closeTag.length;
+      sections.push({
+        name: match[1],
+        text: prompt.slice(match.index, end),
+        body: prompt.slice(match.index + match[0].length, close),
+      });
+      cursor = end;
+    }
+    if (sections.length === 0) {
+      return prompt.trim() ? [{ name: "preamble", text: prompt, body: prompt }] : [];
+    }
+    other += prompt.slice(cursor);
+    if (other.trim()) sections.push({ name: "other", text: other, body: other });
+    return sections;
+  }
+
+  function promptCategories(prompt) {
+    const system = { key: "system", label: "System prompt", tokens: 0, entries: [] };
+    const out = [system];
+    for (const section of splitPrompt(prompt)) {
+      const count = tokens(section.text);
+      if (section.name === "project_context") {
+        const files = [...section.body.matchAll(/<project_instructions path="([^"]*)">\n[\s\S]*?\n<\/project_instructions>/g)]
+          .map((match) => ({ label: shorten(match[1]), tokens: tokens(match[0]) }))
+          .sort((a, b) => b.tokens - a.tokens);
+        out.push({ key: "project_context", label: "Project context files", tokens: count, entries: files });
+      } else if (section.name === "skills") {
+        const skills = [...section.body.matchAll(/<skill>[\s\S]*?<\/skill>/g)]
+          .map((match) => {
+            const name = /<name>([\s\S]*?)<\/name>/.exec(match[0]);
+            return { label: (name && name[1].trim()) || "skill", tokens: tokens(match[0]) };
+          })
+          .sort((a, b) => b.tokens - a.tokens);
+        out.push({ key: "skills", label: "Skills", tokens: count, entries: skills });
+      } else if (section.name === "addendum") {
+        out.push({ key: "addendum", label: "Appended system prompt", tokens: count, entries: [] });
+      } else {
+        system.tokens += count;
+        system.entries.push({ label: SECTION_LABELS[section.name] || "<" + section.name + ">", tokens: count });
+      }
+    }
+    return out;
+  }
+
+  function toolCategories(tools) {
+    return TOOL_GROUPS.map(([group, label]) => {
+      const entries = tools
+        .filter((tool) => tool.group === group)
+        .map((tool) => ({
+          label: tool.name,
+          tokens: tokens(json({ name: tool.name, description: tool.description || "", input_schema: tool.parameters || {} })),
+        }))
+        .sort((a, b) => b.tokens - a.tokens);
+      return { key: "tools:" + group, label, tokens: entries.reduce((sum, entry) => sum + entry.tokens, 0), entries };
+    });
+  }
+
+  function contentWeight(content, add) {
+    if (typeof content === "string") return weight(content);
+    if (!Array.isArray(content)) return 0;
+    let total = 0;
+    for (const block of content) {
+      if (block && block.type === "text" && typeof block.text === "string") total += weight(block.text);
+      else if (block && block.type === "image") add("images", IMAGE_TOKENS);
+    }
+    return total;
+  }
+
+  function messageCategory(messages) {
+    const buckets = new Map();
+    const add = (bucket, value) => {
+      if (value > 0) buckets.set(bucket, (buckets.get(bucket) || 0) + value);
+    };
+    for (const message of messages) {
+      if (!message || typeof message !== "object") continue;
+      switch (message.role) {
+        case "system":
+          break;
+        case "user":
+          add("user", contentWeight(message.content, add));
+          break;
+        case "assistant":
+          for (const block of Array.isArray(message.content) ? message.content : []) {
+            if (!block) continue;
+            if (block.type === "text" && typeof block.text === "string") add("assistant", weight(block.text));
+            else if (block.type === "thinking" && typeof block.thinking === "string") add("thinking", weight(block.thinking));
+            else if (block.type === "toolCall") add("toolCalls", weight(String(block.name || "")) + weight(json(block.arguments)));
+          }
+          break;
+        case "toolResult":
+          add("toolResults", contentWeight(message.content, add));
+          break;
+        case "bashExecution":
+          if (message.excludeFromContext !== true) {
+            add("shell", weight(String(message.command || "")) + weight(String(message.output || "")));
+          }
+          break;
+        case "compactionSummary":
+          add("compaction", weight(String(message.summary || "")));
+          break;
+        case "branchSummary":
+          add("branch", weight(String(message.summary || "")));
+          break;
+        default:
+          add("extension", contentWeight(message.content, add));
+      }
+    }
+    const entries = MESSAGE_BUCKETS.map(([bucket, label]) => ({ label, tokens: Math.ceil(buckets.get(bucket) || 0) }));
+    return { key: "messages", label: "Messages", tokens: entries.reduce((sum, entry) => sum + entry.tokens, 0), entries };
+  }
+
+  function apportion(values, target) {
+    const total = values.reduce((sum, value) => sum + value, 0);
+    if (total <= 0) return values.map(() => 0);
+    const exact = values.map((value) => (value / total) * target);
+    const result = exact.map(Math.floor);
+    let remaining = target - result.reduce((sum, value) => sum + value, 0);
+    const order = exact
+      .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+      .sort((a, b) => b.fraction - a.fraction);
+    for (const { index } of order) {
+      if (remaining <= 0) break;
+      result[index] += 1;
+      remaining -= 1;
+    }
+    return result;
+  }
+
+  const raw = [
+    ...promptCategories(input.systemPrompt || ""),
+    ...toolCategories(input.tools || []),
+    messageCategory(input.messages || []),
+  ].filter((category) => category.tokens > 0);
+  const rawTotal = raw.reduce((sum, category) => sum + category.tokens, 0);
+  const known =
+    typeof input.knownUsedTokens === "number" && Number.isFinite(input.knownUsedTokens) && input.knownUsedTokens > 0
+      ? Math.round(input.knownUsedTokens)
+      : null;
+  const usedTokens = known === null ? rawTotal : known;
+  const scale = known !== null && rawTotal > 0 ? known / rawTotal : 1;
+  const categoryTokens = apportion(raw.map((category) => category.tokens), usedTokens);
+  const categories = raw.map((category, index) => {
+    const total = categoryTokens[index];
+    const entrySum = category.entries.reduce((sum, entry) => sum + entry.tokens, 0);
+    const entryTokens = apportion(
+      category.entries.map((entry) => entry.tokens),
+      Math.min(total, Math.floor(entrySum * scale)),
+    );
+    const seen = new Map();
+    return {
+      id: JSON.stringify(["pi", category.key]),
+      label: category.label,
+      kind: "used",
+      tokens: total,
+      entries: category.entries
+        .map((entry, entryIndex) => ({ label: entry.label, tokens: entryTokens[entryIndex] }))
+        .filter((entry) => entry.tokens > 0)
+        .map((entry) => {
+          const occurrence = seen.get(entry.label) || 0;
+          seen.set(entry.label, occurrence + 1);
+          return { id: JSON.stringify(["pi", category.key, entry.label, occurrence]), label: entry.label, tokens: entry.tokens };
+        }),
+    };
+  });
+  const contextWindow = Math.max(1, Math.round(input.contextWindow));
+  const reserved = input.autoCompact && input.autoCompact.enabled
+    ? Math.max(0, Math.min(Math.round(input.autoCompact.reserveTokens), contextWindow))
+    : 0;
+  categories.push({
+    id: JSON.stringify(["pi", "free"]),
+    label: "Free space",
+    kind: "free",
+    tokens: Math.max(0, contextWindow - usedTokens - reserved),
+    entries: [],
+  });
+  if (reserved > 0) {
+    categories.push({ id: JSON.stringify(["pi", "autocompact"]), label: "Autocompact buffer", kind: "reserved", tokens: reserved, entries: [] });
+  }
+  return {
+    capturedAt: input.capturedAt,
+    providerSessionId: input.sessionId,
+    providerTurnId: input.turnId,
+    model: input.model,
+    usedTokens,
+    contextWindowTokens: contextWindow,
+    autoCompactAtTokens: reserved > 0 ? contextWindow - reserved : null,
+    estimated: true,
+    categories,
+  };
+}
+
+function captureContextSnapshot(pi, ctx) {
+  const usage = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
+  const contextWindow = (usage && usage.contextWindow) || (ctx.model && ctx.model.contextWindow) || 0;
+  if (!(contextWindow > 0)) return null;
+  const active = new Set(typeof pi.getActiveTools === "function" ? pi.getActiveTools() : []);
+  const tools = (typeof pi.getAllTools === "function" ? pi.getAllTools() : [])
+    .filter((tool) => active.has(tool.name) && tool.exposure !== "hidden")
+    .map((tool) => {
+      const path = (tool.sourceInfo && tool.sourceInfo.path) || "";
+      const group =
+        tool.namespace || path.startsWith("builtin:mcp") || tool.name.startsWith("mcp__")
+          ? "mcp"
+          : (tool.sourceInfo && tool.sourceInfo.source === "builtin") || path.startsWith("builtin:")
+            ? "builtin"
+            : "extension";
+      return { name: tool.name, description: tool.description, parameters: tool.parameters, group };
+    });
+  const sessionManager = ctx.sessionManager;
+  const projection =
+    typeof sessionManager.buildSessionProjection === "function"
+      ? sessionManager.buildSessionProjection()
+      : typeof sessionManager.buildSessionContext === "function"
+        ? sessionManager.buildSessionContext()
+        : null;
+  let compaction = {};
+  try {
+    const settings = typeof pi.getSettings === "function" ? pi.getSettings() : null;
+    compaction = (settings && settings.compaction) || {};
+  } catch {
+    compaction = {};
+  }
+  const modelKey = ctx.model ? ctx.model.provider + "/" + ctx.model.id : null;
+  const override = modelKey && compaction.modelOverrides && compaction.modelOverrides[modelKey];
+  return buildContextSnapshot({
+    systemPrompt: typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : "",
+    tools,
+    messages: (projection && projection.messages) || [],
+    knownUsedTokens: usage ? usage.tokens : null,
+    contextWindow,
+    autoCompact: {
+      enabled: compaction.enabled !== false,
+      reserveTokens: (override && override.reserveTokens) || compaction.reserveTokens || 16384,
+    },
+    model: modelKey || "unknown",
+    sessionId: sessionManager.getSessionId() || "unknown",
+    turnId: sessionManager.getLeafId() || null,
+    capturedAt: new Date().toISOString(),
+    home: process.env.HOME || process.env.USERPROFILE || "",
+  });
+}
+
 // ---- the extension ----
 
 ${PI_SERVICE_TIER_EXTENSION_SOURCE}
@@ -273,6 +614,8 @@ export default async function bbExtension(pi) {
         return currentModelScope();
       case "refresh-models":
         return refreshModels();
+      case "context-snapshot":
+        return { snapshot: sessionContext ? captureContextSnapshot(pi, sessionContext) : null };
       default:
         throw new Error("unknown bridge request " + String(message.method));
     }
