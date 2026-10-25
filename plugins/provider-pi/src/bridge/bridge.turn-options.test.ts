@@ -118,6 +118,23 @@ it(
 );
 
 it(
+  "applies Fast and Default on later turns without losing the session identity",
+  async () => {
+    const threadId = "thr_turn_options_service_tier";
+    await harness.startThread(threadId, { options: MINI });
+    const identity = providerThreadIdFor(threadId);
+    let seen = 0;
+    for (const [index, serviceTier] of ["default", "fast", "fast", "default"].entries()) {
+      expect((await turnStart(index + 1, threadId, `turn ${index}`, { ...MINI, serviceTier })).error).toBeUndefined();
+      seen = await harness.waitForTurnBoundary(threadId, seen);
+      expect(providerThreadIdFor(threadId)).toBe(identity);
+      expect(sessionReplacements(threadId)).toHaveLength(index === 0 ? 0 : index === 3 ? 2 : 1);
+    }
+  },
+  TURN_OPTIONS_TEST_TIMEOUT_MS,
+);
+
+it(
   "rebuilds the session on the model a later turn carries",
   async () => {
     const threadId = "thr_turn_options_model";

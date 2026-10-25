@@ -12,7 +12,6 @@ import {
   PROVIDER_BRIDGE_PROTOCOL_VERSION,
   THREAD_DELTA_GRAMMAR_V3,
   THREAD_DELTA_NOTIFICATION_METHOD,
-  buildShellEnvOverrides,
   bridgeRequestEnvelopeSchema,
   createBridgeIo,
   createBridgeLineHandler,
@@ -43,6 +42,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import { createPiDeltaTranslator } from "../delta-translation.js";
 import {
   buildPiSessionParams,
+  buildPiShellEnvOverrides,
   buildPiTurnOptions,
   type PiSessionParams,
 } from "../session-params.js";
@@ -997,10 +997,7 @@ async function reconcileTurnOptions(
 ): Promise<ThreadSession> {
   const turnOptions = buildPiTurnOptions(options);
   const construction = threadSession.construction;
-  const shellEnvOverrides =
-    options.envVars && Object.keys(options.envVars).length > 0
-      ? { BB_THREAD_ID: threadId, ...buildShellEnvOverrides(options.envVars) }
-      : undefined;
+  const shellEnvOverrides = buildPiShellEnvOverrides(threadId, options);
   const environmentChanged =
     shellEnvOverrides !== undefined &&
     !isDeepStrictEqual(shellEnvOverrides, construction.shellEnvOverrides);
