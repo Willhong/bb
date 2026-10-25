@@ -71,6 +71,7 @@ import {
 } from "./catalog.js";
 import {
   PiRpcSession,
+  type PiContextUsage,
   type PiRpcSessionOptions,
   type ToolCallForwarder,
 } from "./rpc-session.js";
@@ -374,7 +375,7 @@ function emitSessionError(
 }
 
 function toContextWindowUsagePayload(
-  contextUsage: { tokens: number | null; contextWindow: number } | null,
+  contextUsage: PiContextUsage | null,
 ): ThreadEventContextWindowUsage | null {
   if (!contextUsage) {
     return null;
@@ -384,6 +385,7 @@ function toContextWindowUsagePayload(
     modelContextWindow:
       contextUsage.contextWindow > 0 ? contextUsage.contextWindow : null,
     estimated: true,
+    ...(contextUsage.snapshot ? { snapshot: contextUsage.snapshot } : {}),
   };
 }
 

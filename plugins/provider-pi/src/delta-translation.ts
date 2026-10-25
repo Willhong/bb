@@ -735,6 +735,9 @@ export function createPiDeltaTranslator(
               : null,
           size: toPositiveNumber(size) ?? null,
           estimated: contextWindowUsage.estimated,
+          ...(contextWindowUsage.snapshot
+            ? { snapshot: contextWindowUsage.snapshot }
+            : {}),
           attach: "currentOrLast",
         },
       ];

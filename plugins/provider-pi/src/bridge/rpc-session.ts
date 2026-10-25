@@ -3,8 +3,10 @@ import { dirname, join } from "node:path";
 import { resolvePiModelSelection, type PiModelRef } from "./model-selection.js";
 import { runSettlementError } from "./run-settlement.js";
 import {
+  contextSnapshotSchema,
   experimental_buildBridgeToolCallContent as buildBridgeToolCallContent,
   experimental_buildProviderCliEnv as buildProviderCliEnv,
+  type ContextSnapshot,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import {
@@ -142,6 +144,13 @@ function readinessTimeoutMs(): number {
   return Number.isFinite(configured) && configured > 0 ? configured : 60_000;
 }
 const CHANNEL_REQUEST_TIMEOUT_MS = 30_000;
+const CONTEXT_SNAPSHOT_TIMEOUT_MS = 2_000;
+
+export interface PiContextUsage {
+  tokens: number | null;
+  contextWindow: number;
+  snapshot: ContextSnapshot | null;
+}
 const AGENT_END_LEAF_TIMEOUT_MS = 5_000;
 
 type PiSessionConstructionOutcome = { ok: true } | { ok: false; error: Error };
@@ -226,10 +235,7 @@ export class PiRpcSession {
     resolve: () => void;
     reject: (error: Error) => void;
   } = createDeferred();
-  private lastContextUsage: {
-    tokens: number | null;
-    contextWindow: number;
-  } | null = null;
+  private lastContextUsage: PiContextUsage | null = null;
   private liveModel: PiRpcSessionState["model"] | undefined;
   private selectedModel: PiModelRef | undefined;
   private closed = false;
@@ -286,7 +292,7 @@ export class PiRpcSession {
       : [];
   }
 
-  getContextUsage(): { tokens: number | null; contextWindow: number } | null {
+  getContextUsage(): PiContextUsage | null {
     return this.lastContextUsage;
   }
 
@@ -1044,8 +1050,22 @@ export class PiRpcSession {
       this.lastContextUsage = {
         tokens: typeof usage.tokens === "number" ? usage.tokens : null,
         contextWindow: usage.contextWindow,
+        snapshot: await this.readContextSnapshot(),
       };
     }
+  }
+
+  private async readContextSnapshot(): Promise<ContextSnapshot | null> {
+    const reply = await this.channelRequest(
+      { method: "context-snapshot" },
+      CONTEXT_SNAPSHOT_TIMEOUT_MS,
+    ).catch(() => null);
+    const snapshot =
+      typeof reply === "object" && reply !== null && "snapshot" in reply
+        ? reply.snapshot
+        : null;
+    const parsed = contextSnapshotSchema.safeParse(snapshot);
+    return parsed.success ? parsed.data : null;
   }
 
   private handleChannelMessage(message: Record<string, unknown>): void {
