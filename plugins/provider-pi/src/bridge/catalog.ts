@@ -25,6 +25,7 @@ const EXTENDED_THINKING_LEVELS = [
 ] as const;
 
 interface PiRpcModel {
+  api?: string;
   id: string;
   name?: string;
   provider: string;
@@ -63,6 +64,7 @@ function toCatalogModel(model: PiRpcModel): PiCatalogModel | undefined {
   }
   return {
     id: model.id,
+    ...(typeof model.api === "string" ? { api: model.api } : {}),
     input: Array.isArray(model.input)
       ? model.input.filter(
           (entry): entry is string => typeof entry === "string",
