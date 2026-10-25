@@ -8,12 +8,15 @@ import {
   type ModelReasoningEffort,
 } from "@get-bb/plugin-sdk/provider-bridge";
 
+import { resolvePiFastMode } from "./service-tier.js";
+
 const NONE_REASONING_EFFORT: ModelReasoningEffort = {
   reasoningEffort: "none",
   description: "No extended thinking",
 };
 
 export interface PiCatalogModel {
+  api?: string;
   id: string;
   input: string[];
   name: string;
@@ -61,6 +64,9 @@ function buildPiAvailableModel(model: PiCatalogModel): AvailableModel {
     reasoningDiscovery: "known",
     supportedReasoningEfforts,
     defaultReasoningEffort,
+    supportedServiceTiers: resolvePiFastMode(model)
+      ? [{ id: "default" }, { id: "fast" }]
+      : [{ id: "default" }],
     isDefault: false,
   };
 }

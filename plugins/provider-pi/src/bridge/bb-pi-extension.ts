@@ -1,3 +1,5 @@
+import { PI_SERVICE_TIER_EXTENSION_SOURCE } from "../service-tier.js";
+
 export const BB_PI_EXTENSION_SOURCE = String.raw`
 import { readFileSync, renameSync } from "node:fs";
 import { connect } from "node:net";
@@ -182,7 +184,10 @@ function buildParameters(inputSchema) {
 
 // ---- the extension ----
 
+${PI_SERVICE_TIER_EXTENSION_SOURCE}
+
 export default async function bbExtension(pi) {
+  registerBbServiceTier(pi);
   const channel = await bridgeChannel();
   const writeLine = (message) => {
     if (channel.socket.writable) channel.socket.write(JSON.stringify(message) + "\n");
