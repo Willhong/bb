@@ -27,6 +27,7 @@ function toPiThinkingLevel(
 interface PiSessionOptions {
   model?: string | undefined;
   reasoningLevel?: ReasoningLevel | undefined;
+  serviceTier?: string | undefined;
   instructions?: string | undefined;
   envVars?: Record<string, string> | undefined;
 }
@@ -56,6 +57,21 @@ export interface PiTurnOptions {
   thinkingLevel: PiReasoningLevel | undefined;
 }
 
+export function buildPiShellEnvOverrides(
+  threadId: string,
+  options: PiSessionOptions,
+): Record<string, string> {
+  const serviceTier = options.serviceTier ?? "default";
+  if (serviceTier !== "default" && serviceTier !== "fast") {
+    throw new Error(`Unsupported Pi service tier: ${serviceTier}`);
+  }
+  return {
+    BB_THREAD_ID: threadId,
+    ...buildShellEnvOverrides(options.envVars),
+    BB_PI_SERVICE_TIER: serviceTier,
+  };
+}
+
 export function buildPiTurnOptions(options: PiSessionOptions): PiTurnOptions {
   return {
     model: options.model ? options.model : undefined,
@@ -70,10 +86,7 @@ export function buildPiSessionParams(
   const thinkingLevel = toPiThinkingLevel(args.options.reasoningLevel);
   return {
     cwd: args.cwd,
-    shellEnvOverrides: {
-      BB_THREAD_ID: args.threadId,
-      ...buildShellEnvOverrides(args.options.envVars),
-    },
+    shellEnvOverrides: buildPiShellEnvOverrides(args.threadId, args.options),
     ...(instructions
       ? args.instructionMode === "replace"
         ? { baseInstructions: instructions }

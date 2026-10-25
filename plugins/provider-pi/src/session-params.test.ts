@@ -17,6 +17,7 @@ describe("buildPiSessionParams", () => {
       }).shellEnvOverrides,
     ).toEqual({
       BB_THREAD_ID: "bb-thread-1",
+      BB_PI_SERVICE_TIER: "default",
       TEST_VAR: "123",
     });
   });

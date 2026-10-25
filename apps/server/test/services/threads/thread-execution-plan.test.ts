@@ -5,6 +5,7 @@ import {
   upsertProjectExecutionDefaults,
 } from "@bb/db";
 import type { PermissionMode } from "@bb/domain";
+import type { PluginProviderDeclaration } from "@get-bb/plugin-sdk";
 import { describe, expect, it } from "vitest";
 import {
   buildExistingThreadExecutionInput,
@@ -24,6 +25,29 @@ import {
   withTestHarness,
   type TestAppHarness,
 } from "../../helpers/test-app.js";
+
+const NO_TIER_PROVIDER: {
+  pluginId: string;
+  declaration: PluginProviderDeclaration;
+} = {
+  pluginId: "provider-no-tier",
+  declaration: {
+    id: "no-tier",
+    displayName: "No Tier",
+    maintenance: { health: false, usage: false, installation: false },
+    capabilities: {
+      supportsServiceTier: false,
+      supportsNativeUserQuestion: false,
+      fork: "none",
+      supportsManualCompaction: false,
+      supportsThreadArchive: false,
+      supportsThreadRename: false,
+      permissionModes: ["full"],
+      reasoningLevels: ["low", "medium", "high"],
+    },
+    composerActions: [],
+  },
+};
 
 describe("thread execution plan input sources", () => {
   it("uses the default tier for explicit and inherited fast selections when fast is disabled", async () => {
@@ -141,47 +165,54 @@ describe("thread execution plan input sources", () => {
   });
 
   it("runs a provider without service tiers at the default tier unless a tier is explicitly requested", async () => {
-    await withTestHarness(async (harness) => {
-      const { host } = seedHostSession(harness.deps, {
-        id: "host-no-tier",
-      });
-      const { project } = seedProjectWithSource(harness.deps, {
-        hostId: host.id,
-      });
-      const environment = seedEnvironment(harness.deps, {
-        hostId: host.id,
-        projectId: project.id,
-      });
-      const thread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: environment.id,
-        providerId: "pi",
-      });
-      upsertProjectExecutionDefaults(harness.deps.db, {
-        projectId: project.id,
-        providerId: "pi",
-        model: "pi-model",
-        reasoningLevel: "medium",
-        permissionMode: "full",
-        serviceTier: "fast",
-      });
-      const resolve = (
-        input: ReturnType<typeof buildExistingThreadExecutionInput>,
-      ) =>
-        resolveExistingThreadExecutionPlan(harness.deps, {
-          executionSource: "client/turn/requested",
-          input,
-          threadId: thread.id,
+    await withTestHarness(
+      { extraProviders: [NO_TIER_PROVIDER] },
+      async (harness) => {
+        const { host } = seedHostSession(harness.deps, {
+          id: "host-no-tier",
         });
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: host.id,
+        });
+        const environment = seedEnvironment(harness.deps, {
+          hostId: host.id,
+          projectId: project.id,
+        });
+        const thread = seedThread(harness.deps, {
+          projectId: project.id,
+          environmentId: environment.id,
+          providerId: NO_TIER_PROVIDER.declaration.id,
+        });
+        upsertProjectExecutionDefaults(harness.deps.db, {
+          projectId: project.id,
+          providerId: NO_TIER_PROVIDER.declaration.id,
+          model: "no-tier-model",
+          reasoningLevel: "medium",
+          permissionMode: "full",
+          serviceTier: "fast",
+        });
+        const resolve = (
+          input: ReturnType<typeof buildExistingThreadExecutionInput>,
+        ) =>
+          resolveExistingThreadExecutionPlan(harness.deps, {
+            executionSource: "client/turn/requested",
+            input,
+            threadId: thread.id,
+          });
 
-      expect((await resolve({})).resolvedExecution.serviceTier).toBe("default");
-      await expect(
-        resolve({ serviceTier: { source: "explicit", value: "fast" } }),
-      ).rejects.toMatchObject({
-        status: 400,
-        body: { message: "Provider pi does not support service tiers." },
-      });
-    });
+        expect((await resolve({})).resolvedExecution.serviceTier).toBe(
+          "default",
+        );
+        await expect(
+          resolve({ serviceTier: { source: "explicit", value: "fast" } }),
+        ).rejects.toMatchObject({
+          status: 400,
+          body: {
+            message: `Provider ${NO_TIER_PROVIDER.declaration.id} does not support service tiers.`,
+          },
+        });
+      },
+    );
   });
 
   it("treats supplied execution fields as explicit when legacy callers omit sources", () => {

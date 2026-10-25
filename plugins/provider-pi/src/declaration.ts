@@ -15,7 +15,7 @@ export function piProviderDeclaration(): PluginProviderDeclaration {
     maintenance: { health: true, usage: false, installation: true },
     env: { passthrough: ["BB_PI_BRIDGE_COMMAND", "BB_PI_BRIDGE_ARGS"] },
     capabilities: {
-      supportsServiceTier: false,
+      supportsServiceTier: true,
       supportsNativeUserQuestion: false,
       fork: "checkpoint",
       supportsManualCompaction: true,
@@ -31,6 +31,15 @@ export function piProviderDeclaration(): PluginProviderDeclaration {
       { id: "high", label: "High" },
       { id: "xhigh", label: "Extra High" },
       { id: "max", label: "Max" },
+    ],
+    serviceTiers: [
+      { id: "default", label: "Default" },
+      {
+        id: "fast",
+        label: "Fast",
+        description:
+          "Priority processing for OpenAI; fast speed for supported Claude Opus models. Higher costs and provider availability apply.",
+      },
     ],
     ...PI_NATIVE_ROOTS_DECLARATION,
     composerActions: [],
