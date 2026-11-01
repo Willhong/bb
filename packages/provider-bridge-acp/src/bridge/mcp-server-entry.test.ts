@@ -33,6 +33,23 @@ interface AdvertisedMcpServer {
   env: { name: string; value: string }[];
 }
 
+const DYNAMIC_TOOLS = [
+  {
+    name: "update_environment_directory",
+    description: "Move this thread to another environment directory.",
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string" } },
+      required: ["path"],
+    },
+  },
+  {
+    name: "한글_도구",
+    description: "도구 설명에 한글이 들어 있어도 그대로 전달된다.",
+    inputSchema: { type: "object", properties: {} },
+  },
+];
+
 const children: { child: ChildProcess; closed: Promise<void> }[] = [];
 const tempDirs: string[] = [];
 const bridgeLines: BridgeLine[] = [];
@@ -152,17 +169,7 @@ async function readAdvertisedMcpServer(
         },
       },
     },
-    dynamicTools: [
-      {
-        name: "update_environment_directory",
-        description: "Move this thread to another environment directory.",
-        inputSchema: {
-          type: "object",
-          properties: { path: { type: "string" } },
-          required: ["path"],
-        },
-      },
-    ],
+    dynamicTools: DYNAMIC_TOOLS,
   });
   const startResponse = await waitFor(
     () =>
@@ -204,6 +211,7 @@ async function runMcpInitialize(config: AdvertisedMcpServer): Promise<{
   exitCode: number | null | undefined;
   stderr: string;
   stdoutLines: string[];
+  listTools(): Promise<unknown>;
 }> {
   const env = { ...process.env };
   for (const { name, value } of config.env) {
@@ -246,7 +254,18 @@ async function runMcpInitialize(config: AdvertisedMcpServer): Promise<{
     "MCP initialize response or child exit",
     15_000,
   );
-  return { exitCode, stderr, stdoutLines };
+  const listTools = async () => {
+    mcp.stdin?.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" })}\n`,
+    );
+    const line = await waitFor(
+      () => stdoutLines.find((candidate) => candidate.includes('"id":2')),
+      "MCP tools/list response",
+      15_000,
+    );
+    return JSON.parse(line) as unknown;
+  };
+  return { exitCode, stderr, stdoutLines, listTools };
 }
 
 afterEach(async () => {
@@ -294,6 +313,35 @@ describe("bb-bridge MCP server entry point (#1918)", () => {
     );
     expect(config.args.some((arg) => arg.includes("bridge-worker"))).toBe(
       false,
+    );
+  }, 60_000);
+
+  it("serves the thread's dynamic tools over the bridge instead of the server config", async () => {
+    const dataDir = makeTempDir("bb-acp-mcp-list-data-");
+    const workspaceDir = makeTempDir("bb-acp-mcp-list-ws-");
+    const bridge = spawnBridgeLikeTheAgentRuntime(dataDir);
+
+    const config = await readAdvertisedMcpServer(bridge, workspaceDir);
+    const serialized = JSON.stringify(config);
+    expect(serialized).not.toContain("update_environment_directory");
+    expect(config.env.map((entry) => entry.name)).not.toContain(
+      "BB_ACP_DYNAMIC_TOOLS",
+    );
+
+    const { listTools } = await runMcpInitialize(config);
+    expect(await listTools()).toEqual({
+      jsonrpc: "2.0",
+      id: 2,
+      result: { tools: DYNAMIC_TOOLS },
+    });
+    await waitFor(
+      () =>
+        bridgeStderr.includes(
+          `answered initialize for thread "thread-1918" (${DYNAMIC_TOOLS.length} tools)`,
+        )
+          ? true
+          : undefined,
+      "bridge-side tool count diagnostic",
     );
   }, 60_000);
 });

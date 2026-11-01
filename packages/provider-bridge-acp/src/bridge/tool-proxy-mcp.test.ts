@@ -13,6 +13,18 @@ const TSX_LOADER = import.meta.resolve("tsx");
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
+interface FakeTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+const ASK_USER_QUESTION_TOOL: FakeTool = {
+  name: "AskUserQuestion",
+  description: "Ask the user a question.",
+  inputSchema: { type: "object", properties: {} },
+};
+
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) {
     await cleanup();
@@ -22,14 +34,20 @@ afterEach(async () => {
 async function listenFakeBridge(args: {
   responseDelayMs: number | null;
   response?: unknown;
+  tools?: FakeTool[];
+  listResponse?: unknown;
 }): Promise<{
   port: number;
   server: Server;
   requests: unknown[];
+  listRequests: unknown[];
   cancelled: unknown[];
+  setTools(tools: FakeTool[]): void;
   releaseResponses(): void;
 }> {
+  let tools = args.tools ?? [ASK_USER_QUESTION_TOOL];
   const requests: unknown[] = [];
+  const listRequests: unknown[] = [];
   const cancelled: unknown[] = [];
   const sockets = new Set<Socket>();
   const heldResponses: Array<() => void> = [];
@@ -49,6 +67,13 @@ async function listenFakeBridge(args: {
       };
       if (request.kind === "initialized") {
         socket.end(`${JSON.stringify({ ok: true, content: "" })}\n`);
+        return;
+      }
+      if (request.kind === "listTools") {
+        listRequests.push(request);
+        socket.end(
+          `${JSON.stringify(args.listResponse ?? { ok: true, tools })}\n`,
+        );
         return;
       }
       requests.push(request);
@@ -96,15 +121,19 @@ async function listenFakeBridge(args: {
     port: address.port,
     server,
     requests,
+    listRequests,
     cancelled,
+    setTools(next) {
+      tools = next;
+    },
     releaseResponses() {
       for (const respond of heldResponses.splice(0)) respond();
     },
   };
 }
 
-async function connectLikeOpenCode(port: number): Promise<Client> {
-  const config = buildAcpMcpServerConfig({
+function buildConfig(port: number) {
+  return buildAcpMcpServerConfig({
     bridgeArgs: [
       "--conditions=source",
       "--import",
@@ -113,19 +142,16 @@ async function connectLikeOpenCode(port: number): Promise<Client> {
       "--mcp-stdio",
     ],
     command: process.execPath,
-    dynamicTools: [
-      {
-        name: "AskUserQuestion",
-        description: "Ask the user a question.",
-        inputSchema: { type: "object", properties: {} },
-      },
-    ],
     host: "127.0.0.1",
     port,
     runtimeEnv: [],
     threadId: "thread-ask",
     token: "secret-token",
   });
+}
+
+async function connectLikeOpenCode(port: number): Promise<Client> {
+  const config = buildConfig(port);
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined) env[key] = value;
@@ -257,5 +283,89 @@ describe("bb-bridge MCP cancellation", () => {
     });
     expect((await result).isError).toBeFalsy();
     expect(bridge.cancelled).toHaveLength(0);
+  }, 20_000);
+});
+
+describe("large ACP tool catalogs", () => {
+  it("advertises and calls tools through an editor with a 64 KiB server-config limit", async () => {
+    const tools = Array.from({ length: 160 }, (_, i) => ({
+      name: `tool_${i}`,
+      description: "A tool with a detailed contract. ".repeat(40),
+      inputSchema: { type: "object", properties: {} },
+    }));
+    const fakeBridge = await listenFakeBridge({ responseDelayMs: 0, tools });
+    const config = buildConfig(fakeBridge.port);
+    const serialized = JSON.stringify([config]);
+    expect(Buffer.byteLength(serialized)).toBeLessThan(4_096);
+    expect(serialized).not.toContain("tool_0");
+    const client = await connectLikeOpenCode(fakeBridge.port);
+    const listed = await client.listTools();
+    expect(listed.tools).toEqual(tools);
+    const result = await client.callTool({ name: "tool_159", arguments: {} });
+    expect(result.isError).toBeFalsy();
+    expect(fakeBridge.requests).toEqual([
+      expect.objectContaining({ kind: "toolCall", tool: "tool_159" }),
+    ]);
+  }, 20_000);
+});
+
+describe("bb-bridge MCP tool catalog comes from the bridge", () => {
+  it("authenticates the list request as the session's thread", async () => {
+    const fakeBridge = await listenFakeBridge({ responseDelayMs: 0 });
+    const client = await connectLikeOpenCode(fakeBridge.port);
+    await client.listTools();
+    expect(fakeBridge.listRequests).toEqual([
+      { kind: "listTools", threadId: "thread-ask", token: "secret-token" },
+    ]);
+  }, 20_000);
+
+  it("re-lists the bridge's current catalog so an editor's drift check sees tool changes", async () => {
+    const fakeBridge = await listenFakeBridge({ responseDelayMs: 0 });
+    const client = await connectLikeOpenCode(fakeBridge.port);
+    expect((await client.listTools()).tools).toEqual([ASK_USER_QUESTION_TOOL]);
+    const added: FakeTool = {
+      name: "gitea_git",
+      description: "Run git against Gitea.",
+      inputSchema: { type: "object", properties: {} },
+    };
+    fakeBridge.setTools([ASK_USER_QUESTION_TOOL, added]);
+    expect((await client.listTools()).tools).toEqual([
+      ASK_USER_QUESTION_TOOL,
+      added,
+    ]);
+    const result = await client.callTool({ name: "gitea_git", arguments: {} });
+    expect(result.isError).toBeFalsy();
+  }, 20_000);
+
+  it("calls a tool the client never listed by asking the bridge for it", async () => {
+    const fakeBridge = await listenFakeBridge({ responseDelayMs: 0 });
+    const client = await connectLikeOpenCode(fakeBridge.port);
+    const result = await client.callTool({
+      name: "AskUserQuestion",
+      arguments: {},
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fakeBridge.listRequests).toHaveLength(1);
+  }, 20_000);
+
+  it("rejects an unknown tool without forwarding it", async () => {
+    const fakeBridge = await listenFakeBridge({ responseDelayMs: 0 });
+    const client = await connectLikeOpenCode(fakeBridge.port);
+    await client.listTools();
+    await expect(
+      client.callTool({ name: "no_such_tool", arguments: {} }),
+    ).rejects.toThrow(/Unknown tool: no_such_tool/u);
+    expect(fakeBridge.requests).toHaveLength(0);
+  }, 20_000);
+
+  it("reports a bridge that cannot list tools as an MCP error", async () => {
+    const fakeBridge = await listenFakeBridge({
+      responseDelayMs: 0,
+      listResponse: { ok: false, error: "No active ACP session" },
+    });
+    const client = await connectLikeOpenCode(fakeBridge.port);
+    await expect(client.listTools()).rejects.toThrow(
+      /could not list tools: No active ACP session/u,
+    );
   }, 20_000);
 });

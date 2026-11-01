@@ -15,7 +15,6 @@ const ENV_HOST = "BB_ACP_DYNAMIC_TOOL_HOST";
 const ENV_PORT = "BB_ACP_DYNAMIC_TOOL_PORT";
 const ENV_TOKEN = "BB_ACP_DYNAMIC_TOOL_TOKEN";
 const ENV_THREAD_ID = "BB_ACP_DYNAMIC_TOOL_THREAD_ID";
-const ENV_TOOLS = "BB_ACP_DYNAMIC_TOOLS";
 const ENV_PROGRESS_INTERVAL_MS = "BB_ACP_DYNAMIC_TOOL_PROGRESS_INTERVAL_MS";
 
 export interface AcpMcpServerConfig {
@@ -28,7 +27,6 @@ export interface AcpMcpServerConfig {
 interface BuildAcpMcpServerConfigArgs {
   bridgeArgs: string[];
   command: string;
-  dynamicTools: readonly DynamicTool[];
   host: string;
   port: number;
   runtimeEnv: { name: string; value: string }[];
@@ -41,7 +39,11 @@ export const dynamicToolBridgeRequestSchema = z.discriminatedUnion("kind", [
     kind: z.literal("initialized"),
     threadId: z.string().min(1),
     token: z.string().min(1),
-    toolCount: z.number().int().nonnegative(),
+  }),
+  z.object({
+    kind: z.literal("listTools"),
+    threadId: z.string().min(1),
+    token: z.string().min(1),
   }),
   z.object({
     kind: z.literal("toolCall"),
@@ -84,7 +86,11 @@ const bridgeToolCallResponseSchema = z.union([
   }),
   z.object({ ok: z.literal(false), error: z.string() }),
 ]);
-type BridgeToolCallResponse = z.infer<typeof bridgeToolCallResponseSchema>;
+
+export const bridgeListToolsResponseSchema = z.union([
+  z.object({ ok: z.literal(true), tools: dynamicToolSchema.array() }),
+  z.object({ ok: z.literal(false), error: z.string() }),
+]);
 
 const jsonRpcMessageSchema = z.object({
   id: z.union([z.string(), z.number().int()]).optional(),
@@ -99,7 +105,6 @@ interface McpServerEnvironment {
   progressIntervalMs: number | undefined;
   threadId: string;
   token: string;
-  tools: DynamicTool[];
 }
 
 let nextMcpToolCallId = 0;
@@ -119,7 +124,6 @@ export function buildAcpMcpServerConfig(
       { name: ENV_PORT, value: String(args.port) },
       { name: ENV_TOKEN, value: args.token },
       { name: ENV_THREAD_ID, value: args.threadId },
-      { name: ENV_TOOLS, value: JSON.stringify(args.dynamicTools) },
     ],
   };
 }
@@ -132,12 +136,9 @@ function readEnvironment(): McpServerEnvironment {
   const host = process.env[ENV_HOST];
   const token = process.env[ENV_TOKEN];
   const threadId = process.env[ENV_THREAD_ID];
-  const toolsJson = process.env[ENV_TOOLS];
-  if (!host || !token || !threadId || !toolsJson) {
+  if (!host || !token || !threadId) {
     throw new Error("Missing ACP dynamic tool MCP server environment");
   }
-  const parsedTools = JSON.parse(toolsJson) as unknown;
-  const tools = dynamicToolSchema.array().parse(parsedTools);
   const rawProgressInterval = process.env[ENV_PROGRESS_INTERVAL_MS];
   const progressIntervalMs =
     rawProgressInterval !== undefined && Number(rawProgressInterval) > 0
@@ -149,7 +150,6 @@ function readEnvironment(): McpServerEnvironment {
     progressIntervalMs,
     threadId,
     token,
-    tools,
   };
 }
 
@@ -170,11 +170,12 @@ function mcpToolCallId(toolName: string): string {
   return `acp-mcp-${toolName}-${Date.now()}-${nextMcpToolCallId}`;
 }
 
-function callBridge(
+function callBridge<Response>(
   env: McpServerEnvironment,
   request: BridgeRequestPayload,
+  responseSchema: z.ZodType<Response>,
   signal?: AbortSignal,
-): Promise<BridgeToolCallResponse> {
+): Promise<Response> {
   return new Promise((resolve, reject) => {
     const socket = createConnection({ host: env.host, port: env.port });
     const abort = () => {
@@ -203,7 +204,7 @@ function callBridge(
       const line = buffer.slice(0, newlineIndex);
       socket.end();
       try {
-        resolve(bridgeToolCallResponseSchema.parse(JSON.parse(line)));
+        resolve(responseSchema.parse(JSON.parse(line)));
       } catch (error) {
         reject(error);
       }
@@ -244,8 +245,40 @@ function startProgressHeartbeat(args: {
   return () => clearInterval(timer);
 }
 
+interface ToolCatalog {
+  tools: DynamicTool[] | undefined;
+}
+
+async function fetchTools(
+  env: McpServerEnvironment,
+  catalog: ToolCatalog,
+): Promise<DynamicTool[]> {
+  const response = await callBridge(
+    env,
+    { kind: "listTools" },
+    bridgeListToolsResponseSchema,
+  );
+  if (!response.ok) {
+    throw new Error(response.error);
+  }
+  catalog.tools = response.tools;
+  return response.tools;
+}
+
+async function findTool(
+  env: McpServerEnvironment,
+  catalog: ToolCatalog,
+  name: string,
+): Promise<DynamicTool | undefined> {
+  const known = catalog.tools?.find((candidate) => candidate.name === name);
+  if (known) return known;
+  const tools = await fetchTools(env, catalog).catch(() => []);
+  return tools.find((candidate) => candidate.name === name);
+}
+
 async function handleRequest(
   env: McpServerEnvironment,
+  catalog: ToolCatalog,
   message: JsonRpcMessage,
   pending: Map<string | number, AbortController>,
 ): Promise<void> {
@@ -270,10 +303,11 @@ async function handleRequest(
         capabilities: { tools: {} },
         serverInfo: { name: ACP_BRIDGE_MCP_SERVER_NAME, version: "1.0.0" },
       });
-      void callBridge(env, {
-        kind: "initialized",
-        toolCount: env.tools.length,
-      }).catch((error) => {
+      void callBridge(
+        env,
+        { kind: "initialized" },
+        bridgeToolCallResponseSchema,
+      ).catch((error) => {
         process.stderr.write(
           `bb-bridge MCP: failed to report initialize: ${
             error instanceof Error ? error.message : String(error)
@@ -282,21 +316,35 @@ async function handleRequest(
       });
       return;
 
-    case "tools/list":
+    case "tools/list": {
+      let tools: DynamicTool[];
+      try {
+        tools = await fetchTools(env, catalog);
+      } catch (error) {
+        writeError(
+          message.id,
+          -32603,
+          `bb-bridge could not list tools: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return;
+      }
       writeResult(message.id, {
-        tools: env.tools.map((tool) => ({
+        tools: tools.map((tool) => ({
           name: tool.name,
           description: tool.description,
           inputSchema: tool.inputSchema,
         })),
       });
       return;
+    }
 
     case "tools/call": {
       if (pending.has(message.id)) return;
       const params = objectParams(message.params);
       const name = typeof params.name === "string" ? params.name : "";
-      const tool = env.tools.find((candidate) => candidate.name === name);
+      const tool = await findTool(env, catalog, name);
       if (!tool) {
         writeError(message.id, -32602, `Unknown tool: ${name}`);
         return;
@@ -330,6 +378,7 @@ async function handleRequest(
             callId: mcpToolCallId(tool.name),
             tool: tool.name,
           },
+          bridgeToolCallResponseSchema,
           controller.signal,
         );
         if (controller.signal.aborted) return;
@@ -374,6 +423,7 @@ async function handleRequest(
 
 export function runAcpDynamicToolMcpServer(): void {
   const env = readEnvironment();
+  const catalog: ToolCatalog = { tools: undefined };
   const pending = new Map<string | number, AbortController>();
   const rl = createInterface({ input: process.stdin, terminal: false });
   rl.on("close", () => {
@@ -390,6 +440,6 @@ export function runAcpDynamicToolMcpServer(): void {
     } catch {
       return;
     }
-    void handleRequest(env, message, pending);
+    void handleRequest(env, catalog, message, pending);
   });
 }

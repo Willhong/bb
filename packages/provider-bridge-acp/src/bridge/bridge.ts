@@ -8,6 +8,7 @@ import {
 } from "@bb/domain";
 import type {
   AvailableModel,
+  DynamicTool,
   ExtensionKind,
   JsonValue,
   PromptInput,
@@ -512,6 +513,26 @@ async function forwardDynamicToolCall(
   }
 }
 
+function listDynamicTools(threadId: string):
+  | {
+      ok: true;
+      tools: Pick<DynamicTool, "name" | "description" | "inputSchema">[];
+    }
+  | { ok: false; error: string } {
+  const session = sessionsByBbThreadId.get(threadId);
+  if (!session || session.stopping) {
+    return { ok: false, error: "No active ACP session for dynamic tools." };
+  }
+  return {
+    ok: true,
+    tools: (session.construction.dynamicTools ?? []).map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    })),
+  };
+}
+
 function handleDynamicToolBridgeSocket(
   bridge: AcpDynamicToolBridge,
   socket: Socket,
@@ -546,10 +567,19 @@ function handleDynamicToolBridgeSocket(
       return;
     }
     if (request.data.kind === "initialized") {
+      const toolCount =
+        sessionsByBbThreadId.get(request.data.threadId)?.construction
+          .dynamicTools?.length ?? 0;
       process.stderr.write(
-        `acp bridge: "${ACP_BRIDGE_MCP_SERVER_NAME}" answered initialize for thread "${request.data.threadId}" (${request.data.toolCount} tools)\n`,
+        `acp bridge: "${ACP_BRIDGE_MCP_SERVER_NAME}" answered initialize for thread "${request.data.threadId}" (${toolCount} tools)\n`,
       );
       socket.end(`${JSON.stringify({ ok: true, content: "" })}\n`);
+      return;
+    }
+    if (request.data.kind === "listTools") {
+      socket.end(
+        `${JSON.stringify(listDynamicTools(request.data.threadId))}\n`,
+      );
       return;
     }
     void forwardDynamicToolCall(request.data, controller.signal).then(
@@ -606,7 +636,6 @@ async function buildSessionMcpServers(
   const config = buildAcpMcpServerConfig({
     bridgeArgs: resolveBridgeProcessArgsForMcpServer(),
     command: process.execPath,
-    dynamicTools,
     host: bridge.host,
     port: bridge.port,
     runtimeEnv: resolveBridgeProcessEnvForMcpServer(),
