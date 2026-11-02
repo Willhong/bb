@@ -3,7 +3,10 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { promisify } from "node:util";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { ensureNodePtySpawnHelpersExecutableInPackage } from "./terminal-manager.js";
+import {
+  ensureNodePtySpawnHelpersExecutableInPackage,
+  nodePtyPlatformOptions,
+} from "./terminal-manager.js";
 
 const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
@@ -135,3 +138,88 @@ describe.runIf(["darwin", "linux"].includes(process.platform))(
     });
   },
 );
+
+const windowsConsoleHostProbe = `
+  import { execFileSync } from "node:child_process";
+  import { createRequire } from "node:module";
+  import os from "node:os";
+
+  const require = createRequire(import.meta.url);
+  const { spawn } = require("node-pty");
+  const spawnCount = Number.parseInt(process.argv[1] ?? "", 10);
+  const options = JSON.parse(process.argv[2] ?? "{}");
+
+  function countConsoleHosts() {
+    const output = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        \`@(Get-CimInstance Win32_Process -Filter "ParentProcessId=\${process.pid}" | Where-Object { $_.Name -in @('conhost.exe', 'OpenConsole.exe') }).Count\`,
+      ],
+      { encoding: "utf8" },
+    );
+    return Number.parseInt(output.trim(), 10);
+  }
+
+  async function spawnAndWait() {
+    await new Promise((resolve, reject) => {
+      const pty = spawn("cmd.exe", ["/d", "/c", "exit 0"], {
+        cols: 80,
+        cwd: os.tmpdir(),
+        name: "xterm-256color",
+        rows: 24,
+        ...options,
+      });
+      const timeout = setTimeout(() => {
+        pty.kill();
+        reject(new Error("Timed out waiting for node-pty child exit"));
+      }, 10_000);
+      pty.onData(() => {});
+      pty.onExit(() => {
+        clearTimeout(timeout);
+        pty.destroy();
+        resolve();
+      });
+    });
+  }
+
+  for (let index = 0; index < spawnCount; index += 1) {
+    await spawnAndWait();
+  }
+  const deadline = Date.now() + 10_000;
+  let remaining = countConsoleHosts();
+  while (remaining > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    remaining = countConsoleHosts();
+  }
+  process.stdout.write(\`remaining=\${remaining}\`);
+  process.exit(0);
+`;
+
+describe("node-pty platform options", () => {
+  it("lets Windows pseudoconsoles close when the shell exits", () => {
+    expect(nodePtyPlatformOptions("win32")).toEqual({ useConptyDll: true });
+    expect(nodePtyPlatformOptions("darwin")).toEqual({});
+    expect(nodePtyPlatformOptions("linux")).toEqual({});
+  });
+});
+
+describe.runIf(process.platform === "win32")("Windows console host cleanup", () => {
+  it("leaves no console host behind after a shell exits on its own", async () => {
+    const result = await execFileAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        windowsConsoleHostProbe,
+        "3",
+        JSON.stringify(nodePtyPlatformOptions(process.platform)),
+      ],
+      { cwd: nodePtyPackageDirectory, timeout: 60_000 },
+    );
+
+    expect(result).toMatchObject({ stderr: "", stdout: "remaining=0" });
+  }, 70_000);
+});
