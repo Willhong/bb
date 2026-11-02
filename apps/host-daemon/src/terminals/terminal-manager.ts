@@ -246,6 +246,12 @@ function disposeNodePty(pty: ReturnType<typeof spawnPty>): void {
   Reflect.apply(destroy, pty, []);
 }
 
+export function nodePtyPlatformOptions(platform: NodeJS.Platform): {
+  useConptyDll?: true;
+} {
+  return platform === "win32" ? { useConptyDll: true } : {};
+}
+
 const nodePtyAdapter: TerminalPtyAdapter = {
   spawn(args) {
     ensureNodePtySpawnHelperExecutable(args.logger);
@@ -259,6 +265,7 @@ const nodePtyAdapter: TerminalPtyAdapter = {
       env: launch.env,
       name: "xterm-256color",
       rows: args.rows,
+      ...nodePtyPlatformOptions(process.platform),
     });
     pty.onExit(({ exitCode }) => hostToolchain.invalidateFailure(exitCode));
     return {
