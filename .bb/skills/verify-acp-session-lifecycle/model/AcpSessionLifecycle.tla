@@ -24,11 +24,11 @@ CONSTANTS
   Modes,             \* subset of {"rebuild", "fresh"} to check
   StopExistingFirst, \* TRUE = startAgentSessionWhilePending awaits
                      \* stopSession(existing) before it launches the new agent
-                     \* (bridge.ts L2319-2321)
+                     \* (bridge.ts L2388-2390)
   StopMarksPending   \* TRUE = thread/stop records the stop on in-flight starts
-                     \* (requestStopOfPendingSessionStarts, L2268-2273, called
-                     \* at L2121) and the start checks it after each await
-                     \* before registration (L2322-2324, L2365-2367)
+                     \* (requestStopOfPendingSessionStarts, L2337-2342, called
+                     \* at L4208) and the start checks it after each await
+                     \* before registration (L2391-2393, L2434-2436)
 
 Conns == {"old", "new"}
 None == "none"
@@ -38,11 +38,11 @@ VARIABLES
   mode,
   proc,            \* agent child process: "none" | "running" | "killing" | "dead"
   stopping,        \* session.stopping
-  registered,      \* session.providerThreadId set (bridge.ts L2682)
+  registered,      \* session.providerThreadId set (bridge.ts L2757)
   current,         \* sessionsByBbThreadId.get(threadId), or None
-  prompted,        \* a session/prompt request went to this agent (bridge.ts L3235)
+  prompted,        \* a session/prompt request went to this agent (bridge.ts L3307)
   startPc,         \* where the start request is
-  existing,        \* the session startAgentSessionWhilePending found at L2312
+  existing,        \* the session startAgentSessionWhilePending found at L2381
   stopPc,          \* "notSent" | "killing" | "acked"
   stopTarget,      \* the session thread/stop is stopping
   stopDuringStart, \* thread/stop arrived after the start request and before it finished
@@ -56,11 +56,11 @@ vars == <<mode, proc, stopping, registered, current, prompted, startPc,
 \* A session that can still run turns: registered, not stopping, process up.
 Live(c) == registered[c] /\ ~stopping[c] /\ proc[c] = "running"
 
-\* liveSessionForThread (bridge.ts L2162-2170)
+\* liveSessionForThread (bridge.ts L2218-2226)
 LiveForThread == current # None /\ ~stopping[current] /\ registered[current]
 
-\* startAgentSession has added its PendingSessionStart (L2275-2287) and has
-\* not yet returned or thrown (finally at L2296-2303).
+\* startAgentSession has added its PendingSessionStart (L2344-2356) and has
+\* not yet returned or thrown (finally at L2365-2372).
 StartPending == startPc \in {"awaitExistingKill", "resolveArgs", "construct"}
 
 \* The start aborts at a pending.stopRequested check.
@@ -85,32 +85,32 @@ Init ==
 -----------------------------------------------------------------------------
 (* Start request *)
 
-\* "rebuild": turn/start handler L4042-4060 runs synchronously into
-\*   rebuildAgentSession L3446-3461 and startAgentSession L2275-2295, which
+\* "rebuild": turn/start handler L4129-4147 runs synchronously into
+\*   rebuildAgentSession L3518-3541 and startAgentSession L2344-2364, which
 \*   adds a PendingSessionStart and calls startAgentSessionWhilePending
-\*   L2305-2321.
-\* "fresh": thread/start handler L3977-4020 into startAgentSession.
-\* stopSession(existing) L2728-2757 runs up to `await session.connection.kill()`.
+\*   L2374-2390.
+\* "fresh": thread/start handler L4063-4106 into startAgentSession.
+\* stopSession(existing) L2805-2834 runs up to `await session.connection.kill()`.
 StartArrive ==
   /\ startPc = "notSent"
   /\ IF mode = "rebuild" /\ ~LiveForThread
-       THEN \* turn/start answers "No active ACP session" (L4044-4047)
+       THEN \* turn/start answers "No active ACP session" (L4131-4134)
             /\ startPc' = "rejected"
             /\ UNCHANGED <<proc, stopping, existing>>
        ELSE LET e == current IN
             /\ existing' = e
             /\ IF StopExistingFirst /\ e # None /\ ~stopping[e]
-                 THEN /\ stopping' = [stopping EXCEPT ![e] = TRUE]  \* L2735
-                      /\ proc' = [proc EXCEPT ![e] = "killing"]     \* L2757
+                 THEN /\ stopping' = [stopping EXCEPT ![e] = TRUE]  \* L2812
+                      /\ proc' = [proc EXCEPT ![e] = "killing"]     \* L2834
                       /\ startPc' = "awaitExistingKill"
-                 ELSE \* no existing session, or stopSession returns at once (L2732)
+                 ELSE \* no existing session, or stopSession returns at once (L2809)
                       /\ startPc' = "resolveArgs"
                       /\ UNCHANGED <<stopping, proc>>
   /\ UNCHANGED <<mode, registered, current, prompted, stopPc, stopTarget,
                  stopDuringStart, promptAfterAck, stopMarked>>
 
-\* `await session.connection.kill()` resolves; removeSession (L2758,
-\* L2172-2183). Then the pending.stopRequested check at L2322-2324.
+\* `await session.connection.kill()` resolves; removeSession (L2835,
+\* L2228-2239). Then the pending.stopRequested check at L2391-2393.
 StartExistingKilled ==
   /\ startPc = "awaitExistingKill"
   /\ proc[existing] = "dead"
@@ -119,11 +119,11 @@ StartExistingKilled ==
   /\ UNCHANGED <<mode, proc, stopping, registered, prompted, existing, stopPc,
                  stopTarget, stopDuringStart, promptAfterAck, stopMarked>>
 
-\* `await resolveAgentLaunchArgs(params)` resolves (L2364; L1481-1537 can
+\* `await resolveAgentLaunchArgs(params)` resolves (L2433; L1535-1591 can
 \* spawn the model-list command for up to MODEL_LIST_TIMEOUT_MS). The
-\* pending.stopRequested check at L2365-2367 throws before anything is
-\* launched. Otherwise L2368-2460 run synchronously: launch the agent and
-\* sessionsByBbThreadId.set (L2460).
+\* pending.stopRequested check at L2434-2436 throws before anything is
+\* launched. Otherwise L2437-2529 run synchronously: launch the agent and
+\* sessionsByBbThreadId.set (L2529).
 StartSpawn ==
   /\ startPc = "resolveArgs"
   /\ IF StopSeen
@@ -136,10 +136,10 @@ StartSpawn ==
                  stopTarget, stopDuringStart, promptAfterAck, stopMarked>>
 
 \* The construction awaits (initialize, authenticate, session/load|new,
-\* model selection, L2463-2617) end. A killed agent rejects every pending
+\* model selection, L2532-2692) end. A killed agent rejects every pending
 \* request (agent-connection.ts L348-353); a stopping session hits the guard
-\* at L2619-2621. Both go to the catch at L2714-2725. Otherwise L2622-2713 run
-\* synchronously and register the session (L2682).
+\* at L2694-2696. Both go to the catch at L2791-2802. Otherwise L2697-2790 run
+\* synchronously and register the session (L2757).
 StartConstruct ==
   /\ startPc = "construct"
   /\ IF proc["new"] # "running" \/ stopping["new"]
@@ -155,8 +155,8 @@ StartConstruct ==
   /\ UNCHANGED <<mode, prompted, existing, stopPc, stopTarget,
                  stopDuringStart, promptAfterAck, stopMarked>>
 
-\* "rebuild": back in turn/start after `await reconciled` (L4060), runTurn
-\* (L3172-3239) checks session.stopping (L3189, L3201) and sends
+\* "rebuild": back in turn/start after `await reconciled` (L4147), runTurn
+\* (L3249-3311) checks session.stopping (L3266, L3278) and sends
 \* session/prompt. "fresh": thread/start answers with the providerThreadId.
 StartFinish ==
   /\ startPc = "returned"
@@ -170,11 +170,11 @@ StartFinish ==
                  stopTarget, stopDuringStart, stopMarked>>
 
 -----------------------------------------------------------------------------
-(* thread/stop request (L4120-4132), intent "interrupt" -> stopSession,   *)
-(* intent "release" -> releaseSession (L3042-3056). Both return at once   *)
+(* thread/stop request (L4207-4219), intent "interrupt" -> stopSession,   *)
+(* intent "release" -> releaseSession (L3119-3133). Both return at once   *)
 (* for a session that is already stopping.                                *)
 
-\* L4121 marks every in-flight start of the thread, then the handler looks
+\* L4208 marks every in-flight start of the thread, then the handler looks
 \* up the session.
 \* Simplification: with an active prompt, stopSession sends session/cancel
 \* and waits up to THREAD_STOP_CANCEL_TIMEOUT_MS before kill(). The model
@@ -194,7 +194,7 @@ StopArrive ==
   /\ UNCHANGED <<mode, registered, current, prompted, startPc, existing,
                  promptAfterAck>>
 
-\* kill resolves; removeSession; the handler answers { ok: true } (L4130).
+\* kill resolves; removeSession; the handler answers { ok: true } (L4217).
 StopKilled ==
   /\ stopPc = "killing"
   /\ proc[stopTarget] = "dead"
