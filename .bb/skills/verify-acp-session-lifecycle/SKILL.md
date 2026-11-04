@@ -41,6 +41,11 @@ Exit 0 means every check you asked for passed.
 At the sync commit all three checks pass: `PASS NoOrphan`,
 `PASS StopDuringRebuild`, `PASS StopDuringFreshStart`, exit 0.
 
+Compare each check's PASS or FAIL and, for a FAIL, the invariant name. The
+state counts change whenever the model gains a variable or constant, so do
+not compare them. `check.sh` prints the count from TLC's last "distinct
+states found" line; on larger models TLC prints progress lines first.
+
 The model does not read the code. If you run `check.sh` on an unchanged
 model, you get this result for any code change. To judge a change, whether
 yours or someone else's, first mirror the change in the model (see
