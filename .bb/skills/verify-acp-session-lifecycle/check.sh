@@ -25,7 +25,7 @@ for check in "${checks[@]}"; do
     -metadir "$meta/$check" -workers 1 -deadlock "$here/model/AcpSessionLifecycle.tla" >"$out" 2>&1
   code=$?
   set -e
-  states="$(grep -Eo '[0-9]+ distinct states found' "$out" | head -1 || true)"
+  states="$(grep -Eo '[0-9]+ distinct states found' "$out" | tail -1 || true)"
   if [ $code -eq 0 ]; then
     echo "PASS $check ($states)"
   else
