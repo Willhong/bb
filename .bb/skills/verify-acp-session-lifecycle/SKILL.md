@@ -58,19 +58,21 @@ Coverage record. Line numbers are at the sync commit.
 
 | Model action | Code (`packages/provider-bridge-acp/src/bridge/bridge.ts` unless noted) |
 |---|---|
-| `StartArrive` | turn/start handler L4042-4060 → `reconcileExecutionSettings` L3328-3417 → `rebuildAgentSession` L3446-3461; thread/start\|resume\|fork handler L3977-4020; `startAgentSession` L2275-2303 (adds a `PendingSessionStart`, removes it in `finally`); `startAgentSessionWhilePending` L2305-2321 incl. `await stopSession(existing)`; `stopSession` L2728-2757 up to `await kill()` |
-| `StartExistingKilled` | `stopSession` L2757-2759 (`kill` resolves, `removeSession`); the `pending.stopRequested` check L2322-2324 |
-| `StartSpawn` | `await resolveAgentLaunchArgs` L2364 (L1481-1537); the `pending.stopRequested` check L2365-2367; then L2368-2460 up to `sessionsByBbThreadId.set` |
-| `StartConstruct` | construction awaits L2463-2617; the `session.stopping` guard L2619-2621; registration L2622-2713; the catch L2714-2725 |
-| `StartFinish` | turn/start after `await reconciled` L4060-4077; `runTurn` L3172-3239 with its `session.stopping` checks L3189 and L3201 |
-| `StopArrive`, `StopKilled` | thread/stop handler L4120-4132 incl. `requestStopOfPendingSessionStarts` (L2259-2273) at L4121; `stopSession` L2728-2760; `releaseSession` L3042-3056; `removeSession` L2172-2183 |
-| `StartPending`, `stopMarked` | `PendingSessionStart`, `pendingSessionStartsByBbThreadId` L2259-2267 |
+| `StartArrive` | turn/start handler L4129-4147 → `reconcileExecutionSettings` L3400-3489 → `rebuildAgentSession` L3518-3541; thread/start\|resume\|fork handler L4063-4106; `startAgentSession` L2344-2372 (adds a `PendingSessionStart`, removes it in `finally`); `startAgentSessionWhilePending` L2374-2390 incl. `await stopSession(existing)`; `stopSession` L2805-2834 up to `await kill()` |
+| `StartExistingKilled` | `stopSession` L2834-2836 (`kill` resolves, `removeSession`); the `pending.stopRequested` check L2391-2393 |
+| `StartSpawn` | `await resolveAgentLaunchArgs` L2433 (L1535-1591); the `pending.stopRequested` check L2434-2436; then L2437-2529 up to `sessionsByBbThreadId.set` |
+| `StartConstruct` | construction awaits L2532-2692; the `session.stopping` guard L2694-2696; registration L2697-2790; the catch L2791-2802 |
+| `StartFinish` | turn/start after `await reconciled` L4147-4164; `runTurn` L3249-3311 with its `session.stopping` checks L3266 and L3278 |
+| `StopArrive`, `StopKilled` | thread/stop handler L4207-4219 incl. `requestStopOfPendingSessionStarts` (L2328-2342) at L4208; `stopSession` L2805-2837; `releaseSession` L3119-3133; `removeSession` L2228-2239 |
+| `StartPending`, `stopMarked` | `PendingSessionStart`, `pendingSessionStartsByBbThreadId` L2328-2336 |
 | `KillComplete` | `createAcpAgentConnection().kill` and `stopAgent` in `packages/provider-bridge-acp/src/bridge/agent-connection.ts` L140-149, L348-353 |
-| `LiveForThread` | `liveSessionForThread` L2162-2170 |
+| `LiveForThread` | `liveSessionForThread` L2218-2226 |
 
 **Sync commit: the commit that added this skill** (it also contains the
-fix for the two findings below; its parent is `1ee11afde2`). At this commit
-the model was last confirmed to describe the code above. Print its hash with:
+fix for the two findings below). At this commit the model was last
+confirmed to describe the code above. The line numbers in the table were
+rechecked against `bridge.ts` after the skill was carried onto the personal
+`main`; the code there is the same as at the commit that added the skill. Print its hash with:
 
 ```sh
 git log --diff-filter=A --format=%h -- .bb/skills/verify-acp-session-lifecycle/SKILL.md
@@ -116,7 +118,7 @@ set `StopMarksPending = FALSE` and drop `StopWins` from `INVARIANTS`. With
 4. `StartSpawn`, `StartConstruct`: the rebuild launches a new agent and
    registers it. Nothing records that a stop came in, so no guard fires.
    (The fix records it in `PendingSessionStart.stopRequested`, and the start
-   throws at L2322.)
+   throws at L2391.)
 5. `StartFinish`: `runTurn` sees a session that is not `stopping` and sends
    `session/prompt`. The stopped message runs.
 
@@ -176,10 +178,10 @@ Use these steps for your own change and for a change someone else proposes.
 3. Two constants in the `.cfg` files mirror code. Set one to `FALSE` only
    if the code stops doing what it describes.
    - `StopExistingFirst` mirrors `if (existing) { await stopSession(existing); }`
-     at L2319-2321.
+     at L2388-2390.
    - `StopMarksPending` mirrors `requestStopOfPendingSessionStarts` in the
-     thread/stop handler (L4121), together with the `pending.stopRequested`
-     checks at L2322-2324 and L2365-2367.
+     thread/stop handler (L4208), together with the `pending.stopRequested`
+     checks at L2391-2393 and L2434-2436.
 4. Run `check.sh`. Read each result as described above.
 5. Prove that the check can still fail. Break the property in the real code
    on a scratch change. For example, delete the stopSession(existing) call for
@@ -234,8 +236,8 @@ fails with that error, and the thread has no session, as after any stop.
   - two starts for the same thread at once (the code marks every pending
     start of the thread, but the model has only one)
   - steer (`turn/steer`) and its queued inputs
-  - rebuilds inside `runTurn`'s loop (L3199)
-  - agent crash during construction (`onExit`, L2396-2411)
+  - rebuilds inside `runTurn`'s loop (L3276)
+  - agent crash during construction (`onExit`, L2465-2480)
   - fork's source session
   - compaction and agent turns
   - Cursor MCP approval release
