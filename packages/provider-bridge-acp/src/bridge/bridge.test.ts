@@ -5665,6 +5665,52 @@ describe("acp bridge: busy agents, restored sessions and stop reasons", () => {
     expect(threadEventsOfType("provider/warning")).toEqual([]);
   });
 
+  it.each([
+    { code: -32603, message: "Internal error", data: { details: "" } },
+    {
+      code: -32603,
+      message: "Internal error",
+      data: { details: "Gateway RPC session.resume timed out after 30s" },
+    },
+  ])("preserves the session when restore reports an internal error: %j", async (error) => {
+    const requestLog = join(workspaceDir, "restore-requests.jsonl");
+    const envVars = {
+      FAKE_ACP_LOAD_SESSION: "1",
+      FAKE_ACP_REQUEST_LOG: requestLog,
+    };
+    const first = await startThread({ envVars });
+    await stopThread(first.providerThreadId);
+    const before = loggedAcpRequests(requestLog).length;
+    const response = await waitForResponse(
+      sendRequest("thread/resume", {
+        threadId: first.bbThreadId,
+        providerThreadId: first.providerThreadId,
+        cwd: workspaceDir,
+        instructionMode: "append",
+        options: executionOptions({
+          providerOptions: {
+            acpLaunchSpec: acpLaunchSpec({
+              envVars: {
+                ...envVars,
+                FAKE_ACP_FAIL_LOAD: "1",
+                FAKE_ACP_LOAD_ERROR: JSON.stringify(error),
+              },
+            }),
+          },
+        }),
+      }),
+    );
+    expect(response.error?.message).toContain("Internal error");
+    expect(response.result).toBeUndefined();
+    expect(
+      loggedAcpRequests(requestLog).slice(before).map((request) => request.method),
+    ).toContain("session/load");
+    expect(
+      loggedAcpRequests(requestLog).slice(before).map((request) => request.method),
+    ).not.toContain("session/new");
+    expect(threadEventsOfType("provider/warning")).toEqual([]);
+  });
+
   it("reports a session as restorable when the agent offers only session/resume", async () => {
     const response = await startThreadResponse({
       FAKE_ACP_RESUME_SESSION: "1",

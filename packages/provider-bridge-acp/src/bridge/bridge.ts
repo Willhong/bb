@@ -2631,7 +2631,11 @@ async function startAgentSessionWhilePending(
         rememberGrokContextWindow(session, configState?.models);
         sessionId = request.resumeProviderThreadId;
       } catch (error) {
-        if (isAcpAuthRequiredResponse(error)) {
+        if (
+          !(error instanceof AcpAgentResponseError) ||
+          isAcpAuthRequiredResponse(error) ||
+          error.code === -32603
+        ) {
           throw error;
         }
         sessionId = undefined;
