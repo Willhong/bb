@@ -1029,7 +1029,10 @@ async function handleMessage(message) {
           send({
             jsonrpc: "2.0",
             id: message.id,
-            error: { code: -32000, message: "session/load failed" },
+            error: JSON.parse(
+              process.env.FAKE_ACP_LOAD_ERROR ??
+                '{"code":-32000,"message":"session/load failed"}',
+            ),
           });
         } else {
           activeSessionId = message.params?.sessionId;
