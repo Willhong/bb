@@ -7,12 +7,15 @@ import {
   pluginProxyCandidate,
   selectCommandGroups,
 } from "./command-groups.js";
+import { restoreProcessMsysPosixArgs } from "./msys-path-args.js";
 import { resolveBbCliVersion } from "./version.js";
 import type { CliRuntimeContext } from "./context-env.js";
 
 if (process.env.FORCE_COLOR !== undefined) {
   delete process.env.NO_COLOR;
 }
+
+restoreProcessMsysPosixArgs();
 
 maybeReexecViaBbCli();
 
