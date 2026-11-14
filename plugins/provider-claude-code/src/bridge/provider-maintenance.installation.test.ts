@@ -54,6 +54,13 @@ describe("Claude Code installation status", () => {
     ["npm 11", JSON.stringify(tags), "stable", "2.1.274", false],
     ["npm 12", JSON.stringify([tags]), "stable", "2.1.274", false],
     [
+      "npm with warnings around the JSON",
+      `npm warn Unknown user config "clang".\n${JSON.stringify(tags)}\nnpm warn Unknown user config "clang".`,
+      "stable",
+      "2.1.274",
+      false,
+    ],
+    [
       "npm 12 without stable",
       '[{"latest":"2.1.283"}]',
       "stable",

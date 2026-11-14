@@ -50,6 +50,15 @@ function claudeInstallerCommand() {
   });
 }
 
+// commandOutput appends stderr to stdout, so npm warnings (for example
+// `npm warn Unknown user config`) can surround the JSON. Keep only the span
+// from the first opening to the last closing bracket.
+function jsonPayload(value: string): string {
+  const start = value.search(/[[{]/u);
+  const end = Math.max(value.lastIndexOf("}"), value.lastIndexOf("]"));
+  return start === -1 || end < start ? value : value.slice(start, end + 1);
+}
+
 function claudeDistTags(value: string | null): {
   latest: string;
   stable: string | null;
@@ -65,7 +74,7 @@ function claudeDistTags(value: string | null): {
         distTagsSchema,
         z.tuple([distTagsSchema]).transform(([tags]) => tags),
       ])
-      .safeParse(JSON.parse(value));
+      .safeParse(JSON.parse(jsonPayload(value)));
     if (!parsed.success) return null;
     const latest = versionFrom(parsed.data.latest);
     if (latest === null) return null;
