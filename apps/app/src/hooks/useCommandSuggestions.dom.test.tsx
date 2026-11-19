@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptMentionCommandTrigger } from "@bb/domain";
 import type { CommandListResponse } from "@bb/server-contract";
@@ -31,8 +31,9 @@ interface CommandQuery {
   text: string | null;
 }
 
-function renderCommandSuggestions() {
-  const { wrapper } = createQueryClientTestHarness();
+function renderCommandSuggestions(
+  wrapper = createQueryClientTestHarness().wrapper,
+) {
   const initialProps: CommandQuery = { trigger: null, text: null };
   return renderHook(
     ({ trigger, text }: CommandQuery) =>
@@ -82,5 +83,54 @@ describe("useCommandSuggestions", () => {
     expect(result.current.suggestions.map(({ name }) => name)).toEqual([
       "review",
     ]);
+  });
+
+  it("shows the previous catalog at once when the composer returns after the default query cache window", async () => {
+    vi.useFakeTimers();
+    try {
+      const { wrapper } = createQueryClientTestHarness({
+        queries: { gcTime: 5 * 60_000 },
+      });
+      vi.mocked(sdk.projects.commands).mockResolvedValueOnce({
+        commands: [
+          {
+            name: "review",
+            source: "command",
+            origin: "user",
+            description: null,
+            argumentHint: null,
+          },
+        ],
+      });
+      const first = renderCommandSuggestions(wrapper);
+      first.rerender({ trigger: "/", text: "" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(first.result.current.suggestions.map(({ name }) => name)).toEqual(
+        ["review"],
+      );
+      first.unmount();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+      });
+
+      const refresh = createDeferredPromise<CommandListResponse>();
+      vi.mocked(sdk.projects.commands).mockReturnValueOnce(refresh.promise);
+      const second = renderCommandSuggestions(wrapper);
+      second.rerender({ trigger: "/", text: "" });
+
+      expect(sdk.projects.commands).toHaveBeenCalledTimes(2);
+      expect(second.result.current).toMatchObject({
+        isLoading: false,
+        isRefreshing: true,
+      });
+      expect(
+        second.result.current.suggestions.map(({ name }) => name),
+      ).toEqual(["review"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

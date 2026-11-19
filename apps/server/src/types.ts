@@ -19,7 +19,7 @@ import type { ProviderRegistryService } from "./services/providers/provider-regi
 import type { AiServiceRegistry } from "./services/ai/ai-service-registry.js";
 import type { PluginHostArtifactRegistry } from "./services/plugins/plugin-host-artifact-registry.js";
 import type { ProjectSkillIndexCache } from "./services/skills/skill-listing.js";
-import type { ProviderLiveCommandsCache } from "./services/providers/provider-live-commands.js";
+import type { ProviderCommandCatalogCache } from "./services/providers/provider-command-catalog.js";
 
 export type ServerLogger = Pick<Logger, "debug" | "error" | "info" | "warn">;
 
@@ -52,7 +52,7 @@ export interface AppDeps {
   providerRegistry: ProviderRegistryService;
   pluginHostArtifacts: PluginHostArtifactRegistry;
   projectSkillIndexes: ProjectSkillIndexCache;
-  providerLiveCommands: ProviderLiveCommandsCache;
+  providerCommandCatalog: ProviderCommandCatalogCache;
   aiServices: AiServiceRegistry;
   skillTreeRegistry: SkillTreeRegistry;
   telemetry: TelemetryService;

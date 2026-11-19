@@ -33,7 +33,7 @@ import { buildPluginProviderRegistration } from "../../src/services/providers/pl
 import { SkillTreeRegistry } from "../../src/services/skills/injected-skills.js";
 import { PluginHostArtifactRegistry } from "../../src/services/plugins/plugin-host-artifact-registry.js";
 import { createProjectSkillIndexCache } from "../../src/services/skills/skill-listing.js";
-import { createProviderLiveCommandsCache } from "../../src/services/providers/provider-live-commands.js";
+import { createProviderCommandCatalogCache } from "../../src/services/providers/provider-command-catalog.js";
 import { createAiServiceRegistry } from "../../src/services/ai/ai-service-registry.js";
 import {
   createAppUpdateService,
@@ -104,7 +104,7 @@ export type TestAppHarnessConfigOverrides = Partial<ServerRuntimeConfig> & {
   terminalCloseTimeoutMs?: number;
   terminalOpenTimeoutMs?: number;
   skillIndexClock?: () => number;
-  liveCommandsClock?: () => number;
+  commandCatalogClock?: () => number;
   seedFirstPartyProviders?: boolean;
   extraProviders?: readonly {
     declaration: PluginProviderDeclaration;
@@ -169,7 +169,7 @@ export async function createTestAppHarness(
     terminalCloseTimeoutMs,
     terminalOpenTimeoutMs = TEST_TERMINAL_RPC_TIMEOUT_MS,
     skillIndexClock,
-    liveCommandsClock,
+    commandCatalogClock,
     seedFirstPartyProviders = true,
     ...configOverrides
   } = overrides;
@@ -368,8 +368,8 @@ export async function createTestAppHarness(
     providerRegistry,
     pluginHostArtifacts,
     projectSkillIndexes,
-    providerLiveCommands: createProviderLiveCommandsCache(
-      liveCommandsClock === undefined ? {} : { now: liveCommandsClock },
+    providerCommandCatalog: createProviderCommandCatalogCache(
+      commandCatalogClock === undefined ? {} : { now: commandCatalogClock },
     ),
     aiServices,
     skillTreeRegistry,
