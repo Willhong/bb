@@ -40,6 +40,8 @@ import {
   TYPEAHEAD_QUERY_POLICY,
 } from "./query-policies";
 
+const PROJECT_COMMANDS_GC_TIME_MS = 60 * 60_000;
+
 interface BranchQueryOptions extends QueryOptions {
   limit?: number;
   query?: string;
@@ -326,6 +328,7 @@ export function useProjectCommands(
     enabled,
     ...TYPEAHEAD_QUERY_POLICY,
     staleTime: 0,
+    gcTime: PROJECT_COMMANDS_GC_TIME_MS,
   });
 }
 

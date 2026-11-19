@@ -104,7 +104,11 @@ import {
   scanProviderNativeRoots,
 } from "../services/providers/native-roots.js";
 import { assertUsableHostId } from "../services/hosts/primary-host.js";
-import { listProviderLiveCommands } from "../services/providers/provider-live-commands.js";
+import type { HostDaemonContributedEnvEntry } from "@bb/host-daemon-contract";
+import {
+  listProviderLiveCommands,
+  readProviderCommandCatalog,
+} from "../services/providers/provider-command-catalog.js";
 import {
   resolveProjectCommandWorkspace,
   resolveProjectWorkspaceTarget,
@@ -775,27 +779,38 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
             workspacePath: workspace.cwd,
             includeAgentInstructions: false,
           });
-    const [result, liveCommands, workspaceSkills] = await Promise.all([
-      listProviderCommands(),
-      listProviderLiveCommands(deps, {
-        hostId: workspace.hostId,
-        providerId: query.provider,
-        cwd: workspace.cwd,
-      }),
-      readWorkspaceSkills(),
-    ]);
-    const skillCatalog = await resolveSkillCatalog(deps, {
-      projectSkillSources: workspaceSkills.projectSkillSources,
-      sharedSkillSources: workspaceSkills.sharedSkills.runtimeSources,
-    });
-    return context.json(
-      buildCommandListResponse({
+    const loadCommandList = async (
+      contributedEnv: HostDaemonContributedEnvEntry[] | null,
+    ) => {
+      const [result, liveCommands, workspaceSkills] = await Promise.all([
+        listProviderCommands(),
+        listProviderLiveCommands(deps, {
+          hostId: workspace.hostId,
+          providerId: query.provider,
+          cwd: workspace.cwd,
+          contributedEnv,
+        }),
+        readWorkspaceSkills(),
+      ]);
+      const skillCatalog = await resolveSkillCatalog(deps, {
+        projectSkillSources: workspaceSkills.projectSkillSources,
+        sharedSkillSources: workspaceSkills.sharedSkills.runtimeSources,
+      });
+      return buildCommandListResponse({
         commands: result.commands,
         liveCommands,
         includeBuiltinCompact: deps.providerRegistry.supportsManualCompaction(
           query.provider,
         ),
         skillCatalog,
+      });
+    };
+    return context.json(
+      await readProviderCommandCatalog(deps, {
+        hostId: workspace.hostId,
+        providerId: query.provider,
+        cwd: workspace.cwd,
+        load: loadCommandList,
       }),
     );
   });

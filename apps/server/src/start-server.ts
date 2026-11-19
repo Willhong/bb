@@ -35,7 +35,7 @@ import { resolveBuiltinSkillsRootPath } from "./services/skills/builtin-skills-c
 import { SkillTreeRegistry } from "./services/skills/injected-skills.js";
 import { PluginHostArtifactRegistry } from "./services/plugins/plugin-host-artifact-registry.js";
 import { createProviderNativeRootsCache } from "./services/providers/native-roots.js";
-import { createProviderLiveCommandsCache } from "./services/providers/provider-live-commands.js";
+import { createProviderCommandCatalogCache } from "./services/providers/provider-command-catalog.js";
 import { createAiServiceRegistry } from "./services/ai/ai-service-registry.js";
 import { createAppUpdateService } from "./services/system/app-update.js";
 import {
@@ -262,7 +262,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   const skillTreeRegistry = new SkillTreeRegistry();
   const pluginHostArtifacts = new PluginHostArtifactRegistry();
   const providerNativeRoots = createProviderNativeRootsCache();
-  const providerLiveCommands = createProviderLiveCommandsCache();
+  const providerCommandCatalog = createProviderCommandCatalogCache();
   const aiServices = createAiServiceRegistry({
     onStatusChange: () => hub.notifySystem(["config-changed"]),
   });
@@ -391,7 +391,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       providerRegistry,
       pluginHostArtifacts,
       providerNativeRoots,
-      providerLiveCommands,
+      providerCommandCatalog,
       aiServices,
       skillTreeRegistry,
       telemetry,

@@ -1,12 +1,14 @@
-import type { ThreadProviderCommand } from "@bb/domain";
 import { describe, expect, it, vi } from "vitest";
-import {
-  PROVIDER_LIVE_COMMANDS_FRESH_MS,
-  createProviderLiveCommandsCache,
-} from "../../../src/services/providers/provider-live-commands.js";
+import { createStaleWhileRevalidateCache } from "../../../src/services/lib/stale-while-revalidate-cache.js";
 
-function command(name: string): ThreadProviderCommand {
-  return { name, description: "" };
+const FRESH_MS = 10_000;
+
+interface Command {
+  name: string;
+}
+
+function command(name: string): Command {
+  return { name };
 }
 
 function deferred<T>() {
@@ -21,10 +23,14 @@ function deferred<T>() {
 
 function harness() {
   let clock = 1_000;
-  const cache = createProviderLiveCommandsCache({ now: () => clock });
+  const cache = createStaleWhileRevalidateCache<Command[]>({
+    freshMs: FRESH_MS,
+    maxEntries: 8,
+    now: () => clock,
+  });
   const onChanged = vi.fn();
   const onRefreshError = vi.fn();
-  const load = vi.fn<() => Promise<ThreadProviderCommand[]>>();
+  const load = vi.fn<() => Promise<Command[]>>();
   const read = () =>
     cache.read({ key: "host-a", load, onChanged, onRefreshError });
   return {
@@ -38,13 +44,13 @@ function harness() {
   };
 }
 
-describe("provider live commands cache", () => {
+describe("stale-while-revalidate cache", () => {
   it("keeps the previous list when a refresh fails and retries on the next read", async () => {
     const h = harness();
     h.load.mockResolvedValueOnce([command("loop")]);
     await expect(h.read()).resolves.toEqual([command("loop")]);
 
-    h.advance(PROVIDER_LIVE_COMMANDS_FRESH_MS);
+    h.advance(FRESH_MS);
     const failure = new Error("bridge crashed");
     h.load.mockRejectedValueOnce(failure);
     await expect(h.read()).resolves.toEqual([command("loop")]);
@@ -73,7 +79,7 @@ describe("provider live commands cache", () => {
 
   it("shares one load between concurrent first reads", async () => {
     const h = harness();
-    const pending = deferred<ThreadProviderCommand[]>();
+    const pending = deferred<Command[]>();
     h.load.mockReturnValueOnce(pending.promise);
     const first = h.read();
     const second = h.read();
@@ -90,7 +96,7 @@ describe("provider live commands cache", () => {
     h.load.mockResolvedValue([command("loop")]);
     await h.read();
 
-    h.advance(PROVIDER_LIVE_COMMANDS_FRESH_MS);
+    h.advance(FRESH_MS);
     await Promise.all([h.read(), h.read(), h.read()]);
     await vi.waitFor(() => expect(h.load).toHaveBeenCalledTimes(2));
     await h.read();

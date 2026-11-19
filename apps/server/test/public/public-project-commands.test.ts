@@ -10,7 +10,7 @@ import { commandListResponseSchema } from "@bb/server-contract";
 import type { ExperimentalNativeRootsResolveAnswer } from "@get-bb/plugin-sdk/host";
 import { describe, expect, it, vi } from "vitest";
 import { COMMAND_TIMEOUT_MS } from "../../src/constants.js";
-import { PROVIDER_LIVE_COMMANDS_FRESH_MS } from "../../src/services/providers/provider-live-commands.js";
+import { PROVIDER_COMMAND_CATALOG_FRESH_MS } from "../../src/services/providers/provider-command-catalog.js";
 import { registerHostRpcResponder } from "../helpers/host-rpc.js";
 import {
   configuredAcpProvider,
@@ -840,13 +840,13 @@ describe("public project command typeahead route", () => {
     });
   });
 
-  it("serves cached live commands while refreshing them, then pushes the change", async () => {
+  it("serves the cached catalog without rescanning, refreshes it in the background once stale, then pushes the change", async () => {
     let clock = 1_000;
     await withTestHarness(
-      { liveCommandsClock: () => clock },
+      { commandCatalogClock: () => clock },
       async (harness) => {
         const { host, session } = seedHostSession(harness.deps, {
-          id: "host-commands-live-cache",
+          id: "host-commands-catalog-cache",
         });
         seedPrimaryHost(harness.deps, host.id);
         const stub = registerCommandRpc(harness, {
@@ -869,21 +869,19 @@ describe("public project command typeahead route", () => {
         };
 
         expect(await listNames()).toEqual(["clear", "compact", "loop"]);
-        clock += PROVIDER_LIVE_COMMANDS_FRESH_MS - 1;
-        stub.commands = [skill("added-skill", "user")];
-        expect(await listNames()).toEqual([
-          "clear",
-          "compact",
-          "loop",
-          "added-skill",
-        ]);
+        const scansAfterFirstLoad = stub.requests.length;
         expect(stub.liveRequests).toHaveLength(1);
-        stub.commands = [];
 
+        stub.commands = [skill("added-skill", "user")];
         stub.liveCommands = [
           { name: "loop", description: "Run a prompt repeatedly" },
           { name: "review", description: "Review a pull request" },
         ];
+        clock += PROVIDER_COMMAND_CATALOG_FRESH_MS - 1;
+        expect(await listNames()).toEqual(["clear", "compact", "loop"]);
+        expect(stub.requests).toHaveLength(scansAfterFirstLoad);
+        expect(stub.liveRequests).toHaveLength(1);
+
         const pushed = new Promise<void>((resolve) => {
           harness.deps.hub.onChangedMessage((message) => {
             if (
@@ -904,6 +902,7 @@ describe("public project command typeahead route", () => {
           "compact",
           "loop",
           "review",
+          "added-skill",
         ]);
         expect(stub.liveRequests).toHaveLength(2);
       },

@@ -54,7 +54,7 @@ import { createAppUpdateSendHold } from "../../../apps/server/src/services/syste
 import { createCliCommandService } from "../../../apps/server/src/services/system/cli-command.js";
 import { createAppVersionService } from "../../../apps/server/src/services/system/app-version.js";
 import { createProviderNativeRootsCache } from "../../../apps/server/src/services/providers/native-roots.js";
-import { createProviderLiveCommandsCache } from "../../../apps/server/src/services/providers/provider-live-commands.js";
+import { createProviderCommandCatalogCache } from "../../../apps/server/src/services/providers/provider-command-catalog.js";
 import { createBbAppManagedConfigReloader } from "../../../apps/server/src/services/system/bb-app-managed-config.js";
 import { createNoopTelemetryService } from "../../../apps/server/src/services/system/telemetry.js";
 import { TerminalSessionLifecycle } from "../../../apps/server/src/services/terminals/terminal-session-lifecycle.js";
@@ -343,7 +343,7 @@ async function startIntegrationServer(
     bbAppManagedConfig,
     providerRegistry,
     providerNativeRoots: createProviderNativeRootsCache(),
-    providerLiveCommands: createProviderLiveCommandsCache(),
+    providerCommandCatalog: createProviderCommandCatalogCache(),
     pluginHostArtifacts,
     aiServices,
     config,
