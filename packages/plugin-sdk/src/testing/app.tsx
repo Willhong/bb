@@ -2004,6 +2004,7 @@ const testPluginSdkApp = {
   ),
   UrlLink: TestUrlLink,
   experimental_NewThreadComposer: TestNewThreadComposer,
+  experimental_MessageComposer: () => null,
   experimental_VoiceInputTextarea: TestVoiceInputTextarea,
   experimental_ComposerRoot: TestComposerRoot,
   experimental_VoiceInputButton: TestVoiceInputButton,

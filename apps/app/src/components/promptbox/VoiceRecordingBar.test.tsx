@@ -117,4 +117,29 @@ describe("VoiceRecordingBar", () => {
     expect(stop.querySelector('[data-icon-name="Spinner"]')).toBeNull();
     expect(stop.className).not.toContain("disabled:opacity-100");
   });
+  it("keeps insertion and cancellation without exposing a send action", () => {
+    const onConfirm = vi.fn(),
+      onCancel = vi.fn();
+    render(
+      <VoiceRecordingBar
+        isCompact={false}
+        state="recording"
+        delivery="insert"
+        stream={null}
+        microphoneWarning={null}
+        submitIcon="ArrowUp"
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Send voice input" }),
+    ).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Stop and add to draft" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel recording" }));
+    expect(onConfirm).toHaveBeenCalledOnce();
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
 });
