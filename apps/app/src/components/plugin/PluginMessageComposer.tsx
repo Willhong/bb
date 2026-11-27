@@ -1,5 +1,8 @@
 import { useContext, useMemo, useRef, useState } from "react";
 import type { ExperimentalMessageComposerProps } from "@get-bb/plugin-sdk/app";
+import { Icon } from "@bb/shared-ui/icon";
+import { toProviderPickerOption } from "@/components/pickers/model-brand-prefix";
+import { useSystemProviders } from "@/hooks/queries/system-queries";
 import { PluginContext } from "./plugin-context";
 import {
   ComposerBox,
@@ -29,10 +32,16 @@ const textTypeahead: TypeaheadConfig = {
   },
 };
 
+function MessageProviderIcon({ className }: { className?: string }) {
+  return <Icon name="AiBrain01" className={className} />;
+}
+
 export function PluginMessageComposer({
   draftKey,
   placeholder,
   models,
+  provider,
+  catalogNotice,
   selection,
   onSelectionChange,
   disabledReason,
@@ -55,6 +64,30 @@ export function PluginMessageComposer({
   const submitting = useRef(false);
   const [isSubmitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const providers = useSystemProviders({
+    enabled: provider !== undefined,
+  }).data;
+  const providerOptions = useMemo(() => {
+    if (!provider) return [];
+    const choices = (providers ?? []).map(toProviderPickerOption);
+    const registered = choices.find(({ value }) => value === provider.id);
+    const localOption = {
+      value: provider.id,
+      label: provider.label,
+      brandPrefix: provider.brandPrefix,
+      icon: registered?.icon ?? MessageProviderIcon,
+    };
+    const ordered = registered ? choices : [...choices, localOption];
+    return ordered.map((option) =>
+      option.value === provider.id
+        ? localOption
+        : {
+            ...option,
+            disabled: true,
+            disabledReason: "이 대화에서 사용할 수 없는 provider",
+          },
+    );
+  }, [provider, providers]);
   const selected = models.find(({ id }) => id === selection.model);
   const selectionError = !selected
     ? "Choose an available model."
@@ -143,7 +176,12 @@ export function PluginMessageComposer({
         }}
         executionControls={
           <ExecutionControls
-            provider={{}}
+            provider={{
+              selectedId: provider?.id,
+              options: providerOptions,
+              hasMultiple: providerOptions.length > 1,
+            }}
+            catalogNotice={catalogNotice}
             model={{
               selected: selection.model,
               options: models.map(({ id, label }) => ({ value: id, label })),

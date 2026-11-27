@@ -25,14 +25,16 @@ import {
 } from "@bb/client-core";
 import type { PickerOption } from "@bb/shared-ui/option-picker";
 import type { ModelPickerOption } from "@/components/pickers/model-picker-option";
-import type { ProviderPickerOption } from "@/components/pickers/model-brand-prefix";
+import {
+  toProviderPickerOption,
+  type ProviderPickerOption,
+} from "@/components/pickers/model-brand-prefix";
 import {
   encodeProviderValue,
   parseEnvironmentValue,
 } from "@/components/pickers/environment-picker-value";
 import { PERMISSION_MODE_OPTIONS } from "@/lib/permission-mode-options";
 import { useRootComposeReuseEnvironment } from "@/lib/root-compose-selection";
-import { getProviderIconInfo } from "@/lib/provider-icon";
 import {
   DEFAULT_SERVICE_TIER,
   permissionModeRank,
@@ -549,21 +551,7 @@ export function useThreadCreationOptions(
   );
 
   const providerOptions = useMemo(
-    (): ProviderPickerOption[] =>
-      providers.map((p) => ({
-        value: p.id,
-        label: p.displayName,
-        icon: getProviderIconInfo("agent", p.id, p)?.icon,
-        ...(p.strings?.brandPrefix === undefined
-          ? {}
-          : { brandPrefix: p.strings.brandPrefix }),
-        ...(p.strings?.planModeCopy === undefined
-          ? {}
-          : { planModeCopy: p.strings.planModeCopy }),
-        ...(p.strings?.installUrl === undefined
-          ? {}
-          : { installUrl: p.strings.installUrl }),
-      })),
+    () => providers.map(toProviderPickerOption),
     [providers],
   );
 

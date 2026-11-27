@@ -5612,6 +5612,10 @@ export interface ExperimentalMessageComposerProps {
   /** A stable draft key scoped to this plugin. */
   draftKey: string;
   placeholder?: string;
+  /** Identifies the plugin's backend in the native provider row. Other groups are read-only. */
+  provider?: { id: string; label: string; brandPrefix?: string };
+  /** Explains unavailable provider groups or execution options in the picker. */
+  catalogNotice?: string;
   models: readonly ExperimentalMessageComposerModel[];
   selection: ExperimentalMessageComposerSelection;
   onSelectionChange: (value: ExperimentalMessageComposerSelection) => void;

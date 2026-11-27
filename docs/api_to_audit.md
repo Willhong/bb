@@ -6267,7 +6267,9 @@ represented separately, and whether the legacy-zero sentinel should remain.
 Hosts BB's existing `ComposerBox`, execution picker, prompt draft storage and
 voice input on plugin pages. The plugin supplies a message backend's validated
 model/effort catalog and receives the selected model, effort and draft text on
-explicit submit. The component has no BB project, provider session, thread,
+explicit submit. The optional provider identity uses the native provider row.
+Other BB providers are visible as unavailable without opening their catalogs.
+The component has no BB project, provider session, thread,
 tool instructions or attachment uploader. Transcripts always enter the draft
 through the standard BB microphone and transcription pipeline. The send helper
 restores a draft after a rejected submit.
