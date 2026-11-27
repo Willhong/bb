@@ -122,6 +122,9 @@ export const ThreadChat = runtimeComponent("ThreadChat");
 export const Markdown = runtimeComponent("Markdown");
 export const experimental_FileLink = runtimeComponent("experimental_FileLink");
 export const UrlLink = runtimeComponent("UrlLink");
+export const experimental_MessageComposer = runtimeComponent(
+  "experimental_MessageComposer",
+);
 export const experimental_NewThreadComposer = runtimeComponent(
   "experimental_NewThreadComposer",
 );

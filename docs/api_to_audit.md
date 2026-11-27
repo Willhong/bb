@@ -5084,3 +5084,18 @@ precedence, bounded discovery failure, and module-ABI preservation after Node
 replacement. Settle the shared process-local instance lifecycle across SDK
 bundle versions and whether `bundledNpmCli` belongs on the public surface before
 removing the prefix.
+
+## `experimental_MessageComposer` (`@get-bb/plugin-sdk/app`)
+
+Hosts BB's existing `ComposerBox`, execution picker, prompt draft storage and
+voice input on plugin pages. The plugin supplies a message backend's validated
+model/effort catalog and receives the selected model, effort and draft text on
+explicit submit. The component has no BB project, provider session, thread,
+tool instructions or attachment uploader. Transcripts always enter the draft
+through the standard BB microphone and transcription pipeline. The send helper
+restores a draft after a rejected submit.
+
+The editor and execution picker are the same entries used by BB's new-thread
+and follow-up composers. Stabilization requires verifying host-version
+compatibility, disabled rich inputs, draft restoration, and the insert-only
+voice path on web and mobile.

@@ -18,7 +18,7 @@ interface VoiceRecordingBarProps {
   microphoneWarning: string | null;
   submitIcon: IconName;
   onConfirm: () => void;
-  onSend: () => void;
+  onSend?: () => void;
   onCancel: () => void;
 }
 
@@ -107,31 +107,33 @@ export function VoiceRecordingBar({
           </TooltipTrigger>
           <TooltipContent side="top">Add to draft</TooltipContent>
         </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              size="icon"
-              variant="default"
-              aria-label={
-                isSending ? "Transcribing and sending" : "Send voice input"
-              }
-              disabled={isTranscribing}
-              onClick={onSend}
-              className={cn(
-                ACTION_BUTTON_CLASS,
-                isSending && "disabled:opacity-100",
-              )}
-            >
-              {isSending ? (
-                <Icon name="Spinner" className="size-4 animate-spin" />
-              ) : (
-                <Icon name={submitIcon} className="size-4" />
-              )}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="top">Send</TooltipContent>
-        </Tooltip>
+        {onSend ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon"
+                variant="default"
+                aria-label={
+                  isSending ? "Transcribing and sending" : "Send voice input"
+                }
+                disabled={isTranscribing}
+                onClick={onSend}
+                className={cn(
+                  ACTION_BUTTON_CLASS,
+                  isSending && "disabled:opacity-100",
+                )}
+              >
+                {isSending ? (
+                  <Icon name="Spinner" className="size-4 animate-spin" />
+                ) : (
+                  <Icon name={submitIcon} className="size-4" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">Send</TooltipContent>
+          </Tooltip>
+        ) : null}
       </TooltipProvider>
     </div>
   );

@@ -19,6 +19,7 @@ import {
   usePluginBranches,
   usePluginCheckoutState,
 } from "@/components/plugin/usePluginBranchPickerState";
+import { PluginMessageComposer } from "@/components/plugin/PluginMessageComposer";
 import { PluginNewThreadComposer } from "@/components/plugin/PluginNewThreadComposer";
 import { useComposerRendererApi } from "@/components/promptbox/ComposerBox";
 import {
@@ -211,6 +212,7 @@ export const pluginSdkAppImplementation = {
   experimental_FileLink: ExperimentalFileLink,
   UrlLink: PluginUrlLink,
   experimental_NewThreadComposer: PluginNewThreadComposer,
+  experimental_MessageComposer: PluginMessageComposer,
   experimental_VoiceInputTextarea: VoiceInputTextarea,
   experimental_ProviderModelPicker: PluginProviderModelPicker,
   experimental_PermissionModePicker: PluginPermissionModePicker,

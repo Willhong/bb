@@ -209,6 +209,7 @@ export type ComposerBoxProps = Omit<
   promptBoxRef?: Ref<PromptBoxHandle>;
   onFocusCommand?(): void;
   suppressPluginComposerCustomizations?: boolean;
+  suppressPluginPlusMenu?: boolean;
   onComposerLayoutChange?(layout: ComposerView["layout"]): void;
   focusEndKey?: string | number;
 };
@@ -401,6 +402,7 @@ function useComposerRendererHostApi({
   focusEndKey,
   onFocusCommand,
   suppressPluginComposerCustomizations: suppress = false,
+  suppressPluginPlusMenu = false,
   typeahead,
   attachments,
   history,
@@ -643,7 +645,7 @@ function useComposerRendererHostApi({
   };
   const contributions: ExperimentalComposerContributions = {
     popups,
-    plusMenuItems,
+    plusMenuItems: suppressPluginPlusMenu ? [] : plusMenuItems,
     sendMenuItems,
     Actions: suppress ? NoComposerPluginActions : ComposerPluginActions,
     Popup: PluginComposerPopup,

@@ -3110,7 +3110,7 @@ export interface ExperimentalComposerVoice {
   failedRecordings: readonly ExperimentalFailedVoiceRecording[];
   start(): void | Promise<void>;
   stop(): void;
-  send(): void;
+  send?(): void;
   retry(recording: ExperimentalFailedVoiceRecording): void;
   discard(recording: ExperimentalFailedVoiceRecording): void;
   download(recording: ExperimentalFailedVoiceRecording): void;
@@ -3453,7 +3453,7 @@ export interface ExperimentalVoiceRecordingBarProps {
   microphoneWarning: string | null;
   submitIcon: BbIconName;
   onConfirm(): void;
-  onSend(): void;
+  onSend?(): void;
   onCancel(): void;
 }
 
@@ -5133,6 +5133,37 @@ export interface NewThreadRequest {
   sendAt?: number;
 }
 
+/** A model and the reasoning levels accepted by the plugin's message backend. */
+export interface ExperimentalMessageComposerModel {
+  id: string;
+  label: string;
+  reasoningLevels?: readonly { value: ReasoningLevel; label: string }[];
+}
+
+/** The message backend receives this exact selection; bb never starts a provider session. */
+export interface ExperimentalMessageComposerSelection {
+  model: string;
+  reasoningLevel?: ReasoningLevel;
+}
+
+/** bb's native text composer for a plugin-owned conversation without a bb thread. */
+export interface ExperimentalMessageComposerProps {
+  /** A stable draft key scoped to this plugin. */
+  draftKey: string;
+  placeholder?: string;
+  models: readonly ExperimentalMessageComposerModel[];
+  selection: ExperimentalMessageComposerSelection;
+  onSelectionChange: (value: ExperimentalMessageComposerSelection) => void;
+  /** Disabled reason shown by the native composer. */
+  disabledReason?: string;
+  /** Failures preserve the draft. Voice always inserts text before this explicit action. */
+  onSubmit: (request: {
+    text: string;
+    selection: ExperimentalMessageComposerSelection;
+  }) => Promise<void>;
+  onStop?: () => void;
+}
+
 /**
  * Props of the host-owned `experimental_NewThreadComposer` component — bb's
  * full new-thread compose surface (prompt editor with @-mentions and expand,
@@ -6186,6 +6217,7 @@ export interface PluginSdkApp {
    * docs/api_to_audit.md for what to audit before the prefix drops.
    */
   experimental_NewThreadComposer: ComponentType<NewThreadComposerProps>;
+  experimental_MessageComposer: ComponentType<ExperimentalMessageComposerProps>;
   /**
    * BB's textarea with voice input (see
    * {@link ExperimentalVoiceInputTextareaProps}): the same microphone

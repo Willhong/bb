@@ -25,6 +25,7 @@ export function usePromptVoice(
   promptBoxRef: RefObject<PromptBoxHandle | null>,
   draft: PromptVoiceDraftTarget | undefined,
   recordingKey: string | null,
+  insertOnly = false,
 ): PromptVoiceConfig {
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -36,12 +37,12 @@ export function usePromptVoice(
 
   const onTranscript = useCallback(
     (text: string, delivery: VoiceDelivery) =>
-      deliverPromptVoiceTranscript(text, delivery, {
+      deliverPromptVoiceTranscript(text, insertOnly ? "insert" : delivery, {
         mounted: mountedRef.current,
         promptBox: promptBoxRef.current,
         draft,
       }),
-    [draft, promptBoxRef],
+    [draft, insertOnly, promptBoxRef],
   );
 
   const getPromptContext = useCallback(
@@ -76,7 +77,7 @@ export function usePromptVoice(
       failedRecordings: voiceInput.failedRecordings,
       start: voiceInput.start,
       stop,
-      send,
+      send: insertOnly ? undefined : send,
       retry: voiceInput.retry,
       discard: voiceInput.discard,
       download: voiceInput.download,
@@ -91,6 +92,7 @@ export function usePromptVoice(
       voiceInput.failedRecordings,
       voiceInput.start,
       stop,
+      insertOnly,
       send,
       voiceInput.retry,
       voiceInput.discard,
