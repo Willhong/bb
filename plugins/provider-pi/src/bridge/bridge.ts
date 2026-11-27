@@ -650,8 +650,10 @@ async function handleModelList(
       requireExtensionPath(),
       params.envVars ?? {},
     );
-    contextWindows.learn(await catalog.rawModels());
-    sendResult(id, await catalog.listModels());
+    sendResult(
+      id,
+      await catalog.listModels((raw) => contextWindows.learn(raw)),
+    );
   } catch (error) {
     sendError(
       id,

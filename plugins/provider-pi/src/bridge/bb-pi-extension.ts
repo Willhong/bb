@@ -642,7 +642,41 @@ export default async function bbExtension(pi) {
       return { refreshed: false, reason: "unsupported" };
     }
     await registry.refresh({ allowNetwork: false });
-    return { refreshed: true };
+    const modelAllowlist = Object.create(null);
+    if (!process.env.PI_OFFLINE) {
+      for (const id of registry.getRegisteredProviderIds?.() ?? []) {
+        const provider = registry.getRegisteredNativeProvider?.(id);
+        const refresh = provider?.refreshModels;
+        if (typeof refresh !== "function" || !isHongLLM(provider.baseUrl)) continue;
+
+        let networkPublishedModelIds;
+        provider.refreshModels = (context) => refresh.call(provider, {
+          ...context,
+          publish: async (publication) => {
+            const published = await context.publish(publication);
+            if (published && context.allowNetwork && publication.persist) {
+              networkPublishedModelIds = publication.persist.models.map((model) => model.id);
+            }
+            return published;
+          },
+        });
+        try {
+          const result = await registry.refresh({ providers: [id], allowNetwork: true, signal: AbortSignal.timeout(8500) });
+          modelAllowlist[id] = result?.aborted || result?.errors?.has(id) ? [] : networkPublishedModelIds ?? [];
+        } finally {
+          provider.refreshModels = refresh;
+        }
+      }
+    }
+    return { refreshed: true, modelAllowlist };
+  }
+
+  function isHongLLM(baseUrl) {
+    try {
+      return new URL(baseUrl).origin === "https://llm.hktlabs.com";
+    } catch {
+      return false;
+    }
   }
 
   for (const tool of tools) {

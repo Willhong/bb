@@ -154,6 +154,23 @@ function seedEnvironmentPath(
 }
 
 describe("provider model catalog store", () => {
+  it("waits for a fresh list even if the cached catalog has not expired", async () => {
+    await withTestHarness(async (harness) => {
+      const host = setupCatalogHost(harness, { id: "host-fresh-picker" });
+      await host.read("codex");
+      const held = createDeferredPromise<HostRpcHandlerResult>();
+      host.setAnswer(() => held.promise);
+      const refresh = resolveSystemExecutionOptions(harness.deps, {
+        hostId: host.hostId,
+        providerId: "codex",
+        refreshModels: "true",
+      });
+      await vi.waitFor(() => expect(host.listRequests()).toHaveLength(2));
+      held.resolve(catalogAnswer(modelList("currently-online")));
+      expect(modelIds(await refresh)).toEqual(["currently-online"]);
+    });
+  });
+
   it("uses a session catalog immediately and pushes picker invalidation", async () => {
     await withTestHarness(async (harness) => {
       const host = setupCatalogHost(harness, { id: "host-session-catalog" });

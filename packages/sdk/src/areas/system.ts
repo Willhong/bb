@@ -61,9 +61,10 @@ export interface SystemConfigArgs {
 
 export interface SystemExecutionOptionsArgs extends Omit<
   SystemExecutionOptionsQuery,
-  "preferCached"
+  "preferCached" | "refreshModels"
 > {
   preferCached?: boolean;
+  refreshModels?: boolean;
   signal?: AbortSignal;
 }
 

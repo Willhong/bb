@@ -14,7 +14,7 @@ import {
   type PiRpcChildExitInfo,
 } from "./rpc-child.js";
 
-const REFRESH_MODELS_TIMEOUT_MS = 5_000;
+const REFRESH_MODELS_TIMEOUT_MS = 12_000;
 
 const EXTENDED_THINKING_LEVELS = [
   "off",
@@ -80,7 +80,7 @@ function toCatalogModel(model: PiRpcModel): PiCatalogModel | undefined {
 }
 
 export interface PiCatalog {
-  listModels(): Promise<{
+  listModels(onRawModels?: (models: PiRpcModel[]) => void): Promise<{
     models: AvailableModel[];
     selectedOnlyModels: AvailableModel[];
   }>;
@@ -122,6 +122,7 @@ async function spawnCatalog(
     ready: Promise<Record<string, unknown>>;
     served: boolean;
     refreshing: Promise<void> | null;
+    modelAllowlist?: Record<string, unknown>;
     channelRequest(method: string, timeoutMs: number): Promise<unknown>;
     getModelScope():
       | { scopedModelIds: string[]; defaultModelId?: string }
@@ -267,8 +268,16 @@ async function spawnCatalog(
       const reply = (await active.channelRequest(
         "refresh-models",
         REFRESH_MODELS_TIMEOUT_MS,
-      )) as { refreshed?: unknown; reason?: unknown } | null | undefined;
+      )) as
+        | {
+            refreshed?: unknown;
+            reason?: unknown;
+            modelAllowlist?: Record<string, unknown>;
+          }
+        | null
+        | undefined;
       if (reply?.refreshed === true) {
+        active.modelAllowlist = reply.modelAllowlist;
         return;
       }
       reason =
@@ -293,26 +302,37 @@ async function spawnCatalog(
   };
   const fetchRawFrom = async (
     active: CatalogChildGeneration,
+    verify = false,
   ): Promise<PiRpcModel[]> => {
     await active.ready;
+    if (verify) active.served = true;
     await ensureFreshModels(active);
     const data = (await active.child.requestOk({
       type: "get_available_models",
     })) as { models?: unknown[] } | undefined;
     active.served = true;
     touch();
-    return (data?.models ?? []).filter(
-      (entry): entry is PiRpcModel =>
-        typeof entry === "object" && entry !== null,
-    );
+    return (data?.models ?? []).filter((entry): entry is PiRpcModel => {
+      if (typeof entry !== "object" || entry === null) return false;
+      const { provider, id } = entry as PiRpcModel;
+      const allowed =
+        typeof provider === "string" &&
+        active.modelAllowlist &&
+        Object.hasOwn(active.modelAllowlist, provider)
+          ? active.modelAllowlist[provider]
+          : undefined;
+      return !Array.isArray(allowed) || allowed.includes(id);
+    });
   };
-  const fetchGeneration = async (): Promise<{
+  const fetchGeneration = async (
+    verify = false,
+  ): Promise<{
     active: CatalogChildGeneration;
     raw: PiRpcModel[];
   }> => {
     const first = activeGeneration();
     try {
-      return { active: first, raw: await fetchRawFrom(first) };
+      return { active: first, raw: await fetchRawFrom(first, verify) };
     } catch (error) {
       if (!(error instanceof PiRpcChildExitedError)) {
         throw error;
@@ -327,8 +347,9 @@ async function spawnCatalog(
     activeGeneration().ready;
   await probe();
   return {
-    async listModels() {
-      const { active, raw } = await fetchGeneration();
+    async listModels(onRawModels) {
+      const { active, raw } = await fetchGeneration(onRawModels !== undefined);
+      onRawModels?.(raw);
       const models: PiCatalogModel[] = [];
       for (const model of raw) {
         const catalogModel = toCatalogModel(model);

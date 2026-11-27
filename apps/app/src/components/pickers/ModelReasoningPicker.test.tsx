@@ -324,6 +324,48 @@ afterEach(() => {
 
 await ModelReasoningMenu.preload();
 
+it("hides the stale Pi list and fetches again each time the picker opens", async () => {
+  const load = vi.mocked(sdk.system.executionOptions);
+  const provider = makeProviderInfo({ id: "pi" });
+  load.mockResolvedValueOnce(
+    executionOptions({
+      providers: [provider],
+      models: [
+        availableModel({ value: "llmhong/new", label: "New online model" }),
+      ],
+    }),
+  );
+  load.mockResolvedValueOnce(
+    executionOptions({ providers: [provider], models: [] }),
+  );
+  renderPicker({
+    selectedProviderId: "pi",
+    pickerProviderOptions: [{ value: "pi", label: "Pi" }],
+    providerRouting: { hostId: "host-test" },
+    modelOptions: [{ value: "llmhong/old", label: "Cached offline model" }],
+  });
+  const toggle = () =>
+    fireEvent.click(
+      screen.getByRole("button", { name: "Provider, model and reasoning" }),
+    );
+  toggle();
+  expect(await screen.findByText("New online model")).toBeTruthy();
+  expect(screen.queryAllByText("Cached offline model")).toHaveLength(1);
+  toggle();
+  toggle();
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+  await waitFor(() =>
+    expect(screen.queryByText("New online model")).toBeNull(),
+  );
+  expect(load).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      hostId: "host-test",
+      providerId: "pi",
+      refreshModels: true,
+    }),
+  );
+});
+
 it("exposes unavailable provider groups with a reason and does not preview them", () => {
   vi.mocked(sdk.system.executionOptions).mockClear();
   const onSelectedProviderChange = vi.fn();

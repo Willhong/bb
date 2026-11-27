@@ -52,6 +52,7 @@ type ProviderModelCatalogFailureCode = Exclude<
 
 export type ProviderModelCatalogAccess =
   | { kind: "picker"; selectedModel?: string }
+  | { kind: "refresh"; selectedModel?: string }
   | {
       kind: "validation";
       requiredModel: string | null;
@@ -324,6 +325,16 @@ function evaluate(
   refreshed: boolean,
 ): CatalogDecision {
   const { failure, servable } = currentState(entry, fingerprint);
+  if (access.kind === "refresh") {
+    if (!refreshed) return { kind: "wait" };
+    if (failure !== null) {
+      return {
+        kind: "serve",
+        result: { kind: "error", code: failure.code, detail: failure.detail },
+        backgroundRefresh: false,
+      };
+    }
+  }
   const active = failure !== null && now - failure.failedAt < FAILURE_TTL_MS;
   if (servable !== null) {
     const stale = !refreshed && !active && now - servable.fetchedAt >= FRESH_MS;

@@ -508,6 +508,7 @@ const OPTIONAL_SERVER_FIELD_GROUPS: readonly OptionalServerFieldGroup[] = [
       "systemExecutionOptionsQuerySchema.preferCached",
       "systemExecutionOptionsQuerySchema.projectId",
       "systemExecutionOptionsQuerySchema.providerId",
+      "systemExecutionOptionsQuerySchema.refreshModels",
       "systemExecutionOptionsQuerySchema.selectedModel",
       "systemProvidersQuerySchema.capability",
       "systemProvidersQuerySchema.environmentId",

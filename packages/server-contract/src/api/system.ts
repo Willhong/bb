@@ -125,6 +125,7 @@ export const systemExecutionOptionsQuerySchema = z
     projectId: z.string().min(1),
     selectedModel: z.string().min(1),
     preferCached: z.enum(["true", "false"]),
+    refreshModels: z.literal("true"),
   })
   .partial()
   .superRefine(rejectMultipleWorkspaceSelectors)

@@ -454,6 +454,12 @@ export function resolveSystemExecutionOptions(
   deps: LoggedWorkSessionDeps,
   query: SystemExecutionOptionsRequest,
 ): Promise<SystemExecutionOptionsResponse> {
+  if (query.refreshModels === "true") {
+    return resolveExecutionOptions(deps, query, {
+      kind: "refresh",
+      selectedModel: query.selectedModel,
+    });
+  }
   return resolveExecutionOptions(
     deps,
     query,

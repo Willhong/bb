@@ -36,6 +36,7 @@ import { LIST_HOVER_TRANSITION } from "@bb/shared-ui/motion";
 import { cn } from "@bb/shared-ui/lib/utils";
 import {
   prefetchSystemExecutionOptions,
+  useFreshPickerModelCatalog,
   useProviderPreviewExecutionOptions,
 } from "@/hooks/queries/system-queries";
 import { resolveModelCatalogSelection } from "@/hooks/thread-creation-options/model-catalog-selection";
@@ -378,42 +379,58 @@ export function ModelReasoningPicker({
 
   const isPreviewing =
     previewProviderId !== null && previewProviderId !== selectedProviderId;
+  const refreshPiCatalog =
+    open &&
+    providerRouting !== undefined &&
+    !controlledProviderCatalog &&
+    activeProviderId === "pi";
+  const freshPiQuery = useFreshPickerModelCatalog({
+    ...providerRouting,
+    enabled: refreshPiCatalog,
+    providerId: "pi",
+  });
   const previewQuery = useProviderPreviewExecutionOptions({
-    enabled: isPreviewing,
+    enabled: isPreviewing && !refreshPiCatalog,
     ...providerRouting,
     providerId: isPreviewing ? previewProviderId : undefined,
   });
-  const previewProviders = previewQuery.data?.providers;
+  const pickerQuery = refreshPiCatalog ? freshPiQuery : previewQuery;
+  const usePickerCatalog = isPreviewing || refreshPiCatalog;
+  const previewProviders = pickerQuery.data?.providers;
   const previewProvider = useMemo(
     () =>
-      isPreviewing
-        ? previewProviders?.find(
-            (provider) => provider.id === previewProviderId,
-          )
+      usePickerCatalog
+        ? previewProviders?.find((provider) => provider.id === activeProviderId)
         : undefined,
-    [isPreviewing, previewProviderId, previewProviders],
+    [activeProviderId, previewProviders, usePickerCatalog],
   );
   const previewCatalogIsVerified =
-    isPreviewing &&
+    usePickerCatalog &&
     previewProvider !== undefined &&
-    previewQuery.data !== undefined &&
-    !previewQuery.isPlaceholderData &&
-    !previewQuery.isError &&
-    previewQuery.data.modelLoadError === null;
+    pickerQuery.data !== undefined &&
+    !pickerQuery.isPlaceholderData &&
+    !pickerQuery.isError &&
+    (!refreshPiCatalog || !pickerQuery.isFetching) &&
+    pickerQuery.data.modelLoadError === null;
   const previewSelectionBlocked =
-    isPreviewing &&
-    (previewProvider === undefined ||
-      (requireVerifiedProviderPreview && !previewCatalogIsVerified));
+    (refreshPiCatalog && !previewCatalogIsVerified) ||
+    (isPreviewing &&
+      (previewProvider === undefined ||
+        (requireVerifiedProviderPreview && !previewCatalogIsVerified)));
 
   const previewSelection = useMemo(
     () =>
-      isPreviewing
+      usePickerCatalog
         ? resolveModelCatalogSelection({
-            models: previewProvider ? (previewQuery.data?.models ?? []) : [],
-            selectedOnlyModels: previewProvider
-              ? (previewQuery.data?.selectedOnlyModels ?? [])
-              : [],
-            selectedModel: "",
+            models:
+              previewProvider && (!refreshPiCatalog || previewCatalogIsVerified)
+                ? (pickerQuery.data?.models ?? [])
+                : [],
+            selectedOnlyModels:
+              previewProvider && (!refreshPiCatalog || previewCatalogIsVerified)
+                ? (pickerQuery.data?.selectedOnlyModels ?? [])
+                : [],
+            selectedModel: isPreviewing ? "" : modelValue,
             preferredReasoningLevel: reasoningValue,
             provider: previewProvider,
             catalogIsVerified: previewCatalogIsVerified,
@@ -423,11 +440,14 @@ export function ModelReasoningPicker({
     [
       formatModelLabel,
       isPreviewing,
+      modelValue,
       previewCatalogIsVerified,
       previewProvider,
-      previewQuery.data?.models,
-      previewQuery.data?.selectedOnlyModels,
+      pickerQuery.data?.models,
+      pickerQuery.data?.selectedOnlyModels,
       reasoningValue,
+      refreshPiCatalog,
+      usePickerCatalog,
     ],
   );
   const previewModelOptions = previewSelection?.modelOptions ?? modelOptions;
@@ -443,11 +463,13 @@ export function ModelReasoningPicker({
     : isPreviewing
       ? ""
       : reasoningValue;
-  const activeModelLoadError = isPreviewing
-    ? (previewQuery.data?.modelLoadError ?? null)
+  const activeModelLoadError = usePickerCatalog
+    ? (pickerQuery.data?.modelLoadError ?? null)
     : (modelLoadError ?? null);
-  const activeModelIsLoading = isPreviewing
-    ? previewQuery.isLoading
+  const activeModelIsLoading = usePickerCatalog
+    ? refreshPiCatalog
+      ? pickerQuery.isFetching
+      : pickerQuery.isLoading
     : modelIsLoading;
   const activeProvider = providerOptions.find(
     (p) => p.value === activeProviderId,
@@ -455,8 +477,8 @@ export function ModelReasoningPicker({
   const activeProviderLabel = activeProvider?.label ?? activeProviderId;
   const activeModelLoadErrorMatches =
     activeModelLoadError?.providerId === activeProviderId;
-  const activeModelLoadFailed = isPreviewing
-    ? previewQuery.isError || activeModelLoadErrorMatches
+  const activeModelLoadFailed = usePickerCatalog
+    ? pickerQuery.isError || activeModelLoadErrorMatches
     : modelLoadFailed || activeModelLoadErrorMatches;
   const activeModelOptions = previewModelOptions;
   const activeMoreModelOptions = previewSelectionBlocked
@@ -786,9 +808,9 @@ export function ModelReasoningPicker({
     MODEL_CYCLE_COMMANDS,
     (index, { target }) => {
       if (!ownsCycleChord(target)) return false;
-      const options = (handoffMode ? activeModelOptions : modelOptions).filter(
-        (option) => option.disabled !== true,
-      );
+      const options = (
+        handoffMode || refreshPiCatalog ? activeModelOptions : modelOptions
+      ).filter((option) => option.disabled !== true);
       const value =
         handoffMode && isPreviewing
           ? (previewSelection?.selectedModel ?? "")

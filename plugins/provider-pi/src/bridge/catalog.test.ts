@@ -127,6 +127,59 @@ function modelIds(result: { models: { id: string }[] }): string[] {
 }
 
 describe("pi catalog freshness", () => {
+  it("filters a real Pi registry by HongLLM's current network discovery, not its startup models", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "bb-pi-hongllm-"));
+    tempDirs.push(workspace);
+    const extensionPath = join(workspace, "bb-extension.mjs");
+    const fixturePath = join(workspace, "native-fixture.mjs");
+    const statePath = join(workspace, "state.json");
+    const ai = import.meta.resolve("@earendil-works/pi-ai");
+    writeFileSync(extensionPath, BB_PI_EXTENSION_SOURCE);
+    writeFileSync(
+      fixturePath,
+      `
+      import { readFileSync } from "node:fs";
+      import { createProvider, envApiKeyAuth } from ${JSON.stringify(ai)};
+      export default function (pi) {
+        const makeModel = (id) => ({
+          id, name: id, provider: "llmhong", api: "openai-completions",
+          baseUrl: "https://llm.hktlabs.com/v1", reasoning: false, input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 8192, maxTokens: 2048,
+        });
+        pi.registerProvider(createProvider({
+          id: "llmhong", baseUrl: "https://llm.hktlabs.com/v1",
+          auth: { apiKey: envApiKeyAuth("Fixture", ["FAKE_HONGLLM_TOKEN"]) },
+          models: ["old", "new"].map(makeModel),
+          fetchModels: async () => JSON.parse(readFileSync(${JSON.stringify(statePath)})).map(makeModel),
+          api: { stream() { throw new Error("Unexpected inference"); } },
+        }));
+      }
+    `,
+    );
+    const cli = new URL("../../node_modules/.bin/pi", import.meta.url).pathname;
+    process.env[PI_BRIDGE_COMMAND_ENV] = cli;
+    process.env[PI_BRIDGE_ARGS_ENV] = JSON.stringify([
+      "--extension",
+      fixturePath,
+    ]);
+    delete process.env.PI_OFFLINE;
+    process.env.PI_CODING_AGENT_DIR = join(workspace, "agent");
+    const catalog = await getPiCatalog(workspace, extensionPath, {
+      FAKE_HONGLLM_TOKEN: "fixture",
+    });
+    const ids = async () =>
+      modelIds(await catalog.listModels(() => {})).filter((id) =>
+        id.startsWith("llmhong/"),
+      );
+    writeFileSync(statePath, '["old"]');
+    expect(await ids()).toEqual(["llmhong/old"]);
+    writeFileSync(statePath, '["new"]');
+    expect(await ids()).toEqual(["llmhong/new"]);
+    writeFileSync(statePath, "[]");
+    expect(await ids()).toEqual([]);
+  }, 30_000);
+
   it("lists models after an earlier session's tool manifest is deleted", async () => {
     const paths = setUpFakeCatalog({});
     const toolsPath = join(paths.workspace, "previous-session-tools.json");
@@ -234,27 +287,20 @@ describe("pi catalog freshness", () => {
         JSON.stringify([FAKE_MODEL, ADDED_MODEL]),
       );
 
-      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-      try {
-        const listing = catalog.listModels();
-        if (failure === "hang") {
-          await expect
-            .poll(() => readLogLines(paths.refreshLogPath), { timeout: 15_000 })
-            .toHaveLength(1);
-          await vi.advanceTimersByTimeAsync(5_000);
-        }
-        expect(modelIds(await listing)).toEqual([
-          "fake-provider/fake-model",
-          "added-provider/added-model",
-        ]);
-        const spawned = spawnedProcessIds(paths.processLogPath);
-        expect(spawned).toHaveLength(2);
-        expect(children.running().map((child) => child.pid)).toEqual([
-          spawned[1],
-        ]);
-      } finally {
-        vi.useRealTimers();
-      }
+      expect(modelIds(await catalog.listModels())).toEqual([
+        "fake-provider/fake-model",
+        "added-provider/added-model",
+      ]);
+      expect(readLogLines(paths.refreshLogPath)).toHaveLength(1);
+      const spawned = spawnedProcessIds(paths.processLogPath);
+      expect(spawned).toHaveLength(2);
+      const catalogChildren = children.children.filter((child) =>
+        child.spawnargs.includes(paths.extensionPath),
+      );
+      expect(catalogChildren.map((child) => child.pid)).toEqual(spawned);
+      expect(
+        children.running().filter((child) => catalogChildren.includes(child)),
+      ).toEqual([catalogChildren[1]]);
     },
     60_000,
   );

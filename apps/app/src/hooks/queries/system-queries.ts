@@ -568,6 +568,31 @@ export function useProviderPreviewExecutionOptions(
   return useQuery(executionOptionsWithPlaceholderQueryOptions(args, false));
 }
 
+export function useFreshPickerModelCatalog({
+  enabled,
+  environmentId,
+  hostId,
+  providerId,
+}: UseSystemExecutionOptionsArgs) {
+  return useQuery({
+    queryKey: ["fresh-picker-model-catalog", environmentId, hostId, providerId],
+    queryFn: ({ signal }) =>
+      sdk.system.executionOptions({
+        environmentId,
+        hostId,
+        providerId,
+        refreshModels: true,
+        signal,
+      }),
+    enabled,
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
+  });
+}
+
 export function systemConfigQueryOptions() {
   return queryOptions({
     queryKey: systemConfigQueryKey(),
