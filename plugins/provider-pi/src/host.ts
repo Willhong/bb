@@ -12,9 +12,8 @@ export { experimental_providerBridge } from "./bridge/bridge.js";
 export default experimental_defineHostEntry({
   contract: piHostContract,
   handlers: {
-    "pi.assistant.ready": async (_input, context) => ({
-      ready: await piAssistantReady(context.signal),
-    }),
+    "pi.assistant.ready": (_input, context) =>
+      piAssistantReady(context.signal),
     "pi.assistant.complete": (input, context) =>
       completePiAssistant(input, context.signal),
     resolveNativeRoots: () =>

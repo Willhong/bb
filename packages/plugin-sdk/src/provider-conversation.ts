@@ -20,7 +20,10 @@ export function experimental_registerProviderConversation(
   id: string,
   options: {
     eligible?(model: string): boolean;
-    ready(hostId: string, signal: AbortSignal): Promise<boolean>;
+    ready(
+      hostId: string,
+      signal: AbortSignal,
+    ): Promise<boolean | { ready: boolean; models?: string[] }>;
     complete(
       input: ExperimentalProviderConversationInput,
       hostId: string,
@@ -40,7 +43,9 @@ export function experimental_registerProviderConversation(
   bb.rpc.register(experimental_providerConversationContract, {
     async experimental_assistantReady(_input, context) {
       const { hostId, signal } = await primary(context);
-      return { ready: !!hostId && (await options.ready(hostId, signal)) };
+      if (!hostId) return { ready: false };
+      const status = await options.ready(hostId, signal);
+      return typeof status === "boolean" ? { ready: status } : status;
     },
     async experimental_assistantComplete(request, context) {
       const { hostId, signal } = await primary(context);

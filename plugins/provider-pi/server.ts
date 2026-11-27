@@ -5,19 +5,18 @@ import {
 import { piProviderDeclaration } from "./src/declaration.js";
 
 import { piHostContract } from "./src/assistant-host-contract.js";
+import { isPiAssistantSelection } from "./src/assistant-inference-policy.js";
 
 export default function plugin(bb: BbPluginApi): void {
   const host = bb.hosts.experimental_client({ contract: piHostContract });
   experimental_registerProviderConversation(bb, "pi", {
-    eligible: (model) => model.startsWith("llmhong/"),
-    async ready(hostId, signal) {
-      return (
-        await host.call("pi.assistant.ready", null, {
-          hostId,
-          signal,
-          timeoutMs: 5000,
-        })
-      ).ready;
+    eligible: isPiAssistantSelection,
+    ready(hostId, signal) {
+      return host.call("pi.assistant.ready", null, {
+        hostId,
+        signal,
+        timeoutMs: 5000,
+      });
     },
     complete: (request, hostId, signal) =>
       host.call("pi.assistant.complete", request, {

@@ -5,8 +5,31 @@ import type { ExperimentalProviderConversationInput } from "@get-bb/plugin-sdk";
 import { experimental_resolveExecutablePath } from "@get-bb/plugin-sdk/provider-bridge";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { resolvePiLaunch } from "./bridge/rpc-child.js";
+import {
+  isPiAssistantModel,
+  parsePiAssistantSelection,
+  piAssistantPayloadMatches,
+  piAssistantStreamModel,
+} from "./assistant-inference-policy.js";
 
-async function openRuntime(signal: AbortSignal): Promise<ModelRuntime> {
+type RuntimeOptions = NonNullable<Parameters<ModelRuntime["completeSimple"]>[2]>;
+
+interface AssistantModelRuntime extends Omit<ModelRuntime, "completeSimple"> {
+  getPhysicalModel(
+    provider: string,
+    id: string,
+  ): ReturnType<ModelRuntime["getModel"]>;
+  completeSimple(
+    model: Parameters<ModelRuntime["completeSimple"]>[0],
+    context: Parameters<ModelRuntime["completeSimple"]>[1],
+    options: RuntimeOptions & {
+      onProviderStreamEvent(event: unknown): void;
+      maxRetries: number;
+    },
+  ): ReturnType<ModelRuntime["completeSimple"]>;
+}
+
+async function openRuntime(signal: AbortSignal): Promise<AssistantModelRuntime> {
   const launch = resolvePiLaunch(process.env);
   if (launch.args.length)
     throw new Error(
@@ -37,25 +60,34 @@ async function openRuntime(signal: AbortSignal): Promise<ModelRuntime> {
   const pi = (await import(
     pathToFileURL(join(dir, entry)).href
   )) as typeof import("@earendil-works/pi-coding-agent");
-  return pi.ModelRuntime.create({
+  const runtime = await pi.ModelRuntime.create({
     allowModelNetwork: false,
     refreshOnCreate: false,
     signal,
   });
+  if (!("getPhysicalModel" in runtime) || typeof runtime.getPhysicalModel !== "function") {
+    throw new Error("The installed Pi runtime cannot verify a physical model.");
+  }
+  return runtime as AssistantModelRuntime;
 }
 
 export async function piAssistantReady(signal: AbortSignal) {
   try {
     const runtime = await openRuntime(signal);
-    return runtime
-      .getModels("llmhong")
-      .some(
-        (model) =>
-          model.api === "openai-completions" &&
-          new URL(model.baseUrl).origin === "https://llm.hktlabs.com",
-      );
+    const providers = ["llmhong", "llmproxy"] as const;
+    await runtime.refresh({ allowNetwork: false, providers: [...providers], signal });
+    signal.throwIfAborted();
+    const models = providers.flatMap((provider) =>
+      runtime.hasConfiguredAuth(provider)
+        ? runtime
+            .getModels(provider)
+            .filter((model) => isPiAssistantModel(model, provider))
+            .map((model) => `${provider}/${model.id}`)
+        : [],
+    );
+    return { ready: models.length > 0, models };
   } catch {
-    return false;
+    return { ready: false, models: [] };
   }
 }
 
@@ -63,25 +95,28 @@ export async function completePiAssistant(
   input: ExperimentalProviderConversationInput,
   signal: AbortSignal,
 ) {
-  if (!input.model.startsWith("llmhong/") || input.reasoningLevel === "none") {
+  const selection = parsePiAssistantSelection(input.model);
+  if (!selection || input.reasoningLevel === "none") {
     throw new Error(
       "The selected Pi route or effort is not available for assistant inference.",
     );
   }
   const runtime = await openRuntime(signal);
-  const id = input.model.slice("llmhong/".length);
-  const model = runtime.getModel("llmhong", id);
-  if (
-    !model ||
-    model.api !== "openai-completions" ||
-    new URL(model.baseUrl).origin !== "https://llm.hktlabs.com"
-  ) {
+  const model = runtime.getPhysicalModel(selection.provider, selection.id);
+  if (!model || !isPiAssistantModel(model, selection.provider)) {
     throw new Error(
-      "The selected Pi model no longer belongs to the configured self-hosted route.",
+      "The selected Pi model is missing from the text-only model runtime.",
     );
+  }
+  const requestedEffort = input.reasoningLevel;
+  const effort = model.thinkingLevelMap?.[requestedEffort] ?? requestedEffort;
+  if (model.thinkingLevelMap?.[requestedEffort] === null) {
+    throw new Error("Pi does not support this reasoning effort for the model.");
   }
 
   let checkedPayload = false;
+  let sawSelectedModel = false;
+  let sawOtherModel = false;
   const answer = await runtime.completeSimple(
     model,
     {
@@ -92,30 +127,30 @@ export async function completePiAssistant(
     {
       signal,
       maxTokens: 512,
-      reasoning: input.reasoningLevel,
+      maxRetries: 0,
+      reasoning: requestedEffort,
       onPayload(payload) {
-        if (
-          !payload ||
-          typeof payload !== "object" ||
-          !("model" in payload) ||
-          payload.model !== model.id ||
-          !("reasoning_effort" in payload) ||
-          payload.reasoning_effort !== input.reasoningLevel ||
-          "tools" in payload
-        ) {
+        if (!piAssistantPayloadMatches(payload, model, effort)) {
           throw new Error(
             "Pi could not transmit the selected model and effort without tools.",
           );
         }
         checkedPayload = true;
       },
+      onProviderStreamEvent(event) {
+        const responseModel = piAssistantStreamModel(event);
+        if (responseModel === model.id) sawSelectedModel = true;
+        else if (responseModel !== undefined) sawOtherModel = true;
+      },
     },
   );
   if (
     !checkedPayload ||
+    !sawSelectedModel ||
+    sawOtherModel ||
     answer.stopReason !== "stop" ||
     answer.provider !== model.provider ||
-    answer.responseModel !== model.id ||
+    (answer.responseModel !== undefined && answer.responseModel !== model.id) ||
     answer.content.some((item) => item.type === "toolCall")
   ) {
     throw new Error(

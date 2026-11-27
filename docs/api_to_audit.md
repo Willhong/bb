@@ -6287,7 +6287,9 @@ voice path on web and mobile.
 Provider-owned plugins can expose one text-only foreground request on BB's
 primary machine. The server verifies the calling personal-assistant plugin, the
 current provider model and reasoning catalog, and the exact returned model and
-effort. Provider host workers own their existing authentication and transports.
+effort. Provider host workers own their existing authentication and transports. Readiness
+can report the exact model IDs exposed by the provider's text-only runtime,
+which the picker intersects with BB's catalog.
 There is no thread, agent session, workspace or provider tool set. The app action
 sends only the current message after the user selects a provider and submits.
 No request may fall back to another model, account or fee-bearing route.

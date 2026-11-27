@@ -16,7 +16,10 @@ export const experimental_providerConversationContract = defineRpcContract({
   experimental_assistantComplete: { input, output },
   experimental_assistantReady: {
     input: z.null(),
-    output: z.object({ ready: z.boolean() }).strict(),
+    output: z.object({
+      ready: z.boolean(),
+      models: z.array(z.string().min(1).max(160)).max(1000).optional(),
+    }).strict(),
   },
 });
 
