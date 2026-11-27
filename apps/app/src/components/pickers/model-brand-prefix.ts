@@ -1,9 +1,30 @@
+import type { ProviderInfo } from "@bb/domain";
+import { getProviderIconInfo } from "@/lib/provider-icon";
 import type { PickerOption } from "./OptionPicker";
 
 export interface ProviderPickerOption extends PickerOption<string> {
   brandPrefix?: string;
   planModeCopy?: string;
   installUrl?: string;
+}
+
+export function toProviderPickerOption(
+  provider: ProviderInfo,
+): ProviderPickerOption {
+  return {
+    value: provider.id,
+    label: provider.displayName,
+    icon: getProviderIconInfo("agent", provider.id, provider)?.icon,
+    ...(provider.strings?.brandPrefix === undefined
+      ? {}
+      : { brandPrefix: provider.strings.brandPrefix }),
+    ...(provider.strings?.planModeCopy === undefined
+      ? {}
+      : { planModeCopy: provider.strings.planModeCopy }),
+    ...(provider.strings?.installUrl === undefined
+      ? {}
+      : { installUrl: provider.strings.installUrl }),
+  };
 }
 
 export function stripModelBrandPrefix(

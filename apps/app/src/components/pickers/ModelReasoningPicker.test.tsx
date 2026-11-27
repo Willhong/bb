@@ -303,6 +303,34 @@ afterEach(() => {
 
 await ModelReasoningMenu.preload();
 
+it("exposes unavailable provider groups with a reason and does not preview them", () => {
+  vi.mocked(sdk.system.executionOptions).mockClear();
+  const onSelectedProviderChange = vi.fn();
+  renderPicker({
+    onSelectedProviderChange,
+    pickerProviderOptions: [
+      providerOptions[0],
+      {
+        ...providerOptions[1],
+        disabled: true,
+        disabledReason: "This conversation uses its local backend",
+      },
+    ],
+  });
+  fireEvent.click(
+    screen.getByRole("button", { name: /Provider, model and reasoning/ }),
+  );
+  const blocked = screen.getByRole("button", {
+    name: /Claude Code.*local backend/,
+  });
+  expect(blocked.getAttribute("aria-disabled")).toBe("true");
+  fireEvent.pointerEnter(blocked);
+  fireEvent.focus(blocked);
+  fireEvent.click(blocked);
+  expect(onSelectedProviderChange).not.toHaveBeenCalled();
+  expect(sdk.system.executionOptions).not.toHaveBeenCalled();
+});
+
 describe("ModelReasoningPicker", () => {
   it.each([
     ["ArrowRight", "medium", "high"],

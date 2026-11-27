@@ -78,6 +78,7 @@ export interface ExecutionControlsProps {
   reasoning: ExecutionReasoningConfig;
   handoff?: ModelReasoningPickerHandoff;
   disabled?: boolean;
+  catalogNotice?: string;
 }
 
 export const ExecutionControls = memo(function ExecutionControls({
@@ -89,6 +90,7 @@ export const ExecutionControls = memo(function ExecutionControls({
   reasoning,
   handoff,
   disabled,
+  catalogNotice,
 }: ExecutionControlsProps) {
   const handleServiceTierChange = serviceTier?.onChange ?? (() => {});
   const selectedProviderId = provider.selectedId ?? "";
@@ -140,6 +142,7 @@ export const ExecutionControls = memo(function ExecutionControls({
           onAgentOptionChange={agentOptions?.onChange}
           muted
           disabled={disabled}
+          catalogNotice={catalogNotice}
           handoff={handoff}
         />
       ) : null}

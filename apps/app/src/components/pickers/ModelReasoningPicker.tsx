@@ -211,6 +211,7 @@ interface ModelReasoningPickerProps {
   modal?: boolean;
   align?: "start" | "center" | "end";
   disabled?: boolean;
+  catalogNotice?: string;
   handoff?: ModelReasoningPickerHandoff;
 }
 
@@ -246,6 +247,7 @@ export function ModelReasoningPicker({
   modal = false,
   align = "start",
   disabled,
+  catalogNotice,
   handoff,
 }: ModelReasoningPickerProps) {
   const isCompactViewport = useIsCompactViewport();
@@ -312,13 +314,21 @@ export function ModelReasoningPicker({
     modelLoadError?.providerId === selectedProviderId;
   const selectedModelLoadFailed =
     modelLoadFailed || selectedModelLoadErrorMatches;
+  const selectableProviders = providerOptions.filter(
+    (option) => !option.disabled,
+  );
   const canSwitchProviders =
     hasMultipleProviders &&
     onSelectedProviderChange !== undefined &&
     providerOptions.length > 1;
   const queryClient = useQueryClient();
   const prefetchProviderTab = (providerId: string) => {
-    if (providerId === selectedProviderId) {
+    if (
+      providerId === selectedProviderId ||
+      providerOptions.some(
+        (option) => option.value === providerId && option.disabled,
+      )
+    ) {
       return;
     }
     prefetchSystemExecutionOptions(queryClient, {
@@ -454,7 +464,9 @@ export function ModelReasoningPicker({
   const isShowingModelError =
     !activeModelIsLoading && !hasActiveModelOptions && activeModelLoadFailed;
   const showProviderTabs =
-    (handoffMode || canSwitchProviders) &&
+    (handoffMode ||
+      canSwitchProviders ||
+      providerOptions.some((option) => option.disabled)) &&
     providerOptions.length > 1 &&
     (!isShowingModelError || activeModelErrorIsProviderSpecific);
 
@@ -628,6 +640,12 @@ export function ModelReasoningPicker({
 
   const handleHandoffProviderSelect = useCallback(
     (providerId: string) => {
+      if (
+        providerOptions.some(
+          (option) => option.value === providerId && option.disabled,
+        )
+      )
+        return;
       setHandoffMode(true);
       setPreviewProviderId(
         providerId === selectedProviderId ? null : providerId,
@@ -638,10 +656,16 @@ export function ModelReasoningPicker({
       setSearchQuery("");
       setActiveIndex(-1);
     },
-    [selectedProviderId],
+    [providerOptions, selectedProviderId],
   );
   const handleProviderSelect = useCallback(
     (providerId: string) => {
+      if (
+        providerOptions.some(
+          (option) => option.value === providerId && option.disabled,
+        )
+      )
+        return;
       if (
         open &&
         handoff !== undefined &&
@@ -663,6 +687,7 @@ export function ModelReasoningPicker({
       handleHandoffProviderSelect,
       onSelectedProviderChange,
       open,
+      providerOptions,
       selectedProviderId,
     ],
   );
@@ -784,8 +809,8 @@ export function ModelReasoningPicker({
       if (handoffMode) {
         const next =
           index === 0
-            ? nextCycleValue(providerOptions, activeProviderId)
-            : previousCycleValue(providerOptions, activeProviderId);
+            ? nextCycleValue(selectableProviders, activeProviderId)
+            : previousCycleValue(selectableProviders, activeProviderId);
         if (next !== null) {
           handleHandoffProviderSelect(next);
         }
@@ -794,8 +819,8 @@ export function ModelReasoningPicker({
       if (canSwitchProviders && onSelectedProviderChange !== undefined) {
         const next =
           index === 0
-            ? nextCycleValue(providerOptions, selectedProviderId)
-            : previousCycleValue(providerOptions, selectedProviderId);
+            ? nextCycleValue(selectableProviders, selectedProviderId)
+            : previousCycleValue(selectableProviders, selectedProviderId);
         if (next !== null) {
           handleProviderSelect(next);
         }
@@ -1098,16 +1123,22 @@ export function ModelReasoningPicker({
                 <button
                   key={provider.value}
                   type="button"
+                  aria-disabled={provider.disabled || undefined}
                   title={
-                    isHandoffSource
-                      ? `${provider.label} (current thread)`
-                      : provider.label
+                    provider.disabledReason
+                      ? `${provider.label} · ${provider.disabledReason}`
+                      : isHandoffSource
+                        ? `${provider.label} (current thread)`
+                        : provider.label
                   }
                   onMouseDown={(event) => event.preventDefault()}
                   onPointerEnter={() => prefetchProviderTab(provider.value)}
                   onFocus={() => prefetchProviderTab(provider.value)}
                   onClick={() => {
-                    if (provider.value === activeProviderId) {
+                    if (
+                      provider.disabled ||
+                      provider.value === activeProviderId
+                    ) {
                       return;
                     }
                     handleProviderSelect(provider.value);
@@ -1116,6 +1147,7 @@ export function ModelReasoningPicker({
                     "flex items-center justify-center border-b-2 focus-visible:outline-none",
                     LIST_HOVER_TRANSITION,
                     COARSE_POINTER_PROVIDER_TAB_SIZE_CLASS,
+                    provider.disabled && "cursor-not-allowed opacity-50",
                     isActive
                       ? "border-foreground text-foreground"
                       : "border-transparent text-muted-foreground hover:text-foreground",
@@ -1133,6 +1165,11 @@ export function ModelReasoningPicker({
                       {provider.label.charAt(0)}
                     </span>
                   )}
+                  {provider.disabledReason ? (
+                    <span className="sr-only">
+                      {`${provider.label} · ${provider.disabledReason}`}
+                    </span>
+                  ) : null}
                 </button>
               );
             })}
@@ -1194,6 +1231,11 @@ export function ModelReasoningPicker({
               : null
           }
         />
+        {catalogNotice ? (
+          <p className="shrink-0 border-t border-border px-3 py-2 text-xs text-muted-foreground">
+            {catalogNotice}
+          </p>
+        ) : null}
       </PopoverContent>
     </Popover>
   );
