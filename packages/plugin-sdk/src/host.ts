@@ -68,3 +68,5 @@ export type {
   VcsProcessOptions as ExperimentalVcsProcessOptions,
   VcsProcessPriority as ExperimentalVcsProcessPriority,
 } from "@bb/process-utils";
+
+export { experimental_providerConversationContract } from "./provider-conversation-contract.js";

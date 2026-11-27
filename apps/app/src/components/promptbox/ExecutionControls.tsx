@@ -29,6 +29,7 @@ interface ExecutionProviderConfig {
   selectedId?: string;
   onChange?: (value: string) => void;
   hasMultiple?: boolean;
+  controlledCatalog?: boolean;
 }
 
 interface ExecutionModelConfig {
@@ -117,6 +118,7 @@ export const ExecutionControls = memo(function ExecutionControls({
           providerRouting={providerRouting}
           selectedProviderId={selectedProviderId}
           onSelectedProviderChange={provider.onChange}
+          controlledProviderCatalog={provider.controlledCatalog}
           hasMultipleProviders={provider.hasMultiple ?? false}
           modelValue={model.active?.model ?? model.selected}
           modelOptions={model.options}

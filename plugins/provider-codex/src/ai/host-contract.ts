@@ -1,4 +1,5 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
+import { experimental_providerConversationContract } from "@get-bb/plugin-sdk/host";
 import { z } from "zod";
 
 export const codexAiFailureCodeSchema = z.enum([
@@ -55,6 +56,10 @@ export const codexAiStatusSchema = z.discriminatedUnion("ready", [
 export type CodexAiStatus = z.infer<typeof codexAiStatusSchema>;
 
 export const codexAiHostContract = defineRpcContract({
+  "codex.ai.assistant":
+    experimental_providerConversationContract.experimental_assistantComplete,
+  "codex.ai.assistantReady":
+    experimental_providerConversationContract.experimental_assistantReady,
   "codex.ai.complete": {
     input: codexAiCompleteInputSchema,
     output: textResultSchema,

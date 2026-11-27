@@ -275,6 +275,57 @@ describe("Codex ChatGPT client", () => {
     expect(requestBody.text).toBeUndefined();
   });
 
+  it("requires the exact assistant model and effort receipt on the subscription route", async () => {
+    const homeDir = await makeTempHome();
+    await writeCodexAuth({
+      homeDir,
+      accessToken: createAccessToken({
+        accountId: "account-123",
+        expSeconds: Math.floor(Date.now() / 1000) + 3600,
+      }),
+      refreshToken: "synthetic-refresh",
+    });
+    const fetchMock = setupFetchMock();
+    const selection = {
+      model: "gpt-6-luna",
+      reasoningLevel: "low" as const,
+      text: "Synthetic message",
+    };
+    const receipt = {
+      model: selection.model,
+      reasoning: { effort: selection.reasoningLevel },
+      output: [{ content: [{ type: "output_text", text: "Verified" }] }],
+    };
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([{ type: "response.completed", response: receipt }]),
+    );
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        {
+          type: "response.completed",
+          response: { ...receipt, model: "substituted" },
+        },
+      ]),
+    );
+    const invoke = () =>
+      completeCodexInference(
+        { model: selection.model, prompt: selection.text, timeoutMs: 5000 },
+        new AbortController().signal,
+        selection,
+      );
+    await expect(invoke()).resolves.toBe("Verified");
+    await expect(invoke()).rejects.toThrow(/did not confirm/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, init] = requiredFetchCall(fetchMock, 0);
+    const request = JSON.parse(textBodyFromInit(init));
+    expect(request).toMatchObject({
+      model: selection.model,
+      reasoning: { effort: "low" },
+      store: false,
+    });
+    expect(request.tools).toBeUndefined();
+  });
+
   it("runs plain-text inference with Codex API key auth from ~/.codex/auth.json", async () => {
     const homeDir = await makeTempHome();
     await writeCodexApiKeyAuth({

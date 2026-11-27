@@ -1,15 +1,22 @@
-import { homedir } from "node:os";
+import { piHostContract } from "./assistant-host-contract.js";
 import {
-  experimental_defineHostEntry,
-  experimental_nativeRootsHostContract,
-} from "@get-bb/plugin-sdk/host";
+  completePiAssistant,
+  piAssistantReady,
+} from "./assistant-inference.js";
+import { homedir } from "node:os";
+import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { resolvePiNativeRoots } from "./native-roots.js";
 
 export { experimental_providerBridge } from "./bridge/bridge.js";
 
 export default experimental_defineHostEntry({
-  contract: experimental_nativeRootsHostContract,
+  contract: piHostContract,
   handlers: {
+    "pi.assistant.ready": async (_input, context) => ({
+      ready: await piAssistantReady(context.signal),
+    }),
+    "pi.assistant.complete": (input, context) =>
+      completePiAssistant(input, context.signal),
     resolveNativeRoots: () =>
       resolvePiNativeRoots({ homeDir: homedir(), env: process.env }),
   },

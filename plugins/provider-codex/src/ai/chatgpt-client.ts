@@ -1,3 +1,4 @@
+import type { ExperimentalProviderConversationInput } from "@get-bb/plugin-sdk";
 import type { JsonValue } from "@get-bb/plugin-sdk";
 import type { JsonObject } from "@get-bb/plugin-sdk/provider-bridge";
 import { fetchChatGpt, isCloudflareChallenge } from "./chatgpt-fetch.js";
@@ -58,6 +59,7 @@ interface ReadResponseTextFromSseArgs {
   deadline: CodexRequestDeadline;
   maxBytes: number;
   maxEventChars: number;
+  selection?: ExperimentalProviderConversationInput;
 }
 
 interface ResponsesFetchArgs {
@@ -109,7 +111,7 @@ interface CodexResponsesRequest {
   model: string;
   instructions: string;
   reasoning: {
-    effort: "none";
+    effort: ExperimentalProviderConversationInput["reasoningLevel"];
   };
   store: boolean;
   stream: boolean;
@@ -635,6 +637,24 @@ async function readResponseTextFromSse(
               optionalString(event.type) === "response.completed" ||
               optionalString(event.type) === "response.done"
             ) {
+              if (args.selection) {
+                const receipt = event.response
+                  ? toJsonObject(event.response)
+                  : null;
+                const reasoning = receipt?.reasoning
+                  ? toJsonObject(receipt.reasoning)
+                  : null;
+                if (
+                  receipt?.model !== args.selection.model ||
+                  reasoning?.effort !== args.selection.reasoningLevel
+                ) {
+                  throw new AiServiceFailure(
+                    "invalid_response",
+                    "codex_response_invalid",
+                    "Codex did not confirm the selected model and effort.",
+                  );
+                }
+              }
               finalText = result.text || null;
               completed = true;
               break;
@@ -656,7 +676,7 @@ async function readResponseTextFromSse(
     throw error;
   }
 
-  const text = finalText ?? deltaText;
+  const text = args.selection ? finalText : (finalText ?? deltaText);
   if (!text) {
     throw new AiServiceFailure(
       "invalid_response",
@@ -768,10 +788,19 @@ async function fetchResponses(args: ResponsesFetchArgs): Promise<Response> {
 export async function completeCodexInference(
   command: InferenceCompleteCommand,
   signal: AbortSignal,
+  selection?: ExperimentalProviderConversationInput,
 ): Promise<string> {
   const deadline = createCodexRequestDeadline(command.timeoutMs, signal);
   const auth = await readCodexAuthCredentials(process.env);
+  if (selection && auth.type !== "chatgpt") {
+    throw new AiServiceFailure(
+      "auth_required",
+      "codex_auth_missing",
+      "Assistant inference requires the existing ChatGPT subscription route.",
+    );
+  }
   const request = buildCodexResponsesRequest(command);
+  if (selection) request.reasoning.effort = selection.reasoningLevel;
   const response = await fetchResponses({ auth, command, deadline, request });
 
   if (!response.ok) {
@@ -786,6 +815,7 @@ export async function completeCodexInference(
     deadline,
     maxBytes: CODEX_SSE_RESPONSE_MAX_BYTES,
     maxEventChars: CODEX_SSE_EVENT_MAX_CHARS,
+    selection,
   });
 }
 

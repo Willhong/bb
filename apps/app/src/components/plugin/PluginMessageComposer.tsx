@@ -41,6 +41,7 @@ export function PluginMessageComposer({
   placeholder,
   models,
   provider,
+  providerCatalog,
   catalogNotice,
   selection,
   onSelectionChange,
@@ -65,29 +66,33 @@ export function PluginMessageComposer({
   const [isSubmitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const providers = useSystemProviders({
-    enabled: provider !== undefined,
+    enabled: provider !== undefined || providerCatalog !== undefined,
   }).data;
   const providerOptions = useMemo(() => {
-    if (!provider) return [];
     const choices = (providers ?? []).map(toProviderPickerOption);
-    const registered = choices.find(({ value }) => value === provider.id);
-    const localOption = {
-      value: provider.id,
-      label: provider.label,
-      brandPrefix: provider.brandPrefix,
-      icon: registered?.icon ?? MessageProviderIcon,
-    };
-    const ordered = registered ? choices : [...choices, localOption];
-    return ordered.map((option) =>
-      option.value === provider.id
-        ? localOption
+    const options = choices.map((option) => {
+      const reason = providerCatalog?.availability[option.value];
+      return reason === null
+        ? option
         : {
             ...option,
             disabled: true,
-            disabledReason: "이 대화에서 사용할 수 없는 provider",
-          },
-    );
-  }, [provider, providers]);
+            disabledReason: reason ?? "이 대화에서 사용할 수 없는 provider",
+          };
+    });
+    if (provider) {
+      const index = choices.findIndex(({ value }) => value === provider.id);
+      const localOption = {
+        value: provider.id,
+        label: provider.label,
+        brandPrefix: provider.brandPrefix,
+        icon: choices[index]?.icon ?? MessageProviderIcon,
+      };
+      if (index < 0) options.push(localOption);
+      else options[index] = localOption;
+    }
+    return options;
+  }, [provider, providerCatalog, providers]);
   const selected = models.find(({ id }) => id === selection.model);
   const selectionError = !selected
     ? "Choose an available model."
@@ -177,7 +182,9 @@ export function PluginMessageComposer({
         executionControls={
           <ExecutionControls
             provider={{
-              selectedId: provider?.id,
+              selectedId: providerCatalog?.selectedProviderId ?? provider?.id,
+              onChange: providerCatalog?.onProviderChange,
+              controlledCatalog: providerCatalog !== undefined,
               options: providerOptions,
               hasMultiple: providerOptions.length > 1,
             }}
@@ -191,7 +198,9 @@ export function PluginMessageComposer({
               onChange: (model) => {
                 const next = models.find(({ id }) => id === model);
                 if (!next) return;
-                const effort = next.reasoningLevels?.[0]?.value;
+                const effort =
+                  next.defaultReasoningLevel ??
+                  next.reasoningLevels?.[0]?.value;
                 onSelectionChange({
                   model,
                   ...(effort ? { reasoningLevel: effort } : {}),

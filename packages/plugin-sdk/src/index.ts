@@ -47,3 +47,5 @@ export {
  * half of it. Experimental: see docs/api_to_audit.md.
  */
 export { sliceUtf16Head as experimental_sliceUtf16Head } from "@bb/text-utils";
+
+export * from "./provider-conversation.js";

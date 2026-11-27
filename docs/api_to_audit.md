@@ -6268,7 +6268,9 @@ Hosts BB's existing `ComposerBox`, execution picker, prompt draft storage and
 voice input on plugin pages. The plugin supplies a message backend's validated
 model/effort catalog and receives the selected model, effort and draft text on
 explicit submit. The optional provider identity uses the native provider row.
-Other BB providers are visible as unavailable without opening their catalogs.
+With `providerCatalog`, available providers can also be switched in that row.
+The caller supplies models for its selected provider; unlisted provider
+capabilities and the standard remote preview are unavailable.
 The component has no BB project, provider session, thread,
 tool instructions or attachment uploader. Transcripts always enter the draft
 through the standard BB microphone and transcription pipeline. The send helper
@@ -6278,3 +6280,18 @@ The editor and execution picker are the same entries used by BB's new-thread
 and follow-up composers. Stabilization requires verifying host-version
 compatibility, disabled rich inputs, draft restoration, and the insert-only
 voice path on web and mobile.
+
+
+## `experimental_providerConversationContract` and `experimental_registerProviderConversation`
+
+Provider-owned plugins can expose one text-only foreground request on BB's
+primary machine. The server verifies the calling personal-assistant plugin, the
+current provider model and reasoning catalog, and the exact returned model and
+effort. Provider host workers own their existing authentication and transports.
+There is no thread, agent session, workspace or provider tool set. The app action
+sends only the current message after the user selects a provider and submits.
+No request may fall back to another model, account or fee-bearing route.
+
+Before stabilization, verify per-provider response metadata, supported effort,
+transport cancellation, duplicate-dispatch behavior and managed launcher
+compatibility. Some registered providers expose only agent execution.

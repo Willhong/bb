@@ -1,5 +1,9 @@
 import { Buffer } from "node:buffer";
-import type { BbPluginApi, PluginAiServiceStatus } from "@get-bb/plugin-sdk";
+import {
+  experimental_registerProviderConversation,
+  type BbPluginApi,
+  type PluginAiServiceStatus,
+} from "@get-bb/plugin-sdk";
 import {
   codexAiHostContract,
   type CodexAiFailureCode,
@@ -20,6 +24,24 @@ const RETRY_WITH_NEXT_MODEL: ReadonlySet<CodexAiFailureCode> = new Set([
 
 export function registerCodexAiService(bb: BbPluginApi): void {
   const host = bb.hosts.experimental_client({ contract: codexAiHostContract });
+
+  experimental_registerProviderConversation(bb, "codex", {
+    async ready(hostId, signal) {
+      return (
+        await host.call("codex.ai.assistantReady", null, {
+          hostId,
+          signal,
+          timeoutMs: 5000,
+        })
+      ).ready;
+    },
+    complete: (request, hostId, signal) =>
+      host.call("codex.ai.assistant", request, {
+        hostId,
+        signal,
+        timeoutMs: 42_000,
+      }),
+  });
 
   async function primaryHostId(): Promise<string | null> {
     return (await bb.sdk.system.config()).primaryHostId;

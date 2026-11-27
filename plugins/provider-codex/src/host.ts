@@ -38,6 +38,21 @@ export default experimental_defineHostEntry({
   handlers: {
     resolveNativeRoots: (): Promise<ExperimentalNativeRootsResolveAnswer> =>
       resolveCodexNativeRoots({ homeDir: os.homedir(), env: process.env }),
+    "codex.ai.assistantReady": async () => ({
+      ready: await readCodexAuthCredentials(process.env).then(
+        (auth) => auth.type === "chatgpt",
+        () => false,
+      ),
+    }),
+    "codex.ai.assistant": async (input, context) => ({
+      model: input.model,
+      reasoningLevel: input.reasoningLevel,
+      text: await completeCodexInference(
+        { model: input.model, prompt: input.text, timeoutMs: 40_000 },
+        context.signal,
+        input,
+      ),
+    }),
     "codex.ai.complete": (input, context) =>
       textResult(completeCodexInference(input, context.signal)),
     "codex.ai.transcribe": (input, context) =>

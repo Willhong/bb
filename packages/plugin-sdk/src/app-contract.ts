@@ -5599,6 +5599,7 @@ export interface ExperimentalMessageComposerModel {
   id: string;
   label: string;
   reasoningLevels?: readonly { value: ReasoningLevel; label: string }[];
+  defaultReasoningLevel?: ReasoningLevel;
 }
 
 /** The message backend receives this exact selection; bb never starts a provider session. */
@@ -5614,6 +5615,13 @@ export interface ExperimentalMessageComposerProps {
   placeholder?: string;
   /** Identifies the plugin's backend in the native provider row. Other groups are read-only. */
   provider?: { id: string; label: string; brandPrefix?: string };
+  /** Uses the host provider row but leaves model loading and selection to the plugin.
+   * Omitted providers are displayed as unavailable. The caller must validate selection on submit. */
+  providerCatalog?: {
+    selectedProviderId: string;
+    availability: Readonly<Record<string, string | null>>;
+    onProviderChange: (providerId: string) => void;
+  };
   /** Explains unavailable provider groups or execution options in the picker. */
   catalogNotice?: string;
   models: readonly ExperimentalMessageComposerModel[];

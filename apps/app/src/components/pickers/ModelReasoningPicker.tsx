@@ -182,6 +182,7 @@ export function buildModelNavRows({
 
 interface ModelReasoningPickerProps {
   providerRouting?: SystemProvidersQuery;
+  controlledProviderCatalog?: boolean;
   providerOptions: readonly ProviderPickerOption[];
   selectedProviderId: string;
   onSelectedProviderChange?: (value: string) => void;
@@ -219,6 +220,7 @@ interface ModelReasoningPickerProps {
 export function ModelReasoningPicker({
   providerOptions,
   providerRouting,
+  controlledProviderCatalog,
   selectedProviderId,
   onSelectedProviderChange,
   onProviderPreviewResolved,
@@ -325,6 +327,7 @@ export function ModelReasoningPicker({
   const queryClient = useQueryClient();
   const prefetchProviderTab = (providerId: string) => {
     if (
+      controlledProviderCatalog ||
       providerId === selectedProviderId ||
       providerOptions.some(
         (option) => option.value === providerId && option.disabled,
@@ -677,7 +680,9 @@ export function ModelReasoningPicker({
       }
       onSelectedProviderChange?.(providerId);
       const nextPreviewProviderId =
-        open && providerId !== selectedProviderId ? providerId : null;
+        open && !controlledProviderCatalog && providerId !== selectedProviderId
+          ? providerId
+          : null;
       setPreviewProviderId(nextPreviewProviderId);
       setSearchQuery("");
       setActiveIndex(-1);
@@ -686,6 +691,7 @@ export function ModelReasoningPicker({
       handoff,
       handoffMode,
       handleHandoffProviderSelect,
+      controlledProviderCatalog,
       onSelectedProviderChange,
       open,
       providerOptions,
