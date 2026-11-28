@@ -205,11 +205,13 @@ export function PluginMarkdown({
 }: MarkdownProps) {
   if (experimental_chatMessage !== undefined) {
     return (
-      <PluginConversationMessage
-        text={props.content}
-        role={experimental_chatMessage.role}
-        timestamp={experimental_chatMessage.timestamp}
-      />
+      <div className={props.className}>
+        <PluginConversationMessage
+          text={props.content}
+          role={experimental_chatMessage.role}
+          timestamp={experimental_chatMessage.timestamp}
+        />
+      </div>
     );
   }
   const message =
