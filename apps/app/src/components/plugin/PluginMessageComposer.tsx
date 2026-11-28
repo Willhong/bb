@@ -43,6 +43,7 @@ export function PluginMessageComposer({
   provider,
   providerCatalog,
   catalogNotice,
+  experimental_catalogFooter,
   selection,
   onSelectionChange,
   disabledReason,
@@ -189,6 +190,7 @@ export function PluginMessageComposer({
               hasMultiple: providerOptions.length > 1,
             }}
             catalogNotice={catalogNotice}
+            catalogFooter={experimental_catalogFooter}
             model={{
               selected: selection.model,
               options: models.map(({ id, label }) => ({ value: id, label })),

@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type KeyboardEventHandler,
+  type ReactNode,
 } from "react";
 import type {
   SystemExecutionOptionsModelLoadError,
@@ -215,6 +216,7 @@ interface ModelReasoningPickerProps {
   align?: "start" | "center" | "end";
   disabled?: boolean;
   catalogNotice?: string;
+  catalogFooter?: ReactNode;
   handoff?: ModelReasoningPickerHandoff;
 }
 
@@ -252,6 +254,7 @@ export function ModelReasoningPicker({
   align = "start",
   disabled,
   catalogNotice,
+  catalogFooter,
   handoff,
 }: ModelReasoningPickerProps) {
   const isCompactViewport = useIsCompactViewport();
@@ -1261,6 +1264,11 @@ export function ModelReasoningPicker({
               : null
           }
         />
+        {catalogFooter ? (
+          <div className="max-h-48 shrink-0 overflow-y-auto border-t border-border px-3 py-2">
+            {catalogFooter}
+          </div>
+        ) : null}
         {catalogNotice ? (
           <p className="shrink-0 border-t border-border px-3 py-2 text-xs text-muted-foreground">
             {catalogNotice}

@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import type {
   PermissionMode,
   ProviderOptionDescriptor,
@@ -80,6 +80,7 @@ export interface ExecutionControlsProps {
   handoff?: ModelReasoningPickerHandoff;
   disabled?: boolean;
   catalogNotice?: string;
+  catalogFooter?: ReactNode;
 }
 
 export const ExecutionControls = memo(function ExecutionControls({
@@ -92,6 +93,7 @@ export const ExecutionControls = memo(function ExecutionControls({
   handoff,
   disabled,
   catalogNotice,
+  catalogFooter,
 }: ExecutionControlsProps) {
   const handleServiceTierChange = serviceTier?.onChange ?? (() => {});
   const selectedProviderId = provider.selectedId ?? "";
@@ -145,6 +147,7 @@ export const ExecutionControls = memo(function ExecutionControls({
           muted
           disabled={disabled}
           catalogNotice={catalogNotice}
+          catalogFooter={catalogFooter}
           handoff={handoff}
         />
       ) : null}

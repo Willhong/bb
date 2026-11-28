@@ -6305,3 +6305,11 @@ compatibility. Some registered providers expose only agent execution.
 - **Core callers:** The regular timeline's `ConversationRowContent` and this component share `ConversationMessageContent`, `MessageActionBar`, Markdown, and long-message expansion. The existing message and streaming contract tests remain applicable.
 - **Plugin callers:** Personal Assistant keeps its existing conversation, read permissions, memory, and deferred jobs while replacing custom bubbles with these host-owned rows.
 - **Stabilization:** Verify normal and long messages, Markdown, copy, mobile actions, and an embedded instance without a thread context; verify no send/read/mutation effects and no fabricated message timestamp or thread identity.
+
+
+## `ExperimentalMessageComposerProps.experimental_catalogFooter`
+
+- **Behavior:** Plugin-owned information or refresh actions render inside the shared native model picker instead of below the composer. This changes no selection, permissions or submit behavior. The menu keeps its native search and model/effort controls; the footer scrolls within a bounded area.
+- **Core callers:** `ExecutionControls` passes `catalogFooter` to the same `ModelReasoningPicker` used by BB thread composers. `PluginMessageComposer` maps this experimental display slot into that shared path.
+- **Plugin callers:** Personal Assistant moves destination information, unavailable-model details and its refresh action into this native menu while retaining its existing draft and send adapters.
+- **Stabilization:** Confirm the footer is absent while the menu is closed, remains usable on mobile, and its controls do not select a model or submit the draft.

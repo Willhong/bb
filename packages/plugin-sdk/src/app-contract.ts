@@ -5624,6 +5624,8 @@ export interface ExperimentalMessageComposerProps {
   };
   /** Explains unavailable provider groups or execution options in the picker. */
   catalogNotice?: string;
+  /** Extra information or refresh controls inside the native model menu, never under the editor. */
+  experimental_catalogFooter?: ReactNode;
   models: readonly ExperimentalMessageComposerModel[];
   selection: ExperimentalMessageComposerSelection;
   onSelectionChange: (value: ExperimentalMessageComposerSelection) => void;

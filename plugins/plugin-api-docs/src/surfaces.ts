@@ -1942,6 +1942,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "NewThreadRequest.pluginSubmission",
           "experimental_MessageComposer",
           "ExperimentalMessageComposerProps",
+          "ExperimentalMessageComposerProps.experimental_catalogFooter",
           "ExperimentalMessageComposerSelection",
           "ExperimentalMessageComposerModel",
           "experimental_VoiceInputTextarea",
