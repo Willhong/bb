@@ -1,3 +1,10 @@
+import { claudeAssistantHostContract } from "./ai/assistant-contract.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import {
+  claudeAssistantReady,
+  completeClaudeAssistant,
+} from "./ai/assistant.js";
 import os from "node:os";
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import {
@@ -19,6 +26,7 @@ export { experimental_providerBridge } from "./bridge/bridge.js";
 
 const claudeCodeHostContract = defineRpcContract({
   ...claudeAiHostContract,
+  ...claudeAssistantHostContract,
   ...experimental_nativeRootsHostContract,
 });
 
@@ -33,6 +41,17 @@ async function textResult(work: Promise<string>): Promise<ClaudeAiTextResult> {
 export default experimental_defineHostEntry({
   contract: claudeCodeHostContract,
   handlers: {
+    "assistant.ready": () => claudeAssistantReady(),
+    "assistant.complete": async (input, context) => {
+      const cwd = await mkdtemp(
+        join(context.experimental_paths.tempDir, "assistant-"),
+      );
+      try {
+        return await completeClaudeAssistant(input, cwd, context.signal);
+      } finally {
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
     resolveNativeRoots: (input) =>
       resolveClaudeNativeRoots({
         cwd: input.cwd,

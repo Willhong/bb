@@ -23,3 +23,5 @@ export type {
 } from "./wire.js";
 
 export type { AgentModelCatalog } from "./bridge/model-catalog.js";
+
+export { completeAcpText, type AcpTextRequest } from "./assistant-text.js";

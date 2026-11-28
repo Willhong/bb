@@ -1,3 +1,4 @@
+import { experimental_registerProviderText } from "@get-bb/plugin-sdk/provider-conversation";
 import { registerUsageSource } from "./src/usage-source.js";
 import type {
   BbPluginApi,
@@ -103,6 +104,30 @@ export default async function acpProvidersPlugin(
       ...configuredAgents,
     ];
   }
+
+  experimental_registerProviderText(bb, {
+    owns: (id) => desiredAgents().some((agent) => agent.id === id),
+    ready: async (providerId, hostId, signal) => {
+      const agent = desiredAgents().find(({ id }) => id === providerId);
+      return agent
+        ? host.call(
+            "assistant.ready",
+            { launch: agent.launch },
+            { hostId, signal, timeoutMs: 11000 },
+          )
+        : { ready: false };
+    },
+    complete: async (input, hostId, signal) => {
+      const agent = desiredAgents().find(({ id }) => id === input.providerId);
+      if (!agent)
+        throw new Error("The selected ACP provider is no longer registered.");
+      return host.call(
+        "assistant.complete",
+        { ...input, launch: agent.launch },
+        { hostId, signal, timeoutMs: 50000 },
+      );
+    },
+  });
 
   function register(declaration: PluginProviderDeclaration): void {
     try {

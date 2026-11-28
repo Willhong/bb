@@ -158,6 +158,12 @@
       "types": "./bundled-types/bb-plugin-sdk-process.d.ts",
       "import": "./dist/process.js",
       "default": "./dist/process.js"
+    },
+    "./provider-conversation": {
+      "source": "./src/provider-text.ts",
+      "types": "./bundled-types/bb-plugin-sdk-provider-conversation.d.ts",
+      "import": "./dist/provider-conversation.js",
+      "default": "./dist/provider-conversation.js"
     }
   },
   "types": "./bundled-types/bb-plugin-sdk.d.ts",

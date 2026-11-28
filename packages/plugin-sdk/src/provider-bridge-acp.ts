@@ -112,3 +112,6 @@ export type {
   AcpToolKind,
 } from "@bb/provider-bridge-acp";
 export type { AgentModelCatalog as AcpAgentModelCatalog } from "@bb/provider-bridge-acp";
+
+export { completeAcpText as experimental_completeAcpText } from "@bb/provider-bridge-acp";
+export type { AcpTextRequest } from "@bb/provider-bridge-acp";
