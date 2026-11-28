@@ -1,3 +1,4 @@
+import { openCodeTextLaunch } from "./opencode-text-launch.js";
 import { hermesTextLaunch } from "./hermes-text-launch.js";
 import { experimental_completeAcpText } from "@get-bb/plugin-sdk/provider-bridge/acp";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -32,16 +33,7 @@ export default experimental_defineHostEntry({
           input.providerId === "acp-hermes-agent"
             ? await hermesTextLaunch(launch, context.signal)
             : input.providerId === "acp-opencode"
-              ? {
-                  ...launch,
-                  env: {
-                    ...launch.env,
-                    OPENCODE_CONFIG_CONTENT: JSON.stringify({
-                      permission: { "*": "deny" },
-                      tools: { "*": false },
-                    }),
-                  },
-                }
+              ? openCodeTextLaunch(launch)
               : launch;
         const answer = await experimental_completeAcpText({
           ...input,
