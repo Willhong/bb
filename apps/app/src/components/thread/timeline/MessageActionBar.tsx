@@ -51,7 +51,7 @@ function PluginActionIcon({
 }
 
 interface MessageActionBarProps {
-  timestamp: number;
+  timestamp?: number;
   messageText: string;
   alignment: "start" | "end";
   mobileActionDisplay: "inline" | "overflow";
@@ -493,7 +493,9 @@ export function MessageActionBar({
                 className={MENU_CONTENT_WIDTH_CLASS}
               >
                 <MessageActionMenuItems actions={menuActions} />
-                <MessageTimestampFooter timestamp={timestamp} />
+                {timestamp === undefined ? null : (
+                  <MessageTimestampFooter timestamp={timestamp} />
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>

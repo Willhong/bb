@@ -51,6 +51,18 @@ export function ThreadTimelineNavigationProvider({
   );
 }
 
+export function WithoutThreadTimelineNavigation({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  return (
+    <ThreadTimelineNavigationContext.Provider value={null}>
+      {children}
+    </ThreadTimelineNavigationContext.Provider>
+  );
+}
+
 export function useThreadTimelineNavigation(): ThreadTimelineNavigation | null {
   return useContext(ThreadTimelineNavigationContext);
 }

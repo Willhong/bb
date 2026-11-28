@@ -6297,3 +6297,11 @@ No request may fall back to another model, account or fee-bearing route.
 Before stabilization, verify per-provider response metadata, supported effort,
 transport cancellation, duplicate-dispatch behavior and managed launcher
 compatibility. Some registered providers expose only agent execution.
+
+
+## `MarkdownProps.experimental_chatMessage`
+
+- **Behavior:** Display a plugin-owned user or assistant message through BB's existing `ConversationMessageContent`. Pass `experimental_chatMessage: { role, timestamp? }` to the existing `Markdown` component; its `content` supplies the message text. This mode ignores `experimental_message` and `experimental_document` and has no thread context. No thread is created, queried, marked read, or sent a prompt. The caller owns data, scrolling, and the composer. Copy and long-message expansion use native actions. Missing timestamps remain absent. Unbound messages clear inherited thread navigation and cannot invoke thread-bound directives, code-fence renderers or file routes.
+- **Core callers:** The regular timeline's `ConversationRowContent` and this component share `ConversationMessageContent`, `MessageActionBar`, Markdown, and long-message expansion. The existing message and streaming contract tests remain applicable.
+- **Plugin callers:** Personal Assistant keeps its existing conversation, read permissions, memory, and deferred jobs while replacing custom bubbles with these host-owned rows.
+- **Stabilization:** Verify normal and long messages, Markdown, copy, mobile actions, and an embedded instance without a thread context; verify no send/read/mutation effects and no fabricated message timestamp or thread identity.

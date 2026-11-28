@@ -89,7 +89,7 @@ interface ConversationMessageContentBaseProps {
   projectId?: string;
   resolveUserAttachmentImageSrc?: UserAttachmentImageSrcResolver;
   text: string;
-  timestamp: number;
+  timestamp?: number;
 }
 
 interface ConversationMessageContentUserProps extends ConversationMessageContentBaseProps {
@@ -111,10 +111,9 @@ interface ConversationMessageContentUserProps extends ConversationMessageContent
   turnRequest: TimelineUserConversationRow["turnRequest"];
 }
 
-type AssistantMessageRowIdentity = Pick<
-  TimelineRowBase,
-  "id" | "threadId" | "turnId"
->;
+type AssistantMessageRowIdentity = Pick<TimelineRowBase, "id" | "turnId"> & {
+  threadId?: string;
+};
 
 const COLLAPSED_MESSAGE_FADE_STYLE: CSSProperties = {
   maskImage:
@@ -164,7 +163,7 @@ interface UserConversationMessageProps {
   systemMessageKind: TimelineUserConversationRow["systemMessageKind"];
   systemMessageSubject: TimelineUserConversationRow["systemMessageSubject"];
   text: string;
-  timestamp: number;
+  timestamp?: number;
   threadId?: string;
   turnRequest: TimelineUserConversationRow["turnRequest"];
 }
@@ -184,7 +183,7 @@ interface AssistantConversationMessageProps extends AssistantMessageRowIdentity 
   mobileActionDisplay: "inline" | "overflow";
   streaming: boolean;
   text: string;
-  timestamp: number;
+  timestamp?: number;
 }
 
 interface CollapsibleMessageTextProps {
@@ -379,7 +378,7 @@ function UserConversationMessage({
               sourceIsPluginSideChat: false,
             }
           : null;
-  if (generatedSource !== null) {
+  if (generatedSource !== null && timestamp !== undefined) {
     const body =
       automationDue === null
         ? generatedConversationBodySlice({ initiator, text })
@@ -536,7 +535,10 @@ function AssistantConversationMessage({
     };
   }, [onOpenLocalFileLink, workspaceRootPath]);
   const slotMessage = useMemo(
-    () => ({ id, threadId, turnId, projectId: projectId ?? null }),
+    () =>
+      threadId === undefined
+        ? null
+        : { id, threadId, turnId, projectId: projectId ?? null },
     [id, threadId, turnId, projectId],
   );
   const messageDirectives = useMessageDirectives(

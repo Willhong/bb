@@ -16,6 +16,7 @@ import {
   CodeFenceRendererHost,
   CodeFenceRendererRegistryProvider,
   useCodeFenceRendererRegistry,
+  WithoutCodeFenceRenderers,
 } from "./markdown-code-fence-renderers.js";
 import {
   buildMessageDirectiveRegistry,
@@ -98,12 +99,13 @@ export function MessageSlotRegistriesProvider({
 }
 
 export function useMessageDirectives(
-  message: PluginMessageDirectiveMessage,
+  message: PluginMessageDirectiveMessage | null,
   openWorkspaceFile: MarkdownMessageDirectives["openWorkspaceFile"],
 ): MarkdownMessageDirectives | undefined {
   const registry = useMessageDirectiveRegistry();
   return useMemo(
     () =>
+      message === null ||
       registry === null ||
       (registry.directives.size === 0 && registry.unclaimed === "literal")
         ? undefined
@@ -118,10 +120,13 @@ export function MessageCodeFences({
   streaming,
 }: {
   children: ReactNode;
-  message: PluginMessageDirectiveMessage;
+  message: PluginMessageDirectiveMessage | null;
   streaming: boolean;
 }) {
   const registry = useCodeFenceRendererRegistry();
+  if (message === null) {
+    return <WithoutCodeFenceRenderers>{children}</WithoutCodeFenceRenderers>;
+  }
   if (registry === null) {
     return children;
   }

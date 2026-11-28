@@ -5766,6 +5766,17 @@ export interface NewThreadComposerProps {
  * capability, not a UI kit; renderer internals stay private.
  */
 export interface MarkdownProps {
+  /**
+   * Render this source as BB's complete user/assistant message row, with
+   * native copy and expansion. This display-only mode has no thread context:
+   * it ignores experimental_message/document, clears inherited file routing,
+   * and cannot run thread-bound directives or code-fence renderers.
+   */
+  experimental_chatMessage?: {
+    role: "user" | "assistant";
+    /** Omit when the source has no recorded timestamp. */
+    timestamp?: number;
+  };
   /** Markdown source, rendered exactly like a chat message body. */
   content: string;
   className?: string;

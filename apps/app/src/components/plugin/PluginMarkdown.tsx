@@ -1,3 +1,4 @@
+import { PluginConversationMessage } from "./PluginConversationMessage";
 import { useMemo } from "react";
 import type {
   MarkdownProps,
@@ -198,9 +199,19 @@ function PluginMessageMarkdown({
 }
 
 export function PluginMarkdown({
+  experimental_chatMessage,
   experimental_message,
   ...props
 }: MarkdownProps) {
+  if (experimental_chatMessage !== undefined) {
+    return (
+      <PluginConversationMessage
+        text={props.content}
+        role={experimental_chatMessage.role}
+        timestamp={experimental_chatMessage.timestamp}
+      />
+    );
+  }
   const message =
     experimental_message === undefined
       ? null
