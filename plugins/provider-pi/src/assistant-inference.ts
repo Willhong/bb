@@ -9,6 +9,7 @@ import {
   isPiAssistantModel,
   parsePiAssistantSelection,
   piAssistantPayloadMatches,
+  piAssistantStreamEffort,
   piAssistantStreamModel,
 } from "./assistant-inference-policy.js";
 
@@ -117,6 +118,7 @@ export async function completePiAssistant(
   let checkedPayload = false;
   let sawSelectedModel = false;
   let sawOtherModel = false;
+  let sawOtherEffort = false;
   const answer = await runtime.completeSimple(
     model,
     {
@@ -141,6 +143,8 @@ export async function completePiAssistant(
         const responseModel = piAssistantStreamModel(event);
         if (responseModel === model.id) sawSelectedModel = true;
         else if (responseModel !== undefined) sawOtherModel = true;
+        const responseEffort = piAssistantStreamEffort(event);
+        if (responseEffort !== undefined && responseEffort !== effort) sawOtherEffort = true;
       },
     },
   );
@@ -148,13 +152,14 @@ export async function completePiAssistant(
     !checkedPayload ||
     !sawSelectedModel ||
     sawOtherModel ||
+    sawOtherEffort ||
     answer.stopReason !== "stop" ||
     answer.provider !== model.provider ||
     (answer.responseModel !== undefined && answer.responseModel !== model.id) ||
     answer.content.some((item) => item.type === "toolCall")
   ) {
     throw new Error(
-      "Pi did not confirm the requested route and model in a completed text response.",
+      "Pi did not confirm the requested route, model and effort in a completed text response.",
     );
   }
   const text = answer.content

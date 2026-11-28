@@ -3,6 +3,7 @@ import {
   isPiAssistantModel,
   parsePiAssistantSelection,
   piAssistantPayloadMatches,
+  piAssistantStreamEffort,
   piAssistantStreamModel,
 } from "./assistant-inference-policy.js";
 
@@ -41,4 +42,15 @@ test("reads model identity from each wire protocol without relying on fallback-o
   expect(piAssistantStreamModel({ type: "response.completed", response: { model: "fallback" } })).toBe("fallback");
   expect(piAssistantStreamModel({ object: "chat.completion.chunk", model: "selected" })).toBe("selected");
   expect(piAssistantStreamModel({ type: "response.output_text.delta", delta: "selected" })).toBeUndefined();
+});
+
+test("reads echoed effort only from authoritative Responses lifecycle events", () => {
+  const response = { model: "selected", reasoning: { effort: "low" } };
+  expect(piAssistantStreamEffort({ type: "response.created", response })).toBe("low");
+  expect(piAssistantStreamEffort({
+    type: "response.completed",
+    response: { ...response, reasoning: { effort: "high" } },
+  })).toBe("high");
+  expect(piAssistantStreamEffort({ type: "response.output_text.delta", response })).toBeUndefined();
+  expect(piAssistantStreamEffort({ type: "response.completed", response: { model: "selected" } })).toBeUndefined();
 });

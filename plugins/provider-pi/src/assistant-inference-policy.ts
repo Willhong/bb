@@ -95,3 +95,10 @@ export function piAssistantStreamModel(value: unknown): string | undefined {
           : undefined;
   return typeof result === "string" && result.length > 0 ? result : undefined;
 }
+
+export function piAssistantStreamEffort(value: unknown): string | undefined {
+  const event = object(value);
+  if (event?.type !== "response.created" && event?.type !== "response.completed") return undefined;
+  const effort = object(object(event.response)?.reasoning)?.effort;
+  return typeof effort === "string" && effort.length > 0 ? effort : undefined;
+}
